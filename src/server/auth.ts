@@ -1,0 +1,18 @@
+import type { Request, Response, NextFunction } from 'express';
+import type { Db } from './db.js';
+import type { Actor } from '../shared/types.js';
+import { DomainError } from '../shared/types.js';
+import { hashOpaque, randomToken, verifyPassword } from './security.js';
+import { audit } from './audit.js';
+
+// eslint-disable-next-line @typescript-eslint/no-namespace
+declare global { namespace Express { interface Request { actor: Actor; sessionId?: string; rawBody?: Buffer } } }
+export function authMiddleware(db: Db) { return (req:Request,_res:Response,next:NextFunction)=>{ try {
+  const bearer=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  if(bearer){const token=db.get<any>('SELECT a.id,a.name,a.status,t.revoked_at FROM agent_tokens t JOIN agents a ON a.id=t.agent_id WHERE t.token_hash=?',hashOpaque(bearer));if(token&&token.status==='active'&&!token.revoked_at){req.actor={type:'agent',id:token.id,name:token.name};return next()}}
+  const cookie=req.cookies?.pb_session as string|undefined;
+  if(cookie){const session=db.get<any>('SELECT s.*,u.display_name,u.status FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?',hashOpaque(cookie));if(session&&!session.revoked_at&&session.expires_at>db.now()&&session.status==='active'){req.actor={type:'human',id:session.user_id,name:session.display_name};req.sessionId=session.id;return next()}}
+  req.actor={type:'system',id:null};next();
+ } catch(e){next(e)} } }
+export function csrfMiddleware(db: Db){return(req:Request,_res:Response,next:NextFunction)=>{try{if(!['GET','HEAD','OPTIONS'].includes(req.method)&&req.actor.type==='human'){const origin=req.headers.origin;if(origin&&origin!==new URL(process.env.PROJECTBOARD_BASE_URL??'http://localhost:3333').origin)throw new DomainError(403,'ORIGIN_REJECTED','Request origin rejected');const session=db.get<any>('SELECT csrf_hash FROM sessions WHERE id=?',req.sessionId);if(!session||hashOpaque(String(req.headers['x-csrf-token']??''))!==session.csrf_hash)throw new DomainError(403,'CSRF_REJECTED','CSRF token invalid')}next()}catch(e){next(e)}}}
+export async function login(db:Db,username:string,password:string,meta:{ip?:string;userAgent?:string}){const ip=meta.ip??'unknown';const windowStart=new Date(Date.now()-15*60_000).toISOString();const failures=db.get<any>('SELECT COUNT(*) n FROM login_attempts WHERE username=? COLLATE NOCASE AND ip=? AND succeeded=0 AND created_at>?',username,ip,windowStart)?.n??0;if(failures>=10)throw new DomainError(429,'LOGIN_RATE_LIMITED','Too many failed sign-in attempts');const u=db.get<any>('SELECT * FROM users WHERE username=? COLLATE NOCASE',username);if(!u||u.status!=='active'||!await verifyPassword(u.password_hash,password)){db.run('INSERT INTO login_attempts VALUES(?,?,?,?,?)',db.id(),username,ip,0,db.now());audit(db,{type:'system',id:null},'auth.failed','user',u?.id??'unknown',null,{username,ip});throw new DomainError(401,'INVALID_CREDENTIALS','Invalid credentials')}const token=randomToken(),csrf=randomToken();const id=db.id();db.transaction(()=>{db.run('INSERT INTO login_attempts VALUES(?,?,?,?,?)',db.id(),username,ip,1,db.now());db.run('DELETE FROM login_attempts WHERE created_at<?',new Date(Date.now()-86400_000).toISOString());db.run('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?)',id,u.id,hashOpaque(token),hashOpaque(csrf),meta.userAgent??null,ip,new Date(Date.now()+7*86400_000).toISOString(),null,db.now());db.run('UPDATE users SET last_active_at=? WHERE id=?',db.now(),u.id);audit(db,{type:'human',id:u.id},'auth.login','session',id,null,{ip})});return{token,csrf,user:{id:u.id,username:u.username,displayName:u.display_name,systemRole:u.system_role,mustChangePassword:Boolean(u.must_change_password)}}}

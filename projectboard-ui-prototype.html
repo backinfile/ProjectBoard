@@ -1,0 +1,1765 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProjectBoard · 任务队列原型</title>
+  <!--
+    THROWAWAY PROTOTYPE — do not promote directly to production.
+    Selected direction: B — a two-column workspace with project navigation on the left,
+    a stable primary surface on the right, and overlay drawers for reading or input.
+  -->
+  <style>
+    :root {
+      --ink: #24231f;
+      --muted: #77746d;
+      --faint: #9d9990;
+      --line: #d9d6ce;
+      --soft-line: #e8e5de;
+      --paper: #f2f1ec;
+      --surface: #fffefa;
+      --accent: #d94c2e;
+      --accent-soft: #fbe6df;
+      --blue: #356b99;
+      --blue-soft: #e6eef5;
+      --green: #397159;
+      --green-soft: #e4efe8;
+      --amber: #93621f;
+      --amber-soft: #f6ecd8;
+      --shadow: 0 20px 60px rgba(36, 33, 27, .17);
+      --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; background: var(--paper); }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--paper); font-family: var(--sans); }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    [hidden] { display: none !important; }
+
+    .icon { width: 16px; height: 16px; display: inline-block; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
+    .brand-mark { width: 23px; height: 23px; border: 1px solid currentColor; border-radius: 6px 2px 6px 2px; display: grid; place-items: center; font: 800 11px/1 var(--mono); letter-spacing: -.08em; transform: rotate(-2deg); }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    .status-dot.live { background: #4d966f; box-shadow: 0 0 0 3px #e4f0e8; }
+    .status-dot.warn { background: #d7842f; box-shadow: 0 0 0 3px #f8ead7; }
+    .status-dot.danger { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+    .avatar { width: 27px; height: 27px; border-radius: 50%; display: inline-grid; place-items: center; background: #dcd9d1; color: #4d4a44; font-size: 9px; font-weight: 800; flex: 0 0 auto; }
+    .avatar.agent { background: #282722; color: white; font-family: var(--mono); }
+    .avatar.warm { background: #efc8bc; color: #7d301e; }
+    .avatar.blue { background: #cbdce9; color: #285679; }
+
+    .badge { display: inline-flex; align-items: center; gap: 5px; min-height: 21px; padding: 2px 7px; border-radius: 999px; background: #eceae4; color: #625f59; font-size: 9px; font-weight: 700; white-space: nowrap; }
+    .badge.red { background: var(--accent-soft); color: #a7351f; }
+    .badge.blue { background: var(--blue-soft); color: #2e638f; }
+    .badge.green { background: var(--green-soft); color: #2e674d; }
+    .badge.amber { background: var(--amber-soft); color: #815719; }
+    .badge.outline { border: 1px solid var(--line); background: transparent; }
+
+    .button, .icon-button { border: 0; border-radius: 7px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer; transition: transform .16s ease, background .16s ease, border-color .16s ease; }
+    .button { min-height: 34px; padding: 0 11px; background: var(--surface); border: 1px solid var(--line); font-size: 10px; font-weight: 700; }
+    .button:hover { background: #f0eee8; border-color: #bbb8b0; }
+    .button.active { background: #292823; border-color: #292823; color: white; }
+    .button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .button.primary:hover { background: #c84025; transform: translateY(-1px); }
+    .button.danger { border-color: #d7aaa0; background: #fff3ef; color: #a7351f; }
+    .button.danger:hover { border-color: var(--accent); background: var(--accent); color: white; }
+    .button:disabled { cursor: not-allowed; opacity: .45; transform: none; }
+    .icon-button { width: 32px; height: 32px; background: transparent; }
+    .icon-button:hover { background: #ebe9e3; }
+
+    .app { min-height: 100vh; opacity: 0; transform: translateY(4px); animation: app-in .28s ease forwards; }
+    @keyframes app-in { to { opacity: 1; transform: translateY(0); } }
+
+    .masthead { height: 54px; padding: 0 20px; border-bottom: 1px solid var(--line); background: #f8f7f3; display: flex; align-items: center; gap: 18px; }
+    .wordmark { min-width: 194px; display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 780; letter-spacing: -.02em; }
+    .breadcrumb { color: #7c7971; font-size: 10px; }
+    .breadcrumb strong { color: var(--ink); font-weight: 720; }
+    .masthead-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+    .language-switch { min-width: 58px; min-height: 30px; padding: 0 9px; border: 1px solid #d4d1c9; border-radius: 7px; background: transparent; display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: #625f59; cursor: pointer; font-size: 9px; font-weight: 750; }
+    .language-switch:hover { border-color: #aaa69d; background: #eeece6; color: var(--ink); }
+    .language-switch:focus-visible { outline: 2px solid #8c877d; outline-offset: 2px; }
+    .language-switch .icon { width: 14px; height: 14px; }
+    .account-trigger { padding: 0; border: 0; cursor: pointer; }
+    .account-trigger:hover, .account-trigger:focus-visible { outline: 2px solid #8c877d; outline-offset: 2px; }
+    .connection { margin-right: 5px; display: flex; align-items: center; gap: 7px; color: #7c7971; font: 8px var(--mono); }
+
+    .shell { height: calc(100vh - 54px); min-height: 570px; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    .rail { padding: 18px 14px 24px; border-right: 1px solid var(--line); background: #f2f1ec; display: flex; flex-direction: column; overflow: auto; }
+    .rail-section { margin-top: 23px; }
+    .rail-bottom { margin-top: auto; }
+    .rail-section h3 { margin: 0 8px 8px; color: #99958d; font-size: 8px; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
+    .rail-link { width: 100%; min-height: 34px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; display: flex; align-items: center; gap: 8px; color: #6b6861; cursor: pointer; font-size: 10px; text-align: left; }
+    .rail-link:hover { background: #e8e6df; color: var(--ink); }
+    .rail-link.active { background: white; color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.05); font-weight: 750; }
+    .rail-link em { margin-left: auto; color: #96938b; font: normal 8px var(--mono); }
+
+    .project-control { position: relative; }
+    .project-trigger { width: 100%; min-height: 54px; padding: 8px 9px; border: 1px solid #d2cfc7; border-radius: 8px; background: #faf9f5; display: grid; grid-template-columns: 28px minmax(0,1fr) 14px; align-items: center; gap: 8px; text-align: left; cursor: pointer; transition: background .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .project-trigger:hover, .project-trigger[aria-expanded="true"] { background: white; border-color: #a9a59c; box-shadow: 0 5px 17px rgba(44,41,34,.07); }
+    .project-mark { width: 28px; height: 28px; border-radius: 7px; background: #282722; color: white; display: grid; place-items: center; font: 800 9px var(--mono); }
+    .project-trigger strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .project-trigger small { display: block; margin-top: 4px; overflow: hidden; color: #908d85; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .project-trigger .chevron { color: #8f8c84; transform: rotate(90deg); transition: transform .18s ease; }
+    .project-trigger[aria-expanded="true"] .chevron { transform: rotate(-90deg); }
+
+    .project-menu[popover] { position: fixed; inset: auto; z-index: 200; width: 304px; max-width: calc(100vw - 24px); margin: 0; padding: 7px; border: 1px solid #cbc8c0; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); transform-origin: top left; animation: menu-in .15s ease both; }
+    .project-menu::backdrop { background: transparent; }
+    @keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.985); } }
+    .project-menu-head { padding: 6px 7px 8px; }
+    .project-menu-label { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; color: #918e86; font-size: 8px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    .project-menu-label kbd { padding: 2px 5px; border: 1px solid #d9d6ce; border-radius: 4px; background: #f5f3ed; color: #99968f; font: 8px var(--mono); }
+    .project-search { width: 100%; height: 32px; padding: 0 9px; border: 1px solid #dbd8d0; border-radius: 6px; outline: 0; background: #f7f6f1; color: var(--ink); font-size: 10px; }
+    .project-search:focus { background: white; border-color: #99958c; box-shadow: 0 0 0 3px rgba(36,35,31,.06); }
+    .project-options { display: grid; gap: 2px; }
+    .project-option { width: 100%; min-height: 52px; padding: 7px; border: 0; border-radius: 7px; background: transparent; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; text-align: left; cursor: pointer; }
+    .project-option:hover { background: #f2f0ea; }
+    .project-option.selected { background: #ebe8df; }
+    .project-option .project-mark { width: 30px; height: 30px; }
+    .project-option-copy { min-width: 0; }
+    .project-option-copy strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .project-option-copy span { display: block; margin-top: 4px; overflow: hidden; color: #96938b; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+    .project-option-meta { display: grid; justify-items: end; gap: 3px; color: #8d8a82; font: 8px var(--mono); }
+    .selected-check { visibility: hidden; width: 15px; height: 15px; border-radius: 50%; background: var(--ink); color: white; display: grid; place-items: center; font-size: 9px; }
+    .project-option.selected .selected-check { visibility: visible; }
+    .project-menu-foot { margin-top: 5px; padding: 8px 7px 4px; border-top: 1px solid var(--soft-line); display: flex; justify-content: space-between; color: #8f8c84; font-size: 8px; }
+    .project-menu-foot button { border: 0; background: transparent; color: #55524c; cursor: pointer; font-size: 8px; font-weight: 750; }
+
+    .agent-row { padding: 7px 8px; display: flex; align-items: center; gap: 8px; }
+    .agent-copy { min-width: 0; }
+    .agent-copy strong { display: block; overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-copy span { display: block; margin-top: 3px; color: #99968f; font: 8px var(--mono); }
+
+    .queue { grid-column: 2; background: var(--surface); overflow: auto; }
+    .queue-header { position: sticky; z-index: 8; top: 0; padding: 22px 24px 14px; border-bottom: 1px solid var(--soft-line); background: rgba(255,254,250,.96); backdrop-filter: blur(10px); }
+    .queue-title { display: flex; align-items: flex-start; gap: 12px; }
+    .queue-title h1 { margin: 0; font-size: 24px; line-height: 1; letter-spacing: -.045em; }
+    .queue-title p { margin: 7px 0 0; color: #85827a; font-size: 9px; }
+    .queue-title .button { margin-left: auto; }
+    .tabs { margin-top: 20px; display: flex; gap: 17px; }
+    .tab { position: relative; padding: 0 0 9px; border: 0; background: transparent; color: #89867e; cursor: pointer; font-size: 9px; }
+    .tab.active { color: var(--ink); font-weight: 800; }
+    .tab.active::after { content: ""; position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: var(--accent); }
+    .queue-tools { margin-top: 12px; display: flex; gap: 7px; }
+    .search-box { height: 34px; flex: 1; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--faint); display: flex; align-items: center; gap: 8px; }
+    .search-box:focus-within { border-color: #aaa69d; box-shadow: 0 0 0 3px rgba(36,35,31,.05); }
+    .search-box input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 10px; }
+    .search-box input::placeholder { color: #aaa79f; }
+
+    .queue-content { padding: 13px 24px 70px; }
+    .queue-group { margin-top: 12px; }
+    .group-label { min-height: 26px; display: flex; align-items: center; color: #8f8c84; font-size: 8px; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; }
+    .group-label span { margin-left: 8px; color: #afaca5; font: 8px var(--mono); }
+    .work-item { margin: 0 -8px; min-height: 68px; padding: 10px; border-top: 1px solid var(--soft-line); display: grid; grid-template-columns: 4px minmax(0,1fr) auto; align-items: center; gap: 11px; cursor: pointer; transition: background .14s ease; }
+    .work-item:hover { background: #f8f6f0; }
+    .work-item.selected { background: #f3eee4; }
+    .priority-rail { width: 3px; height: 34px; border-radius: 3px; background: #aaa; }
+    .priority-rail.urgent { background: var(--accent); }
+    .priority-rail.high { background: #d28b35; }
+    .priority-rail.medium { background: #7893a4; }
+    .priority-rail.low { background: #aaa8a1; }
+    .work-main { min-width: 0; }
+    .work-line { display: flex; align-items: center; gap: 7px; }
+    .work-id { color: #9d9a93; font: 8px var(--mono); }
+    .work-title { margin-top: 4px; overflow: hidden; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .work-meta { margin-top: 6px; display: flex; align-items: center; gap: 6px; color: #98958d; font-size: 8px; }
+    .work-side { min-width: 72px; display: grid; justify-items: end; gap: 6px; }
+    .parent-item { margin-top: 1px; }
+    .parent-toggle { width: 20px; height: 20px; border: 0; border-radius: 5px; background: transparent; display: grid; place-items: center; cursor: pointer; }
+    .parent-toggle:hover { background: #e7e4dc; }
+    .parent-toggle .icon { transition: transform .16s ease; }
+    .parent-toggle.open .icon { transform: rotate(90deg); }
+    .child-list { margin-left: 12px; border-left: 1px solid #d7d3cb; }
+    .child-list .work-item { margin-left: 0; padding-left: 16px; min-height: 57px; }
+    .empty-state { padding: 65px 20px; border-top: 1px solid var(--soft-line); text-align: center; }
+    .empty-state strong { display: block; font-size: 12px; }
+    .empty-state span { display: block; margin-top: 6px; color: #949189; font-size: 9px; }
+
+    .task-page-header { position: sticky; z-index: 7; top: 0; padding: 14px 24px 0; border-bottom: 1px solid var(--soft-line); background: rgba(255,254,250,.97); backdrop-filter: blur(10px); }
+    .back-link { min-height: 26px; padding: 0; border: 0; background: transparent; color: #77746d; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 9px; }
+    .back-link .icon { transform: rotate(180deg); }
+    .task-heading { margin-top: 8px; display: flex; align-items: flex-start; gap: 20px; }
+    .task-heading-main { min-width: 0; }
+    .task-heading-id { color: #97948c; font: 8px var(--mono); }
+    .task-heading h1 { max-width: 760px; margin: 5px 0 8px; font-size: clamp(20px, 2.4vw, 28px); line-height: 1.16; letter-spacing: -.03em; }
+    .task-heading-actions { margin-left: auto; display: flex; gap: 7px; flex: 0 0 auto; }
+    .task-meta-strip { margin-top: 13px; padding: 11px 0; border-top: 1px solid var(--soft-line); display: flex; flex-wrap: wrap; align-items: center; gap: 20px; }
+    .task-meta-item { display: flex; align-items: center; gap: 7px; color: #66635d; font-size: 9px; }
+    .task-meta-item span:first-child { color: #99968e; }
+    .phase-overview { margin-top: 2px; padding: 13px 0 15px; border-top: 1px solid var(--soft-line); }
+    .phase-overview-head { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .phase-overview-head > span { color: #8f8c84; font-size: 8px; font-weight: 700; }
+    .phase-overview-head > strong { color: #5f5c56; font-size: 8px; font-weight: 700; }
+    .phase-band { display: grid; grid-template-columns: repeat(5, minmax(96px, 1fr)); min-width: 520px; overflow: hidden; }
+    .phase-band-step { position: relative; min-width: 0; color: #98958f; }
+    .phase-band-step:not(:first-child)::before { content: ""; position: absolute; z-index: 0; top: 13px; right: calc(50% + 13px); left: calc(-50% + 13px); height: 2px; background: #dedbd3; }
+    .phase-band-step.done::before, .phase-band-step.active::before, .phase-band-step.complete::before, .phase-band-step.blocked::before, .phase-band-step.abandoned::before { background: var(--green); }
+    .phase-node { position: relative; z-index: 1; display: grid; grid-template-columns: 27px minmax(0, 1fr); align-items: start; gap: 9px; }
+    .phase-node-mark { position: relative; width: 27px; height: 27px; border: 1px solid #cbc7be; border-radius: 50%; background: var(--paper); display: grid; place-items: center; color: #99958d; font: 8px var(--mono); }
+    .phase-node-copy { min-width: 0; padding-top: 1px; display: grid; gap: 3px; }
+    .phase-node-copy strong { color: #77746d; font-size: 9px; font-weight: 750; }
+    .phase-node-copy small { overflow: hidden; color: #a09d95; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+    .phase-band-step.done .phase-node-mark { border-color: var(--green); background: var(--green); color: white; }
+    .phase-band-step.done .phase-node-copy strong { color: #555f58; }
+    .phase-band-step.active .phase-node-mark { border: 2px solid var(--accent); background: #fff8f3; color: #9d321e; box-shadow: 0 3px 9px rgba(164,67,42,.16); font-weight: 800; transform: translateY(-1px); }
+    .phase-band-step.active .phase-node-copy strong { color: #713222; }
+    .phase-band-step.active .phase-node-copy small { color: #9d4b36; font-weight: 700; }
+    .phase-band-step.complete .phase-node-mark { border-color: var(--green); background: var(--green); color: white; box-shadow: 0 3px 9px rgba(61,110,89,.16); }
+    .phase-band-step.complete .phase-node-copy strong, .phase-band-step.complete .phase-node-copy small { color: var(--green); font-weight: 700; }
+    .phase-band-step.blocked .phase-node-mark::after { content: ""; position: absolute; right: -2px; bottom: -1px; width: 7px; height: 7px; border: 2px solid var(--paper); border-radius: 50%; background: var(--red); }
+    .phase-band-step.blocked .phase-node-copy small { color: var(--red); }
+    .phase-band-step.abandoned .phase-node-mark { border-color: var(--red); background: #fff5f2; color: var(--red); }
+    .phase-band-step.abandoned .phase-node-copy strong, .phase-band-step.abandoned .phase-node-copy small { color: var(--red); }
+    .task-page-body { max-width: 900px; padding: 24px 24px 80px; }
+    .conversation-stream { max-width: 740px; }
+    .conversation-intro { padding: 0 0 22px; border-bottom: 1px solid var(--line); }
+    .conversation-intro h2 { margin: 0 0 8px; font-size: 12px; }
+    .conversation-intro p { margin: 0; color: #64615b; font-size: 10px; line-height: 1.7; }
+    .stage-divider { margin: 26px 0 20px; display: flex; align-items: center; gap: 10px; color: #98958d; font: 8px var(--mono); }
+    .stage-divider::before, .stage-divider::after { content: ""; height: 1px; background: var(--line); flex: 1; }
+    .stage-divider strong { color: #5d5953; font-family: var(--sans); font-size: 8px; }
+    .conversation-entry { position: relative; padding: 0 0 23px 40px; }
+    .conversation-entry::before { content: ""; position: absolute; top: 29px; bottom: 0; left: 13px; width: 1px; background: var(--soft-line); }
+    .conversation-entry:last-child::before { display: none; }
+    .entry-avatar { position: absolute; top: 0; left: 0; width: 27px; height: 27px; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); display: grid; place-items: center; color: #65625c; font-size: 8px; font-weight: 800; }
+    .entry-head { min-height: 27px; display: flex; align-items: center; gap: 7px; }
+    .entry-head strong { font-size: 9px; }
+    .entry-head time { color: #99968e; font: 8px var(--mono); }
+    .entry-head .badge { margin-left: auto; }
+    .entry-body { color: #5f5c56; font-size: 9px; line-height: 1.7; }
+    .entry-body p { margin: 4px 0 0; }
+    .system-event, .conclusion-block, .commit-event, .acceptance-card { margin-top: 5px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 9px; background: #fbfaf6; }
+    .system-event { border-style: dashed; color: #716e67; }
+    .conclusion-block { border-color: #d9c6ba; background: #fcf6f1; }
+    .entry-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .entry-card-head strong { color: #423f3a; font-size: 9px; }
+    .entry-card-head span { color: #96938b; font: 8px var(--mono); }
+    .structured-list { margin: 10px 0 0; display: grid; gap: 7px; }
+    .structured-list div { display: grid; grid-template-columns: 76px 1fr; gap: 10px; }
+    .structured-list dt { color: #99968e; font-size: 8px; }
+    .structured-list dd { margin: 0; color: #56534d; font-size: 9px; }
+    .attachment-chip { margin-top: 9px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: #625f59; font: 8px var(--mono); }
+    .commit-event code { color: #9d321e; }
+    .validation-grid { margin-top: 10px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
+    .validation-grid span { padding: 8px; background: var(--paper); color: #67645e; font: 8px var(--mono); text-align: center; }
+    .conversation-compose { margin: 8px 0 0 40px; padding-top: 18px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .conversation-compose p { margin: 0; color: #8e8b83; font-size: 8px; }
+    .task-next { margin-bottom: 30px; padding: 17px 18px; border: 1px solid #dfc8bd; border-radius: 12px; background: #fbf3ed; display: flex; align-items: center; gap: 18px; }
+    .task-next-copy { min-width: 0; flex: 1; }
+    .task-next-copy span { color: #a34b37; font-size: 8px; font-weight: 800; }
+    .task-next-copy strong { display: block; margin-top: 5px; color: #3e3732; font-size: 11px; }
+    .task-next-copy p { margin: 4px 0 0; color: #786b64; font-size: 9px; line-height: 1.5; }
+    .task-document { max-width: 720px; }
+    .task-document + .task-document { margin-top: 34px; }
+    .task-document h2 { margin: 0 0 11px; font-size: 12px; letter-spacing: -.015em; }
+    .task-document > p { margin: 0; color: #5f5c56; font-size: 10px; line-height: 1.75; }
+    .task-subhead { margin: 30px 0 8px; padding-top: 25px; border-top: 1px solid var(--soft-line); display: flex; align-items: baseline; justify-content: space-between; }
+    .task-subhead h2 { margin: 0; }
+    .task-subhead span { color: #99968e; font-size: 8px; }
+    .task-thread { max-width: 720px; }
+    .thread-item { position: relative; padding: 0 0 25px 42px; }
+    .thread-item:not(:last-child)::before { content: ""; position: absolute; top: 28px; bottom: 0; left: 13px; width: 1px; background: var(--line); }
+    .thread-icon { position: absolute; top: 0; left: 0; width: 27px; height: 27px; border: 1px solid var(--line); border-radius: 50%; background: var(--paper); display: grid; place-items: center; color: #77746d; font-size: 8px; font-weight: 800; }
+    .thread-copy strong { color: #403e39; font-size: 9px; }
+    .thread-copy time { margin-left: 7px; color: #99968e; font: 8px var(--mono); }
+    .thread-copy p { margin: 6px 0 0; color: #69665f; font-size: 9px; line-height: 1.65; }
+    .evidence-summary { margin-bottom: 24px; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); border-block: 1px solid var(--line); }
+    .evidence-stat { padding: 15px 0; }
+    .evidence-stat + .evidence-stat { padding-left: 18px; border-left: 1px solid var(--soft-line); }
+    .evidence-stat span { display: block; color: #99968e; font-size: 8px; }
+    .evidence-stat strong { display: block; margin-top: 5px; font-size: 10px; }
+    .task-section { padding: 26px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(130px,.32fr) minmax(360px,1fr); gap: 34px; }
+    .task-section-title h2 { margin: 0; font-size: 11px; letter-spacing: -.015em; }
+    .task-section-title p { max-width: 220px; margin: 7px 0 0; color: #96938b; font-size: 8px; line-height: 1.5; }
+    .task-section-content { min-width: 0; color: #5f5c56; font-size: 10px; line-height: 1.72; }
+    .criteria-row { min-height: 38px; padding: 8px 0; border-bottom: 1px solid var(--soft-line); display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 9px; }
+    .criteria-row i { width: 15px; height: 15px; border: 1px solid #bdb9b1; border-radius: 4px; }
+    .dependency-row { min-height: 46px; padding: 8px 0; border-bottom: 1px solid var(--soft-line); display: flex; align-items: center; gap: 9px; }
+    .dependency-row strong { font-size: 9px; }
+    .dependency-row span:last-child { margin-left: auto; }
+    .attempt-row { padding: 14px 0; border-bottom: 1px solid var(--soft-line); display: grid; grid-template-columns: 94px minmax(200px,1fr) auto; gap: 14px; }
+    .attempt-time { color: #918e86; font: 8px/1.5 var(--mono); }
+    .attempt-copy strong { display: block; color: #403e39; font-size: 9px; }
+    .attempt-copy span { display: block; margin-top: 4px; color: #8e8b83; font-size: 8px; }
+    .verification-head, .verification-row { display: grid; grid-template-columns: minmax(130px,1fr) 70px 80px; gap: 12px; align-items: center; }
+    .verification-head { min-height: 30px; color: #99968e; font-size: 8px; font-weight: 800; }
+    .verification-row { min-height: 42px; border-top: 1px solid var(--soft-line); font: 8px var(--mono); }
+    .comment-row { padding: 13px 0; border-bottom: 1px solid var(--soft-line); display: grid; grid-template-columns: 28px 1fr; gap: 10px; }
+    .comment-row strong { display: block; color: #403e39; font-size: 9px; }
+    .comment-row time { margin-left: 7px; color: #99968e; font: 8px var(--mono); }
+    .comment-row p { margin: 6px 0 0; color: #69665f; font-size: 9px; line-height: 1.6; }
+
+    .workspace-page { min-height: 100%; }
+    .surface-header { position: sticky; z-index: 7; top: 0; min-height: 112px; padding: 22px 24px 15px; border-bottom: 1px solid var(--soft-line); background: rgba(255,254,250,.97); backdrop-filter: blur(10px); }
+    .surface-title { display: flex; align-items: flex-start; gap: 14px; }
+    .surface-title h1 { margin: 0; font-size: 24px; line-height: 1; letter-spacing: -.035em; }
+    .surface-title p { margin: 7px 0 0; color: #85827a; font-size: 9px; }
+    .surface-title .button { margin-left: auto; }
+    .surface-tools { margin-top: 18px; display: flex; align-items: center; gap: 7px; }
+    .surface-tools .search-box { max-width: 320px; }
+    .filter-select { padding-right: 8px; }
+    .filter-select select { max-width: 124px; border: 0; outline: 0; background: transparent; color: inherit; cursor: pointer; font-size: 9px; font-weight: 700; }
+    .surface-count { margin-left: auto; color: #96938b; font: 8px var(--mono); }
+    .management-body { padding: 13px 24px 70px; }
+    .table-head, .agent-table-row { display: grid; grid-template-columns: minmax(170px, 1.4fr) 105px minmax(130px, 1fr) 90px 26px; align-items: center; gap: 12px; }
+    .user-table-head, .user-table-row { grid-template-columns: minmax(170px, 1.35fr) 105px minmax(120px, .9fr) 100px 84px 26px; }
+    .project-table-head, .project-table-row { grid-template-columns: minmax(170px, 1.1fr) 80px minmax(220px, 1.5fr) 110px 58px; }
+    .table-head { min-height: 34px; border-bottom: 1px solid var(--line); color: #96928a; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .agent-table-row { min-height: 66px; border-bottom: 1px solid var(--soft-line); cursor: pointer; transition: background .14s ease; }
+    .agent-table-row:hover { margin: 0 -8px; padding: 0 8px; background: #f7f5ef; }
+    .agent-table-row.selected { margin: 0 -8px; padding: 0 8px; background: #f1ede3; }
+    .entity-name { min-width: 0; display: flex; align-items: center; gap: 9px; }
+    .entity-name-copy { min-width: 0; }
+    .entity-name strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .entity-name span { display: block; margin-top: 4px; color: #98958d; font: 8px var(--mono); }
+    .table-value { color: #67645e; font-size: 9px; line-height: 1.45; }
+    .grant-list { display: flex; align-items: center; gap: 4px; }
+    .grant-chip { padding: 3px 6px; border: 1px solid #d9d6ce; border-radius: 4px; color: #68655e; font-size: 8px; }
+
+    .settings-body { padding: 5px 24px 70px; }
+    .settings-section { padding: 24px 0 8px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(140px, .65fr) minmax(310px, 1.35fr); gap: 38px; }
+    .settings-intro h2 { margin: 0; font-size: 12px; letter-spacing: -.02em; }
+    .settings-intro p { max-width: 260px; margin: 7px 0 0; color: #8a877f; font-size: 9px; line-height: 1.55; }
+    .settings-intro .button { margin-top: 13px; }
+    .setting-list { border-top: 1px solid var(--soft-line); }
+    .setting-row { min-height: 54px; padding: 9px 0; border-bottom: 1px solid var(--soft-line); display: grid; grid-template-columns: minmax(120px, .8fr) minmax(180px, 1.2fr); align-items: center; gap: 18px; }
+    .setting-row label, .setting-label { color: #77746d; font-size: 9px; }
+    .setting-label { position: relative; display: inline-flex; align-items: center; gap: 6px; width: max-content; max-width: 100%; }
+    .field-info { position: relative; width: 17px; height: 17px; padding: 0; border: 1px solid #cbc7be; border-radius: 50%; background: transparent; color: #817e76; display: inline-grid; place-items: center; cursor: help; font: 700 8px var(--sans); }
+    .field-info:hover, .field-info:focus-visible { border-color: #88847b; background: #ebe8e0; color: var(--ink); outline: 0; }
+    .field-info::after { content: attr(data-tooltip); position: absolute; z-index: 30; top: calc(100% + 9px); left: -8px; width: min(260px, calc(100vw - 48px)); padding: 10px 11px; border-radius: 8px; background: #292824; color: #f7f5ef; box-shadow: 0 8px 22px rgba(29,28,25,.18); font: 9px/1.55 var(--sans); text-align: left; opacity: 0; pointer-events: none; transform: translateY(-3px); transition: opacity .14s ease, transform .14s ease; }
+    .field-info::before { content: ""; position: absolute; z-index: 31; top: calc(100% + 4px); left: 4px; width: 8px; height: 8px; background: #292824; opacity: 0; pointer-events: none; transform: rotate(45deg); transition: opacity .14s ease; }
+    .field-info:hover::after, .field-info:hover::before, .field-info:focus-visible::after, .field-info:focus-visible::before { opacity: 1; }
+    .field-info:hover::after, .field-info:focus-visible::after { transform: translateY(0); }
+    .setting-value { min-height: 32px; padding: 7px 9px; border: 1px solid #d8d5cd; border-radius: 6px; background: white; color: #403e39; font: 9px var(--mono); }
+    .setting-choice { display: flex; flex-wrap: wrap; gap: 5px; }
+    .choice { min-height: 30px; padding: 0 9px; border: 1px solid #d8d5cd; border-radius: 6px; background: white; color: #68655f; cursor: pointer; font-size: 9px; }
+    .choice.active { border-color: #4e4c46; background: #292823; color: white; }
+    .choice:disabled { cursor: not-allowed; opacity: .45; }
+    .connection-value { min-height: 32px; display: flex; align-items: center; gap: 7px; color: #403e39; font-size: 9px; font-weight: 680; }
+    .connection-value .status-dot { margin-left: 2px; }
+    .connection-value code { font-size: 8px; font-weight: 500; }
+    .setup-progress { margin: 18px 0 22px; display: grid; grid-template-columns: repeat(3, 1fr); }
+    .setup-progress span { position: relative; padding-top: 16px; color: #9a978f; font-size: 8px; text-align: center; }
+    .setup-progress span::before { content: ""; position: absolute; z-index: 1; top: 2px; left: calc(50% - 5px); width: 9px; height: 9px; border: 2px solid #c8c4bc; border-radius: 50%; background: #f7f6f1; }
+    .setup-progress span::after { content: ""; position: absolute; top: 7px; right: 50%; width: 100%; border-top: 1px solid #d3d0c8; }
+    .setup-progress span:first-child::after { display: none; }
+    .setup-progress .active { color: var(--ink); font-weight: 750; }
+    .setup-progress .active::before { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .setup-progress .done::before { border-color: var(--green); background: var(--green); box-shadow: inset 0 0 0 2px #f7f6f1; }
+    .provider-options { margin-top: 18px; border-top: 1px solid #dddad3; }
+    .provider-option { width: 100%; min-height: 72px; padding: 13px 0; border: 0; border-bottom: 1px solid #e4e1da; background: transparent; display: grid; grid-template-columns: 34px minmax(0,1fr) 18px; align-items: center; gap: 11px; color: inherit; cursor: pointer; text-align: left; }
+    .provider-option:hover { background: #f0eee8; }
+    .provider-option:focus-visible { outline: 2px solid #8c877d; outline-offset: -2px; }
+    .provider-option.active { color: var(--ink); }
+    .provider-mark { width: 32px; height: 32px; border: 1px solid #cbc8c0; border-radius: 8px; display: grid; place-items: center; background: white; font: 800 9px var(--mono); }
+    .provider-option strong { display: block; font-size: 10px; }
+    .provider-option small { display: block; margin-top: 4px; color: #8d8a82; font-size: 8px; line-height: 1.45; }
+    .provider-check { width: 16px; height: 16px; border: 1px solid #c5c1b8; border-radius: 50%; display: grid; place-items: center; color: transparent; font-size: 9px; }
+    .provider-option.active .provider-check { border-color: var(--accent); background: var(--accent); color: white; }
+    .permission-list { margin: 18px 0 0; border-top: 1px solid #dddad3; }
+    .permission-row { min-height: 58px; padding: 10px 0; border-bottom: 1px solid #e4e1da; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 12px; }
+    .permission-row strong { display: block; font-size: 9px; }
+    .permission-row span { display: block; margin-top: 4px; color: #8c8981; font-size: 8px; line-height: 1.45; }
+    .setup-loading { min-height: 240px; display: grid; place-items: center; align-content: center; gap: 14px; text-align: center; }
+    .setup-spinner { width: 27px; height: 27px; border: 2px solid #d7d3ca; border-top-color: var(--accent); border-radius: 50%; animation: setup-spin .75s linear infinite; }
+    .setup-loading strong { font-size: 12px; }
+    .setup-loading span { max-width: 270px; color: #85827a; font-size: 9px; line-height: 1.55; }
+    @keyframes setup-spin { to { transform: rotate(360deg); } }
+    .setup-result { margin-top: 18px; border-top: 1px solid #dddad3; }
+    .setup-result-row { min-height: 52px; padding: 9px 0; border-bottom: 1px solid #e4e1da; display: grid; grid-template-columns: 20px minmax(0,1fr); align-items: center; gap: 8px; }
+    .setup-result-row > i { width: 17px; height: 17px; border-radius: 50%; background: var(--green-soft); color: var(--green); display: grid; place-items: center; font: normal 800 9px var(--sans); }
+    .setup-result-row strong { display: block; font-size: 9px; }
+    .setup-result-row span { display: block; margin-top: 3px; color: #8b887f; font-size: 8px; line-height: 1.45; }
+    .pairing-code { margin: 20px 0 8px; padding: 16px; border: 1px solid #cfcac0; border-radius: 9px; background: white; text-align: center; }
+    .pairing-code strong { display: block; font: 760 21px/1.2 var(--mono); letter-spacing: .04em; }
+    .pairing-code span { display: block; margin-top: 7px; color: #8d8980; font-size: 8px; }
+    .pairing-command { margin: 14px 0 0; padding: 11px 12px; border-radius: 7px; background: #292824; color: #f7f5ef; font: 9px/1.55 var(--mono); overflow-wrap: anywhere; }
+    .pairing-state { min-height: 44px; margin-top: 14px; padding: 10px 0; border-top: 1px solid #dedbd3; border-bottom: 1px solid #dedbd3; display: flex; align-items: center; gap: 9px; font-size: 9px; }
+    .pairing-state span:last-child { color: #77746d; }
+    .field-error { color: #a7351f; font-size: 8px; line-height: 1.45; }
+    .settings-save { position: sticky; bottom: 0; margin: 20px -24px -70px; padding: 12px 24px; border-top: 1px solid var(--line); background: rgba(255,254,250,.96); display: flex; justify-content: flex-end; gap: 7px; backdrop-filter: blur(10px); }
+
+    .activity-scope { min-height: 58px; margin: -13px -24px 10px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: #f7f5ef; display: grid; grid-template-columns: 28px minmax(0,1fr) auto auto; align-items: center; gap: 10px; }
+    .activity-scope-copy { min-width: 0; }
+    .activity-scope-copy strong { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-scope-copy span { display: block; margin-top: 3px; color: #8d8a82; font-size: 8px; }
+    .audit-head, .audit-row { display: grid; grid-template-columns: 84px 82px minmax(190px, 1.35fr) 105px minmax(105px, .8fr) 28px; align-items: center; gap: 12px; }
+    .audit-head { min-height: 34px; border-bottom: 1px solid var(--line); color: #96928a; font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .audit-row { min-height: 62px; border-bottom: 1px solid var(--soft-line); cursor: pointer; transition: background .14s ease; }
+    .audit-row:hover { margin: 0 -8px; padding: 0 8px; background: #f7f5ef; }
+    .audit-row.selected { margin: 0 -8px; padding: 0 8px; background: #f1ede3; }
+    .audit-time { color: #8e8b83; font: 8px var(--mono); line-height: 1.45; }
+    .audit-action strong { display: block; font-size: 10px; }
+    .audit-action span { display: block; margin-top: 4px; color: #96938b; font-size: 8px; }
+    .event-kind { width: max-content; max-width: 100%; }
+    .payload { margin: 10px 0 0; padding: 10px; border: 1px solid #dedbd3; border-radius: 7px; background: #f0eee8; color: #5c5953; font: 8px/1.65 var(--mono); white-space: pre-wrap; }
+    .impact-note { margin: 14px 0 20px; padding: 11px 12px; border-radius: 7px; background: var(--amber-soft); color: #73501c; font-size: 9px; line-height: 1.55; }
+    .drawer-backdrop { position: fixed; z-index: 39; inset: 54px 0 0; background: rgba(35,33,28,.18); opacity: 0; pointer-events: none; touch-action: none; overscroll-behavior: contain; transition: opacity .2s ease; }
+    .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .inspector { position: fixed; z-index: 40; top: 54px; right: 0; bottom: 0; width: min(420px, calc(100vw - 24px)); background: #f7f6f1; box-shadow: -18px 0 55px rgba(36,33,27,.17); overflow: auto; overscroll-behavior: contain; transform: translateX(105%); transition: transform .24s cubic-bezier(.2,.75,.25,1); }
+    .inspector.open { transform: translateX(0); }
+    .inspector-header { min-height: 54px; padding: 0 18px; border-bottom: 1px solid #dddad3; display: flex; align-items: center; color: #817e77; font-size: 9px; }
+    .inspector-header .icon-button { display: inline-flex; }
+    .inspector-body { padding: 20px 20px 70px; }
+    .inspector-id { color: #8f8c84; font: 8px var(--mono); }
+    .inspector h2 { margin: 9px 0 12px; font-size: 20px; line-height: 1.3; letter-spacing: -.04em; }
+    .inspector-description { color: #6f6c65; font-size: 10px; line-height: 1.65; }
+    .inspector-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .inspector-actions { margin: 17px 0 22px; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .inspector-actions .primary { grid-column: 1 / -1; }
+    .kv-list { margin: 0; border-top: 1px solid #dddad3; }
+    .kv-row { min-height: 42px; padding: 8px 0; border-bottom: 1px solid #e4e1da; display: grid; grid-template-columns: 82px 1fr; align-items: center; gap: 8px; }
+    .kv-row dt { color: #929088; font-size: 8px; }
+    .kv-row dd { margin: 0; overflow: hidden; font-size: 9px; font-weight: 680; text-overflow: ellipsis; }
+    .detail-section { margin-top: 24px; }
+    .detail-section h3 { margin: 0 0 12px; font-size: 8px; letter-spacing: .11em; text-transform: uppercase; }
+    .criterion { margin-top: 8px; display: grid; grid-template-columns: 16px 1fr; gap: 8px; color: #5f5c56; font-size: 9px; line-height: 1.5; }
+    .criterion i { width: 15px; height: 15px; margin-top: 1px; border: 1px solid #bdb9b1; border-radius: 4px; }
+    .stage-step { min-height: 43px; position: relative; padding-left: 27px; }
+    .stage-step::before { content: ""; position: absolute; left: 7px; top: 15px; bottom: -4px; border-left: 1px solid #cfccc4; }
+    .stage-step:last-child::before { display: none; }
+    .stage-step::after { content: ""; position: absolute; left: 2px; top: 4px; width: 11px; height: 11px; border: 2px solid #bbb8b0; border-radius: 50%; background: #f7f6f1; }
+    .stage-step.done::after { border-color: var(--green); background: var(--green); box-shadow: inset 0 0 0 2px #f7f6f1; }
+    .stage-step.active::after { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .stage-step strong { display: block; font-size: 9px; }
+    .stage-step span { display: block; margin-top: 3px; color: #99968f; font: 8px var(--mono); }
+    .drawer-form { margin-top: 20px; border-top: 1px solid #dddad3; }
+    .drawer-field { padding: 13px 0; border-bottom: 1px solid #e4e1da; display: grid; gap: 7px; }
+    .drawer-field label { color: #77746d; font-size: 9px; font-weight: 700; }
+    .field-help { color: #8c8981; font-size: 8px; line-height: 1.5; }
+    .drawer-field input, .drawer-field textarea, .drawer-field select { width: 100%; min-height: 36px; padding: 8px 10px; border: 1px solid #d6d2ca; border-radius: 7px; outline: 0; background: white; color: var(--ink); font-size: 10px; }
+    .drawer-field textarea { min-height: 88px; resize: vertical; line-height: 1.55; }
+    .drawer-field input:focus, .drawer-field textarea:focus, .drawer-field select:focus { border-color: #918d84; box-shadow: 0 0 0 3px rgba(36,35,31,.06); }
+    .drawer-footer { position: sticky; bottom: -70px; margin: 20px -20px -70px; padding: 12px 20px; border-top: 1px solid #d8d5cd; background: rgba(247,246,241,.97); display: flex; justify-content: flex-end; gap: 7px; backdrop-filter: blur(8px); }
+
+    .toast { position: fixed; z-index: 100; top: 18px; left: 50%; padding: 10px 13px; border-radius: 7px; background: #24231f; color: white; box-shadow: var(--shadow); font-size: 10px; opacity: 0; pointer-events: none; transform: translate(-50%, -10px); transition: opacity .18s ease, transform .18s ease; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1080px) {
+      .shell { grid-template-columns: 194px minmax(0,1fr); }
+      .wordmark { min-width: 160px; }
+    }
+
+    @media (max-width: 840px) {
+      .shell { height: auto; min-height: calc(100vh - 54px); display: block; }
+      .rail { position: sticky; z-index: 12; top: 0; padding: 8px 12px; border-right: 0; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 6px; overflow-x: auto; }
+      .rail-section { margin: 0; display: flex; gap: 4px; }
+      .rail-bottom { margin: 0 0 0 auto; padding: 0; border: 0; }
+      .rail-section h3 { display: none; }
+      .rail-link { width: auto; padding: 0 10px; white-space: nowrap; }
+      .rail-link em { display: none; }
+      .project-control { min-width: 230px; max-width: 304px; }
+      .project-trigger { min-height: 46px; }
+      .project-menu { width: min(304px, calc(100vw - 24px)); }
+      .queue { min-height: calc(100vh - 109px); overflow: visible; }
+      .queue-header { top: 63px; }
+      .surface-header { top: 63px; }
+      .task-page-header { top: 63px; }
+    }
+
+    @media (max-width: 560px) {
+      .masthead { padding: 0 12px; }
+      .wordmark { min-width: 0; }
+      .breadcrumb, .connection { display: none; }
+      .queue-header, .queue-content { padding-right: 15px; padding-left: 15px; }
+      .surface-header, .management-body, .settings-body { padding-right: 15px; padding-left: 15px; }
+      .table-head { display: none; }
+      .agent-table-row { grid-template-columns: minmax(160px,1fr) 90px; }
+      .agent-table-row > :nth-child(3), .agent-table-row > :nth-child(4), .agent-table-row > :nth-child(5) { display: none; }
+      .user-table-row { grid-template-columns: minmax(160px,1fr) 90px; }
+      .user-table-row > :nth-child(2), .user-table-row > :nth-child(3), .user-table-row > :nth-child(4), .user-table-row > :nth-child(6) { display: none; }
+      .project-table-row { grid-template-columns: minmax(160px,1fr) 58px; }
+      .project-table-row > :nth-child(2), .project-table-row > :nth-child(3), .project-table-row > :nth-child(4) { display: none; }
+      .project-table-row > :last-child { display: inline-flex; }
+      .settings-section { grid-template-columns: 1fr; gap: 14px; }
+      .task-section { grid-template-columns: 1fr; gap: 14px; }
+      .task-page-header, .task-page-body { padding-right: 15px; padding-left: 15px; }
+      .task-heading { display: block; }
+      .task-heading-actions { margin: 14px 0 0; }
+      .phase-overview { overflow-x: auto; scrollbar-width: thin; }
+      .phase-overview-head { position: sticky; left: 0; min-width: calc(100vw - 30px); }
+      .task-next { align-items: flex-start; flex-direction: column; }
+      .evidence-summary { grid-template-columns: 1fr; }
+      .evidence-stat + .evidence-stat { padding-left: 0; border-top: 1px solid var(--soft-line); border-left: 0; }
+      .attempt-row { grid-template-columns: 78px minmax(160px,1fr); }
+      .attempt-row > :last-child { display: none; }
+      .audit-head { display: none; }
+      .audit-row { grid-template-columns: 72px minmax(180px,1fr); }
+      .audit-row > :nth-child(2), .audit-row > :nth-child(n+4) { display: none; }
+      .activity-scope { margin-right: -15px; margin-left: -15px; padding-right: 15px; padding-left: 15px; grid-template-columns: 28px minmax(0,1fr) auto; }
+      .activity-scope > .badge { display: none; }
+      .queue-title h1 { font-size: 22px; }
+      .tabs { gap: 13px; overflow-x: auto; }
+      .button .button-label { display: none; }
+      .work-item { grid-template-columns: 4px minmax(0,1fr); }
+      .work-side { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute">
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-agents" viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="11" rx="3"/><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M4 12h3l2-6 4 12 2-6h5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.2a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-language" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></symbol>
+  </svg>
+
+  <main class="app">
+    <header class="masthead">
+      <div class="wordmark"><span class="brand-mark">PB</span> ProjectBoard</div>
+      <div class="breadcrumb">项目 / <strong id="breadcrumbProject">ProjectBoard Core</strong> / <span id="breadcrumbPage">任务队列</span></div>
+      <div class="masthead-actions">
+        <span class="connection"><span class="status-dot live"></span> 服务正常</span>
+        <button class="icon-button js-toast" type="button" aria-label="全局搜索"><svg class="icon"><use href="#i-search"/></svg></button>
+        <button class="language-switch" id="languageSwitch" type="button" data-no-i18n aria-label="切换到中文"><svg class="icon" aria-hidden="true"><use href="#i-language"/></svg><span id="languageSwitchLabel">中文</span></button>
+        <button class="avatar warm account-trigger" id="accountButton" type="button" aria-label="打开我的账号">林</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="rail">
+        <div class="project-control">
+          <button class="project-trigger" id="projectTrigger" type="button" aria-expanded="false" aria-controls="projectMenu">
+            <span class="project-mark" id="projectMark">PB</span>
+            <span><strong id="projectName">ProjectBoard Core</strong><small id="projectRepo">github.com/acme/projectboard</small></span>
+            <svg class="icon chevron"><use href="#i-chevron"/></svg>
+          </button>
+          <div class="project-menu" id="projectMenu" popover="auto">
+            <div class="project-menu-head">
+              <div class="project-menu-label"><span>切换项目</span><kbd>ESC</kbd></div>
+              <input class="project-search" id="projectSearch" type="search" placeholder="搜索项目或仓库…" autocomplete="off" />
+            </div>
+            <div class="project-options" id="projectOptions"></div>
+            <div class="project-menu-foot"><span id="projectTotal">3 个活跃项目</span><button type="button" id="manageProjectsButton">管理与新建项目</button></div>
+          </div>
+        </div>
+
+        <section class="rail-section">
+          <h3>工作区</h3>
+          <button class="rail-link active" type="button" data-page="queue"><svg class="icon"><use href="#i-queue"/></svg>任务队列 <em id="railQueueCount">0</em></button>
+          <button class="rail-link" type="button" data-page="members"><svg class="icon"><use href="#i-agents"/></svg>成员 <em id="railHumanCount">0</em></button>
+          <button class="rail-link" type="button" data-page="agents"><svg class="icon"><use href="#i-agents"/></svg>Agents <em id="railAgentCount">0</em></button>
+          <button class="rail-link" type="button" data-page="settings"><svg class="icon"><use href="#i-settings"/></svg>项目设置</button>
+        </section>
+
+        <section class="rail-section rail-bottom">
+          <button class="rail-link" type="button" data-page="users"><svg class="icon"><use href="#i-agents"/></svg>用户管理</button>
+          <button class="rail-link" type="button" data-page="projects"><svg class="icon"><use href="#i-queue"/></svg>项目管理</button>
+          <button class="rail-link" type="button" data-page="activity"><svg class="icon"><use href="#i-activity"/></svg>活动记录</button>
+        </section>
+      </aside>
+
+      <section class="queue">
+        <div class="workspace-page" id="queuePage">
+        <header class="queue-header">
+          <div class="queue-title">
+            <div><h1>任务队列</h1><p id="queueScope">仅显示 ProjectBoard Core 中当前可见的工作。</p></div>
+            <button class="button primary" id="newTaskButton" type="button"><svg class="icon"><use href="#i-plus"/></svg><span class="button-label">新建工单</span></button>
+          </div>
+          <nav class="tabs" aria-label="队列视图">
+            <button class="tab active" type="button" data-tab="all">全部 <span id="tabAllCount">0</span></button>
+            <button class="tab" type="button" data-tab="todo">待办 <span id="tabTodoCount">0</span></button>
+            <button class="tab" type="button" data-tab="discussion">讨论 <span id="tabDiscussionCount">0</span></button>
+            <button class="tab" type="button" data-tab="execution">执行 <span id="tabExecutionCount">0</span></button>
+            <button class="tab" type="button" data-tab="acceptance">验收 <span id="tabAcceptanceCount">0</span></button>
+            <button class="tab" type="button" data-tab="completed">完成 <span id="tabCompletedCount">0</span></button>
+            <button class="tab" type="button" data-tab="abandoned">放弃 <span id="tabAbandonedCount">0</span></button>
+          </nav>
+          <div class="queue-tools">
+            <label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="queueSearch" type="search" placeholder="搜索标题或编号…" /></label>
+            <button class="button" id="mineToggle" type="button">只看我的</button>
+            <button class="button js-toast" type="button"><svg class="icon"><use href="#i-filter"/></svg>筛选</button>
+          </div>
+        </header>
+        <div class="queue-content" id="queueContent"></div>
+        </div>
+
+        <div class="workspace-page" id="taskPage" hidden>
+          <header class="task-page-header">
+            <button class="back-link" id="backToQueue" type="button"><svg class="icon"><use href="#i-chevron"/></svg>返回任务队列</button>
+            <div class="task-heading"><div class="task-heading-main"><div class="task-heading-id" id="fullTaskId"></div><h1 id="fullTaskTitle"></h1><div class="inspector-badges" id="fullTaskBadges"></div></div><div class="task-heading-actions"><button class="button" type="button" data-task-action="comment">发送消息</button><button class="button" type="button" data-task-action="assign">更换执行者</button><button class="button" type="button" data-task-action="abandon">放弃工单</button><button class="button primary" id="primaryTaskAction" type="button" data-task-action="advance">阶段操作</button></div></div>
+            <div class="task-meta-strip" id="fullTaskMeta"></div>
+            <div class="phase-overview">
+              <div class="phase-overview-head"><span>工单流程</span><strong id="fullTaskProgressSummary"></strong></div>
+              <div class="phase-band" id="fullTaskPhases" role="list" aria-label="工单流程阶段"></div>
+            </div>
+          </header>
+          <div class="task-page-body" id="fullTaskBody"></div>
+        </div>
+
+        <div class="workspace-page" id="agentsPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1 id="memberPageTitle">成员</h1><p id="memberPageDescription">查看全部人类账户，并标记它们在当前项目中的角色。</p></div><button class="button primary" id="newMemberButton" type="button"><svg class="icon"><use href="#i-plus"/></svg><span id="newMemberLabel">添加成员</span></button></div><div class="surface-tools"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="agentSearch" type="search" placeholder="搜索姓名或用户名…" /></label><span class="surface-count" id="agentSurfaceCount"></span></div></header>
+          <div class="management-body"><div class="table-head" id="memberTableHead"><span>成员 / 账户</span><span>项目角色</span><span>当前工作</span><span>账户状态</span><span></span></div><div id="agentTable"></div></div>
+        </div>
+
+        <div class="workspace-page" id="settingsPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1>项目设置</h1><p>定义 Runner 可执行的仓库、命令和默认阶段策略。</p></div><button class="button primary" id="openSettingsDrawer" type="button">编辑设置</button></div></header>
+          <div class="settings-body">
+            <section class="settings-section"><div class="settings-intro"><h2>Git 集成</h2><p>一次安装 GitHub App；ProjectBoard 与 Runner 按用途取得不同权限的短期 Token。</p><button class="button primary" id="openGitSetup" type="button">自动配置 Git</button></div><div class="setting-list"><div class="setting-row"><span class="setting-label">Git 提供商</span><div class="connection-value"><span class="status-dot live"></span><strong id="settingsGitProvider">GitHub App</strong><span class="badge green">已连接</span></div></div><div class="setting-row"><span class="setting-label">安装权限</span><div class="connection-value"><strong>Contents 读写</strong><span class="badge outline">一个 App</span></div></div><div class="setting-row"><span class="setting-label">运行时凭据</span><div class="connection-value"><strong>观察只读 · Runner 读写</strong><code>单仓库 · 最长 1 小时</code></div></div><div class="setting-row"><span class="setting-label">Push 订阅</span><div class="connection-value"><span class="status-dot live"></span><strong>正常</strong><code>2 分钟前验证</code></div></div><div class="setting-row"><span class="setting-label">Agent Git 能力</span><div class="connection-value"><strong id="settingsRunnerGrant">项目启用后按任务签发</strong><span class="badge outline">无长期凭据</span></div></div></div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>仓库与分支</h2><p>目标分支可读但不可由 Runner 直接推送；策略变化后需在本机重新确认。</p></div><div class="setting-list"><div class="setting-row"><span class="setting-label">Git 仓库 URL</span><div class="setting-value" id="settingsRepo"></div></div><div class="setting-row"><span class="setting-label">默认目标分支</span><div class="setting-value"><code id="settingsDefaultBranch"></code></div></div><div class="setting-row"><span class="setting-label">允许的目标分支</span><div class="setting-value" id="settingsAllowedBranches"></div></div><div class="setting-row"><span class="setting-label">Runner 推送范围</span><div class="setting-value"><code>projectboard/**</code> · 仅 fast-forward</div></div><div class="setting-row"><span class="setting-label">禁止修改路径</span><div class="setting-value">.github/workflows/** · infra/production/**</div></div></div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>Runner 命令</h2><p>执行阶段提交前，由 Runner 独立运行所有必需命令。</p></div><div class="setting-list"><div class="setting-row"><span class="setting-label">Build</span><div class="setting-value">pnpm build · 必需 · 10m</div></div><div class="setting-row"><span class="setting-label">Test</span><div class="setting-value">pnpm test · 必需 · 15m</div></div><div class="setting-row"><span class="setting-label">Lint</span><div class="setting-value">pnpm lint · 必需 · 5m</div></div></div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>默认协作模式</h2><p>自动表示满足结构化条件后自动进入下一阶段，不会跳过记录或验收。</p></div><div class="setting-list"><div class="setting-row"><span class="setting-label">讨论模式</span><div class="setting-choice"><button class="choice active" type="button">人工确认</button><button class="choice" type="button">自动进入执行</button></div></div><div class="setting-row"><span class="setting-label">执行模式</span><div class="setting-choice"><button class="choice" type="button">人工提交</button><button class="choice active" type="button">验证通过后自动</button></div></div><div class="setting-row"><span class="setting-label">验收模式</span><div class="setting-choice"><button class="choice active" type="button">人工</button><button class="choice" type="button">独立 Agent</button><button class="choice" type="button">自动</button></div></div><div class="setting-row"><span class="setting-label">拆分确认</span><div class="setting-choice"><button class="choice active" type="button">人工</button><button class="choice" type="button">自动</button><button class="choice" type="button">禁用</button></div></div></div></section>
+            <div class="settings-save"><button class="button js-toast" type="button">放弃更改</button><button class="button primary js-toast" type="button">保存设置</button></div>
+          </div>
+        </div>
+
+        <div class="workspace-page" id="activityPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1>活动记录</h1><p>不可修改的用户、Agent、对话、验收、指派与 Git 操作时间线。</p></div><button class="button js-toast" type="button">导出审计</button></div><div class="surface-tools"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="activitySearch" type="search" placeholder="搜索操作、工单或执行者…" /></label><label class="button filter-select"><svg class="icon"><use href="#i-filter"/></svg><select id="activityTypeFilter" aria-label="事件类型"><option value="all">全部类型</option><option value="discussion">讨论</option><option value="execution">执行</option><option value="acceptance">验收</option><option value="assignment">指派</option><option value="lease">租约</option><option value="git">Git</option><option value="membership">成员关系</option><option value="account">账户</option><option value="auth">登录</option></select></label><span class="surface-count" id="activitySurfaceCount"></span></div></header>
+          <div class="management-body"><div class="activity-scope" id="activityScope" hidden><span class="avatar" id="activityScopeAvatar"></span><div class="activity-scope-copy"><strong id="activityScopeName"></strong><span id="activityScopeMeta"></span></div><span class="badge outline" id="activityScopeType"></span><button class="button" id="clearActivityActor" type="button">查看全部活动</button></div><div class="audit-head"><span>时间</span><span>类型</span><span>活动</span><span>执行者</span><span>对象</span><span></span></div><div id="auditTable"></div></div>
+        </div>
+
+        <div class="workspace-page" id="usersPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1>用户管理</h1><p>管理组织级登录账户；项目角色仍在成员页中配置。</p></div><button class="button primary" id="newUserButton" type="button"><svg class="icon"><use href="#i-plus"/></svg>创建用户</button></div><div class="surface-tools"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="userManagementSearch" type="search" placeholder="搜索姓名或用户名…" /></label><button class="button js-toast" type="button"><svg class="icon"><use href="#i-filter"/></svg>账户状态</button><span class="surface-count" id="userManagementCount"></span></div></header>
+          <div class="management-body"><div class="table-head user-table-head"><span>用户 / 账户</span><span>系统角色</span><span>项目关系</span><span>最后活动</span><span>账户状态</span><span></span></div><div id="userManagementTable"></div></div>
+        </div>
+
+        <div class="workspace-page" id="projectsPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1>项目管理</h1><p>查看组织内全部项目，并创建新的仓库工作空间。</p></div><button class="button primary" id="newProjectButton" type="button"><svg class="icon"><use href="#i-plus"/></svg>新建项目</button></div><div class="surface-tools"><label class="search-box"><svg class="icon"><use href="#i-search"/></svg><input id="projectManagementSearch" type="search" placeholder="搜索项目或仓库…" /></label><span class="surface-count" id="projectManagementCount"></span></div></header>
+          <div class="management-body"><div class="table-head project-table-head"><span>项目</span><span>状态</span><span>仓库 / 默认目标</span><span>参与者</span><span></span></div><div id="projectManagementTable"></div></div>
+        </div>
+
+        <div class="workspace-page" id="accountPage" hidden>
+          <header class="surface-header"><div class="surface-title"><div><h1>我的账号</h1><p>管理个人资料、登录密码和当前会话。</p></div><button class="button primary" type="button" data-account-action="profile">编辑资料</button></div></header>
+          <div class="settings-body">
+            <section class="settings-section"><div class="settings-intro"><h2>个人资料</h2><p>这些信息用于工单执行者、对话和验收署名。</p></div><div class="setting-list"><div class="setting-row"><span class="setting-label">显示名称</span><div class="setting-value">林川</div></div><div class="setting-row"><span class="setting-label">用户名</span><div class="setting-value"><code>linchuan</code></div></div><div class="setting-row"><span class="setting-label">系统角色</span><div class="setting-value">系统管理员</div></div><div class="setting-row"><span class="setting-label">账户状态</span><div class="setting-value"><span class="badge green">正常</span></div></div></div></section>
+            <section class="settings-section"><div class="settings-intro"><h2>登录与安全</h2><p>修改密码或撤销不再使用的登录会话。</p></div><div class="setting-list"><div class="setting-row"><span class="setting-label">登录密码</span><div><button class="button" type="button" data-account-action="password">修改密码</button><span class="field-help">27 天前更新</span></div></div><div class="setting-row"><span class="setting-label">当前会话</span><div class="setting-value">Windows · Codex Desktop · 当前设备</div></div><div class="setting-row"><span class="setting-label">其他会话</span><div><button class="button" type="button" data-account-action="sessions">管理 2 个会话</button></div></div><div class="setting-row"><span class="setting-label">最近登录</span><div class="setting-value">今天 09:12 · 192.168.1.24</div></div></div></section>
+          </div>
+        </div>
+      </section>
+
+      <div class="drawer-backdrop" id="drawerBackdrop"></div>
+      <aside class="inspector" id="inspector" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="inspectorTitle">
+        <div class="inspector-header"><span id="inspectorTitle">工单详情</span><button class="icon-button" id="closeInspector" type="button" aria-label="关闭详情" style="margin-left:auto"><svg class="icon"><use href="#i-close"/></svg></button></div>
+        <div class="inspector-body" id="inspectorBody"></div>
+      </aside>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const projects = {
+      core: {
+        name: 'ProjectBoard Core', repo: 'github.com/acme/projectboard', mark: 'PB', color: '#282722', defaultTarget:'develop', allowedTargets:['develop','main','release/1.8'], allowedPattern:'release/*',
+        agents: [
+          { initials: 'A2', name: 'runner-shanghai', meta: '执行 PB-148 · 18s', type: 'agent' },
+          { initials: 'A1', name: 'runner-office', meta: '空闲 · 4m', type: 'agent' },
+          { initials: 'A3', name: 'runner-backup', meta: '待接受 2', type: 'agent' },
+        ],
+        tasks: [
+          { id:'PB-152', title:'Runner 配置变更后要求本机重新确认', group:'attention', priority:'urgent', status:'acceptance', assignee:{initials:'周',name:'周棠',type:'human'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', updated:'8 分钟前', version:4, conclusionVersion:2, targetBranch:'release/1.8', baseline:'91c34af', branch:'projectboard/core/152', description:'Runner 检测到仓库、命令或禁止目录变化后，暂停该项目并要求本机重新确认配置摘要。', criteria:['配置摘要发生变化时停止领取新任务。','管理员确认前不得启动 Codex 子进程。','确认操作写入只追加审计记录。'] },
+          { id:'PB-148', title:'并发领取时保证 Agent 单活租约', group:'running', priority:'urgent', status:'execution', assignee:{initials:'A2',name:'runner-shanghai',type:'agent'}, discussionMode:'auto', executionMode:'auto', acceptanceMode:'independent_agent', updated:'心跳 18 秒前', version:7, conclusionVersion:1, targetBranch:'develop', baseline:'a83fc12', branch:'projectboard/core/148', description:'同一 Agent 并发调用领取接口时，只允许一个活跃租约；失败请求必须返回稳定、可审计的容量冲突。', criteria:['两个并发请求只产生一个活跃租约。','失败请求返回 409 AGENT_CAPACITY_EXCEEDED。','活动记录中不存在重复领取事件。'] },
+          { id:'PB-160', title:'审计导出命令与字段脱敏', group:'running', priority:'medium', status:'discussion', assignee:{initials:'A3',name:'runner-backup',type:'agent'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', updated:'队列第 2 位', version:2, conclusionVersion:0, branch:'—', description:'提供管理员审计导出命令，并对 Token、Cookie、授权头和凭据字段统一脱敏。', criteria:['导出格式稳定且包含完整时间线。','敏感字段使用统一占位符。','导出行为本身写入审计记录。'] },
+          { id:'PB-156', title:'任务分支禁止非快进推送', group:'ready', priority:'medium', status:'todo', assignee:null, discussionMode:'auto', executionMode:'manual', acceptanceMode:'human', updated:'3 小时前', version:1, conclusionVersion:0, branch:'—', description:'Runner 只能 fast-forward 推送受控 ProjectBoard 任务分支，拒绝默认分支、tag 与强制推送。', criteria:['非快进更新提交阻塞报告。','默认分支与非任务分支始终拒绝。','远端任务分支不自动删除。'] },
+          { id:'PB-131', title:'完善本地身份认证与会话安全', group:'parent', priority:'high', status:'execution', assignee:null, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', waitingChildren:true, updated:'23 分钟前', version:9, conclusionVersion:3, branch:'—', description:'父工单等待三个身份认证子项完成；最后一个子项完成后进入验收。', criteria:['全部子工单完成后进入验收。','父工单不会重新进入 Agent 执行队列。','验收必须留下结构化结论。'], children:[
+            { id:'PB-132', title:'实现 Argon2id 密码存储与限速', group:'parent', priority:'high', status:'completed', assignee:{initials:'陈',name:'陈序',type:'human'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', updated:'昨天', version:5, conclusionVersion:1, branch:'projectboard/core/132', description:'实现密码哈希、登录限速及首次管理员凭据生成。', criteria:['密码使用 Argon2id 哈希。','登录失败按账户与来源限速。'] },
+            { id:'PB-133', title:'会话 Cookie、Origin 与 CSRF 校验', group:'parent', priority:'medium', status:'completed', assignee:{initials:'A1',name:'runner-office',type:'agent'}, discussionMode:'auto', executionMode:'auto', acceptanceMode:'independent_agent', updated:'昨天', version:6, conclusionVersion:2, branch:'projectboard/core/133', description:'实现服务端 Session 与浏览器请求来源校验。', criteria:['Cookie 设置 HttpOnly、Secure、SameSite。','写请求执行 Origin 与 CSRF 校验。'] },
+            { id:'PB-134', title:'管理员重置密码与禁用用户', group:'parent', priority:'medium', status:'discussion', assignee:{initials:'周',name:'周棠',type:'human'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', blockedAt:'今天 08:26', blockedReason:'需要安全负责人确认管理员禁用账户的恢复边界。', updated:'2 小时前', version:3, conclusionVersion:0, branch:'—', description:'补齐管理员对本地账户的重置和禁用能力。', criteria:['只有管理员可以执行。','操作写入审计记录。'] },
+          ] },
+        ]
+      },
+      runner: {
+        name: 'Runner Runtime', repo: 'github.com/acme/pb-runner', mark: 'RR', color: '#3d6e59', defaultTarget:'main', allowedTargets:['main','release/0.9'], allowedPattern:'release/*',
+        agents: [
+          { initials: 'R1', name: 'runner-linux-ci', meta: '执行 RR-42 · 1m', type: 'agent' },
+          { initials: 'R2', name: 'runner-windows', meta: '空闲 · 2m', type: 'agent' },
+        ],
+        tasks: [
+          { id:'RR-42', title:'租约失效后终止受控 Codex 进程树', group:'running', priority:'urgent', status:'execution', assignee:{initials:'R1',name:'runner-linux-ci',type:'agent'}, discussionMode:'auto', executionMode:'auto', acceptanceMode:'independent_agent', updated:'心跳 1 分钟前', version:8, conclusionVersion:1, branch:'projectboard/runner/42', description:'Runner 从心跳响应得知租约失效后，只终止自己持有句柄且身份匹配的进程树。', criteria:['不会按进程名终止无关进程。','保留本地 worktree 供人工检查。','中断结果回写服务端。'] },
+          { id:'RR-47', title:'Windows 托盘暂停与恢复语义', group:'attention', priority:'high', status:'acceptance', assignee:{initials:'林',name:'林川',type:'human'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', updated:'12 分钟前', version:4, conclusionVersion:1, branch:'projectboard/runner/47', description:'暂停只停止领取新任务，当前任务继续运行并保持心跳；恢复后重新进入轮询。', criteria:['活跃任务在暂停后继续心跳。','恢复不会创建重复轮询。','状态图标与菜单文案一致。'] },
+          { id:'RR-51', title:'systemd 优雅停止与日志轮转示例', group:'ready', priority:'medium', status:'todo', assignee:null, discussionMode:'auto', executionMode:'auto', acceptanceMode:'human', updated:'今天 08:40', version:1, conclusionVersion:0, branch:'—', description:'提供 Linux 前台 CLI、systemd unit 示例及 SIGTERM/SIGINT 保守停止说明。', criteria:['SIGTERM 触发受控停止流程。','日志按大小和日期轮转。','凭据库不可用时安全回退。'] },
+        ]
+      },
+      security: {
+        name: 'Admin & Security', repo: 'github.com/acme/pb-security', mark: 'AS', color: '#8a4b38', defaultTarget:'main', allowedTargets:['main','release/2.4'], allowedPattern:'release/*',
+        agents: [{ initials:'S1', name:'runner-security', meta:'空闲 · 7m', type:'agent' }],
+        tasks: [
+          { id:'AS-18', title:'统一日志与错误响应凭据脱敏', group:'attention', priority:'urgent', status:'execution', assignee:{initials:'S1',name:'runner-security',type:'agent'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', blockedAt:'今天 09:43', blockedReason:'等待安全负责人提供生产脱敏样本。', updated:'35 分钟前', version:5, conclusionVersion:2, branch:'projectboard/security/18', description:'建立 Token、Cookie、授权头和凭据字段的统一脱敏层。', criteria:['所有日志通道复用同一脱敏器。','错误响应不泄露原始值。','测试覆盖嵌套字段。'] },
+          { id:'AS-22', title:'Agent 项目授权越权测试矩阵', group:'ready', priority:'high', status:'todo', assignee:null, discussionMode:'auto', executionMode:'auto', acceptanceMode:'independent_agent', updated:'昨天', version:2, conclusionVersion:0, branch:'—', description:'验证 Agent 只能访问已授权项目，且不能通过父子或依赖 ID 推断其他项目数据。', criteria:['覆盖全部 MCP 读写工具。','跨项目 ID 返回一致的拒绝响应。','Agent 永远不能人工验收自己的结果。'] },
+          { id:'AS-25', title:'Runner 一次性配对与 Token 撤销', group:'running', priority:'medium', status:'discussion', assignee:{initials:'S1',name:'runner-security',type:'agent'}, discussionMode:'manual', executionMode:'manual', acceptanceMode:'human', updated:'待 Agent 回复', version:1, conclusionVersion:0, branch:'—', description:'浏览器只展示一次性配对码，Agent Token 仅返回 Runner，服务端只保存哈希并支持管理员撤销。', criteria:['浏览器与日志不接触明文 Token。','配对码只能消费一次且十分钟过期。','撤销后下一次请求立即失败。','创建、配对与撤销均写入审计。'] },
+        ]
+      }
+    };
+
+    const globalAgents = [];
+    const projectAgentGrants = {};
+    Object.entries(projects).forEach(([projectKey, project]) => {
+      projectAgentGrants[projectKey] = new Set(project.agents.map(agent => agent.name));
+      project.agents.forEach(agent => {
+        let identity = globalAgents.find(item => item.name === agent.name);
+        if (!identity) {
+          identity = { initials: agent.initials, name: agent.name, type: agent.type, contexts: {} };
+          globalAgents.push(identity);
+        }
+        identity.contexts[projectKey] = agent.meta;
+      });
+    });
+
+    const projectMembers = {
+      core: [
+        { initials:'林', name:'林川', username:'linchuan', role:'developer', systemRole:'administrator', status:'active', current:'验收 PB-152', joined:'2026-06-12' },
+        { initials:'周', name:'周棠', username:'zhoutang', role:'developer', status:'active', current:'执行 PB-152', joined:'2026-06-18' },
+        { initials:'陈', name:'陈序', username:'chenxu', role:'viewer', status:'active', current:'—', joined:'2026-07-03' }
+      ],
+      runner: [
+        { initials:'林', name:'林川', username:'linchuan', role:'developer', systemRole:'administrator', status:'active', current:'验收 RR-47', joined:'2026-06-12' },
+        { initials:'周', name:'周棠', username:'zhoutang', role:'viewer', status:'active', current:'—', joined:'2026-07-20' }
+      ],
+      security: [
+        { initials:'周', name:'周棠', username:'zhoutang', role:'developer', status:'active', current:'讨论 AS-18 阻塞原因', joined:'2026-06-18' },
+        { initials:'陈', name:'陈序', username:'chenxu', role:'viewer', status:'disabled', current:'—', joined:'2026-07-03' }
+      ]
+    };
+
+    const globalHumans = [
+      { initials:'林', name:'林川', username:'linchuan', systemRole:'administrator', status:'active', lastSeen:'当前在线' },
+      { initials:'周', name:'周棠', username:'zhoutang', systemRole:'user', status:'active', lastSeen:'12 分钟前' },
+      { initials:'陈', name:'陈序', username:'chenxu', systemRole:'user', status:'active', lastSeen:'昨天 18:42' },
+      { initials:'沈', name:'沈知行', username:'shenzhixing', systemRole:'user', status:'active', lastSeen:'3 天前' },
+      { initials:'宋', name:'宋遥', username:'songyao', systemRole:'user', status:'active', lastSeen:'5 天前' },
+      { initials:'叶', name:'叶明', username:'yeming', systemRole:'user', status:'disabled', lastSeen:'7 月 19 日' }
+    ];
+
+    const statusView = {
+      todo: ['待办', 'outline'], discussion: ['讨论中', 'amber'], execution: ['执行中', 'blue'],
+      acceptance: ['验收中', 'amber'], completed: ['已完成', 'green'], abandoned: ['已放弃', 'outline']
+    };
+    const stageOrder = ['todo','discussion','execution','acceptance','completed'];
+    const stageLabel = { todo:'待办', discussion:'讨论', execution:'执行', acceptance:'验收', completed:'完成', abandoned:'放弃' };
+    const modeLabel = { manual:'人工', auto:'自动', human:'人工', independent_agent:'独立 Agent' };
+    const priorityLabel = { urgent:'紧急', high:'高', medium:'中', low:'低' };
+    const groupLabel = { attention:'需要介入', running:'正在推进', ready:'等待分配', parent:'父工单' };
+    const groupOrder = ['attention', 'running', 'ready', 'parent'];
+
+    const state = {
+      project: new URLSearchParams(location.search).get('project') || 'core',
+      page: 'queue', tab: 'all', locale: 'zh-CN', mineOnly: false, search: '', selectedTask: null,
+      selectedHuman: null, selectedAgent: null, selectedManagedUser: null, selectedEvent: null, activityActor: null, activityType: 'all', expandedParents: new Set(['PB-131'])
+    };
+    if (!projects[state.project]) state.project = 'core';
+
+    const uiTranslations = new Map([
+      ['项目','Project'], ['个人','Personal'], ['全部项目','All projects'], ['服务正常','All systems operational'],
+      ['全局搜索','Global search'], ['打开我的账号','Open my account'], ['关闭详情','Close details'],
+      ['切换项目','Switch project'], ['搜索项目或仓库…','Search projects or repositories…'], ['管理与新建项目','Manage & create projects'],
+      ['工作区','Workspace'], ['任务队列','Task queue'], ['成员','Members'], ['活动记录','Activity'], ['项目设置','Project settings'],
+      ['系统','System'], ['用户管理','User management'], ['创建用户','Create user'], ['管理组织级登录账户；项目角色仍在成员页中配置。','Manage organization accounts; configure project roles on the Members page.'],
+      ['用户 / 账户','User / account'], ['系统角色','System role'], ['项目关系','Project access'], ['最后活动','Last active'], ['账户状态','Account status'],
+      ['账户详情','Account details'], ['普通用户','Standard user'], ['账户正常','Account active'], ['账户已禁用','Account disabled'], ['禁用用户','Disable user'], ['启用用户','Enable user'], ['重置密码','Reset password'],
+      ['创建组织级用户','Create organization user'], ['临时密码','Temporary password'], ['首次登录','First sign-in'], ['禁用原因','Reason for disabling'], ['启用说明','Enable note'], ['确认禁用','Confirm disable'], ['确认启用','Confirm enable'], ['重置并撤销会话','Reset and revoke sessions'],
+      ['账户状态','Account status'], ['搜索姓名或用户名…','Search name or username…'], ['查看账户','View account'], ['当前账户','Current account'], ['项目成员关系','Project memberships'],
+      ['新建工单','New work item'], ['全部','All'], ['待办','To do'], ['讨论','Discussion'], ['执行','Execution'], ['验收','Acceptance'], ['完成','Completed'], ['放弃','Abandoned'],
+      ['搜索标题或编号…','Search title or ID…'], ['只看我的','Assigned to me'], ['筛选','Filter'],
+      ['需要介入','Needs attention'], ['正在推进','In progress'], ['等待分配','Unassigned'], ['父工单','Parent items'],
+      ['待办','To do'], ['讨论中','In discussion'], ['执行中','In execution'], ['验收中','In acceptance'], ['已完成','Completed'], ['已放弃','Abandoned'], ['阻塞','Blocked'],
+      ['未分配','Unassigned'], ['紧急','Urgent'], ['高','High'], ['中','Medium'], ['低','Low'], ['人工','Manual'], ['自动','Automatic'], ['独立 Agent','Independent agent'],
+      ['返回任务队列','Back to task queue'], ['发送消息','Send message'], ['更换执行者','Change executor'], ['放弃工单','Abandon item'], ['阶段操作','Stage action'],
+      ['工单流程','Work item flow'], ['当前阶段','Current stage'], ['待进入','Not started'], ['流程结束','Flow complete'], ['已阻塞','Blocked'], ['在此放弃','Abandoned here'],
+      ['项目','Project'], ['执行者','Executor'], ['更新','Updated'], ['目标分支','Target branch'], ['基线提交','Baseline commit'], ['任务分支','Work branch'],
+      ['工单说明','Work item brief'], ['进入讨论','Entered discussion'], ['进入执行','Entered execution'], ['进入验收','Entered acceptance'], ['已完成','Completed'],
+      ['系统','System'], ['讨论结论','Discussion conclusion'], ['目标','Goal'], ['范围 / 不做','Scope / out of scope'], ['实施方案','Implementation plan'], ['验收条件','Acceptance criteria'], ['风险','Risks'],
+      ['Git 集成','Git integration'], ['Runner 验证','Runner validation'], ['自动验证通过','Automated checks passed'], ['验收尝试 #2','Acceptance attempt #2'], ['等待结构化结论','Awaiting structured outcome'],
+      ['继续对话','Continue conversation'], ['当前项目','Current project'], ['负责人','Owner'], ['讨论模式','Discussion mode'], ['执行模式','Execution mode'], ['验收模式','Acceptance mode'],
+      ['打开完整工单','Open full work item'], ['分配执行者','Assign executor'], ['阻塞标记','Blocker'], ['验收标准','Acceptance criteria'],
+      ['工单详情','Work item details'], ['添加评论','Add comment'], ['查看全部人类账户，并标记它们在当前项目中的角色。','View all people and their role in the current project.'],
+      ['添加成员','Add member'], ['搜索姓名或用户名…','Search name or username…'], ['成员 / 账户','Member / account'], ['项目角色','Project role'], ['当前工作','Current work'], ['账户状态','Account status'],
+      ['创建 Agent','Create agent'], ['搜索 Agent 名称…','Search agent name…'], ['Agent / 身份','Agent / identity'], ['Runner 状态','Runner status'], ['当前项目授权','Current project access'],
+      ['活动记录','Activity'], ['不可修改的用户、Agent、对话、验收、指派与 Git 操作时间线。','Immutable timeline of user, agent, conversation, acceptance, assignment, and Git activity.'],
+      ['导出审计','Export audit'], ['搜索操作、工单或执行者…','Search actions, items, or actors…'], ['事件类型','Event type'],
+      ['查看全部活动','View all activity'], ['全部类型','All event types'], ['类型','Type'], ['活动','Activity'], ['时间','Time'], ['对象','Object'], ['不可修改','Immutable'], ['事件详情','Event details'], ['结构化负载','Structured payload'], ['发生时间','Occurred at'], ['来源','Source'],
+      ['身份活动','Identity activity'], ['人类用户','Human user'], ['Agent 身份','Agent identity'], ['租约','Lease'], ['指派','Assignment'], ['账户','Account'], ['登录','Sign-in'], ['成员关系','Membership'],
+      ['项目设置','Project settings'], ['定义 Runner 可执行的仓库、命令和默认阶段策略。','Define the repository, commands, and default stage policies available to Runner.'], ['编辑设置','Edit settings'],
+      ['Git 集成','Git integration'], ['一次安装 GitHub App；ProjectBoard 与 Runner 按用途取得不同权限的短期 Token。','Install one GitHub App; ProjectBoard and Runner receive purpose-scoped short-lived tokens.'], ['自动配置 Git','Set up Git'],
+      ['Git 提供商','Git provider'], ['已连接','Connected'], ['安装权限','Installation permission'], ['Contents 读写','Contents read & write'], ['一个 App','One App'], ['运行时凭据','Runtime credentials'], ['观察只读 · Runner 读写','Observer read · Runner write'], ['单仓库 · 最长 1 小时','Single repository · up to 1 hour'], ['Push 订阅','Push subscription'], ['正常','Healthy'], ['2 分钟前验证','Verified 2 minutes ago'], ['Agent Git 能力','Agent Git capability'], ['项目启用后按任务签发','Issued per task after project enablement'], ['无长期凭据','No long-lived credentials'],
+      ['仓库与分支','Repository & branches'], ['Runner 命令','Runner commands'], ['默认协作模式','Default collaboration modes'], ['保存设置','Save settings'], ['放弃更改','Discard changes'],
+      ['Git 仓库 URL','Git repository URL'], ['默认目标分支','Default target branch'], ['允许的目标分支','Allowed target branches'], ['Runner 推送范围','Runner push scope'], ['禁止修改路径','Protected paths'],
+      ['人工确认','Manual confirmation'], ['自动进入执行','Auto-enter execution'], ['人工提交','Manual submission'], ['验证通过后自动','Automatic after checks pass'], ['拆分确认','Split confirmation'], ['禁用','Disabled'],
+      ['项目管理','Project management'], ['管理项目上下文、仓库绑定和创建新项目。','Manage project context, repository bindings, and create projects.'], ['创建项目','Create project'], ['搜索项目名称或仓库…','Search project name or repository…'],
+      ['项目 / 仓库','Project / repository'], ['默认分支','Default branch'], ['成员','Members'], ['未完成工单','Open items'], ['操作','Actions'], ['打开','Open'],
+      ['我的账号','My account'], ['管理个人资料、登录安全和当前会话。','Manage your profile, sign-in security, and current sessions.'], ['个人资料','Profile'], ['编辑资料','Edit profile'], ['显示名称','Display name'], ['用户名','Username'], ['系统角色','System role'], ['系统管理员','System administrator'], ['正常','Active'],
+      ['登录安全','Sign-in security'], ['修改密码','Change password'], ['密码','Password'], ['已设置','Configured'], ['最近修改','Last changed'], ['当前会话','Current sessions'], ['管理会话','Manage sessions'], ['本机 · Codex Desktop','This device · Codex Desktop'],
+      ['没有符合条件的工单','No matching work items'], ['调整搜索或切换队列视图后再试。','Adjust the search or change the queue view.'],
+      ['创建工单','Create work item'], ['标题','Title'], ['描述','Description'], ['优先级','Priority'], ['暂不分配','Leave unassigned'], ['取消','Cancel'],
+      ['消息','Message'], ['附件','Attachments'], ['发布评论','Post comment'], ['确认分配','Confirm assignment'], ['变更说明','Change note'], ['放弃原因','Reason for abandonment'], ['确认放弃','Confirm abandonment'],
+      ['冻结讨论结论','Freeze discussion conclusion'], ['冻结并进入执行','Freeze and enter execution'], ['提交执行结果','Submit execution result'], ['结果摘要','Result summary'], ['补充附件','Additional attachments'], ['提交并进入验收','Submit for acceptance'], ['提交验收结论','Submit acceptance outcome'], ['结构化结论','Structured outcome'], ['验收说明','Acceptance note'],
+      ['通过 → 完成','Pass → Completed'], ['要求修改 → 执行','Changes requested → Execution'], ['范围不清 → 讨论','Scope unclear → Discussion'], ['放弃 → 放弃','Abandon → Abandoned'],
+      ['启用','Enable'], ['已启用','Enabled'], ['未启用','Not enabled'], ['在线空闲','Online · idle'], ['正在执行','Executing'], ['待接受','Awaiting acceptance'], ['查看活动','View activity'],
+      ['已配对','Paired'], ['组织级身份','Organization identity'], ['在当前项目启用','Enable for this project'], ['查看当前任务','View current task'], ['轮换 Agent Token','Rotate Agent token'], ['撤销配对','Revoke pairing'],
+      ['Runner 设备','Runner device'], ['Git 仓库能力','Git repository capability'], ['随任务签发读写凭据','Issue read/write credentials per task'], ['长期 Git 凭据','Long-lived Git credentials'], ['当前凭据','Current credential'], ['未签发','Not issued'], ['已签发 · 最长 1 小时','Issued · up to 1 hour'],
+      ['登记新的 Runner 身份','Register a new Runner identity'], ['Agent 名称','Agent name'], ['用途说明','Purpose'], ['创建并生成配对码','Create and generate pairing code'], ['连接 Runner','Connect Runner'], ['一次性配对码','One-time pairing code'], ['复制命令','Copy command'], ['等待 Runner 连接','Waiting for Runner'], ['生成新配对码','Generate new pairing code'], ['模拟 Runner 完成配对','Simulate Runner pairing'], ['配对成功','Pairing complete'], ['稍后启用','Enable later'], ['所有项目默认未启用','Disabled for all projects by default']
+    ]);
+
+    const originalText = new WeakMap();
+    const originalAttributes = new WeakMap();
+    let languagePassQueued = false;
+
+    function translateUiString(value) {
+      if (!value || !value.trim()) return value;
+      const leading = value.match(/^\s*/)[0];
+      const trailing = value.match(/\s*$/)[0];
+      const source = value.trim();
+      if (uiTranslations.has(source)) return `${leading}${uiTranslations.get(source)}${trailing}`;
+      let match;
+      if ((match = source.match(/^(\d+) 个活跃项目$/))) return `${leading}${match[1]} active projects${trailing}`;
+      if ((match = source.match(/^(\d+) 条事件$/))) return `${leading}${match[1]} events${trailing}`;
+      if ((match = source.match(/^(\d+) 个阻塞$/))) return `${leading}${match[1]} blocked${trailing}`;
+      if ((match = source.match(/^父工单 · (.+)$/))) return `${leading}Parent · ${match[1]}${trailing}`;
+      if ((match = source.match(/^讨论 (人工|自动)$/))) return `${leading}Discussion · ${uiTranslations.get(match[1])}${trailing}`;
+      if ((match = source.match(/^执行 (人工|自动)$/))) return `${leading}Execution · ${uiTranslations.get(match[1])}${trailing}`;
+      if ((match = source.match(/^(\d+) \/ 5 · 当前在(.+)阶段$/))) return `${leading}${match[1]} / 5 · Currently in ${uiTranslations.get(match[2]) || match[2]}${trailing}`;
+      if ((match = source.match(/^(\d+) \/ 5 · (.+)阶段已阻塞$/))) return `${leading}${match[1]} / 5 · ${uiTranslations.get(match[2]) || match[2]} is blocked${trailing}`;
+      if ((match = source.match(/^已在(.+)阶段放弃$/))) return `${leading}Abandoned during ${uiTranslations.get(match[1]) || match[1]}${trailing}`;
+      if (source === '5 / 5 · 流程已完成') return `${leading}5 / 5 · Flow completed${trailing}`;
+      if ((match = source.match(/^仅显示 (.+) 中当前可见的工作。$/))) return `${leading}Showing work currently visible in ${match[1]}.${trailing}`;
+      if ((match = source.match(/^(.+) 项$/))) return `${leading}${match[1]} items${trailing}`;
+      return value;
+    }
+
+    function applyLanguage(root = document.body) {
+      document.documentElement.lang = state.locale === 'en' ? 'en' : 'zh-CN';
+      document.title = state.locale === 'en' ? 'ProjectBoard · Work Queue Prototype' : 'ProjectBoard · 任务队列原型';
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.parentElement?.closest('[data-no-i18n], script, style')) continue;
+        if (!originalText.has(node)) originalText.set(node, node.nodeValue);
+        const source = originalText.get(node);
+        const next = state.locale === 'en' ? translateUiString(source) : source;
+        if (node.nodeValue !== next) node.nodeValue = next;
+      }
+      root.querySelectorAll?.('[placeholder], [aria-label], [title], [data-tooltip], optgroup[label]').forEach(element => {
+        if (element.closest('[data-no-i18n]')) return;
+        if (!originalAttributes.has(element)) originalAttributes.set(element, {});
+        const saved = originalAttributes.get(element);
+        ['placeholder','aria-label','title','data-tooltip','label'].forEach(attribute => {
+          if (!element.hasAttribute(attribute)) return;
+          if (!(attribute in saved)) saved[attribute] = element.getAttribute(attribute);
+          const next = state.locale === 'en' ? translateUiString(saved[attribute]) : saved[attribute];
+          if (element.getAttribute(attribute) !== next) element.setAttribute(attribute, next);
+        });
+      });
+      const switchLabel = document.querySelector('#languageSwitchLabel');
+      const switchButton = document.querySelector('#languageSwitch');
+      const nextSwitchLabel = state.locale === 'en' ? '中文' : 'EN';
+      const nextSwitchAria = state.locale === 'en' ? '切换到中文' : 'Switch to English';
+      if (switchLabel && switchLabel.textContent !== nextSwitchLabel) switchLabel.textContent = nextSwitchLabel;
+      if (switchButton && switchButton.getAttribute('aria-label') !== nextSwitchAria) switchButton.setAttribute('aria-label', nextSwitchAria);
+    }
+
+    function queueLanguagePass() {
+      if (languagePassQueued) return;
+      languagePassQueued = true;
+      queueMicrotask(() => { languagePassQueued = false; applyLanguage(); });
+    }
+
+    const projectTrigger = document.querySelector('#projectTrigger');
+    const projectMenu = document.querySelector('#projectMenu');
+    const projectSearch = document.querySelector('#projectSearch');
+    const queueContent = document.querySelector('#queueContent');
+    const inspector = document.querySelector('#inspector');
+    const drawerBackdrop = document.querySelector('#drawerBackdrop');
+    const toast = document.querySelector('#toast');
+    let toastTimer;
+    let drawerSnapshot = null;
+    let drawerReturnFocus = null;
+    let gitSetupProvider = 'github';
+
+    function flatTasks(project = projects[state.project]) {
+      return project.tasks.flatMap(task => task.children ? [task, ...task.children] : [task]);
+    }
+
+    function findTask(id) {
+      return flatTasks().find(task => task.id === id);
+    }
+
+    function targetBranch(task) {
+      return task.targetBranch || projects[state.project].defaultTarget;
+    }
+
+    function baselineCommit(task) {
+      return task.baseline || (task.branch === '—' ? '领取时确定' : '7d12e6b');
+    }
+
+    function avatarMarkup(assignee) {
+      if (!assignee) return '<span class="badge outline">未分配</span>';
+      const kind = assignee.type === 'agent' ? 'agent' : assignee.initials === '林' ? 'warm' : 'blue';
+      return `<span class="avatar ${kind}">${assignee.initials}</span>`;
+    }
+
+    function badgeMarkup(status) {
+      const [label, kind] = statusView[status] || [status, 'outline'];
+      return `<span class="badge ${kind}">${label}</span>`;
+    }
+
+    function blockedMarkup(task) {
+      return task.blockedAt ? '<span class="badge red">阻塞</span>' : '';
+    }
+
+    function taskMatches(task) {
+      const query = state.search.toLowerCase();
+      if (query && !`${task.id} ${task.title}`.toLowerCase().includes(query)) return false;
+      if (state.tab !== 'all' && task.status !== state.tab) return false;
+      if (state.mineOnly && task.assignee?.name !== '林川') return false;
+      return true;
+    }
+
+    function taskRow(task, child = false) {
+      return `<article class="work-item ${state.selectedTask === task.id ? 'selected' : ''}" data-task="${task.id}">
+        <i class="priority-rail ${task.priority}"></i>
+        <div class="work-main">
+          <div class="work-line"><span class="work-id">${task.id}</span>${badgeMarkup(task.status)}${blockedMarkup(task)}</div>
+          <div class="work-title">${task.title}</div>
+          <div class="work-meta"><span>讨论 ${modeLabel[task.discussionMode]}</span><span>·</span><span>执行 ${modeLabel[task.executionMode]}</span><span>·</span><span>→ ${targetBranch(task)}</span><span>·</span><span>${task.updated}</span></div>
+        </div>
+        <div class="work-side">${avatarMarkup(task.assignee)}<span class="badge outline">${priorityLabel[task.priority]}</span></div>
+      </article>`;
+    }
+
+    function parentRow(task) {
+      const visibleChildren = task.children.filter(taskMatches);
+      const completed = task.children.filter(child => child.status === 'completed').length;
+      const open = state.expandedParents.has(task.id);
+      return `<div class="parent-item">
+        <article class="work-item ${state.selectedTask === task.id ? 'selected' : ''}" data-task="${task.id}">
+          <i class="priority-rail ${task.priority}"></i>
+          <div class="work-main">
+            <div class="work-line"><button class="parent-toggle ${open ? 'open' : ''}" type="button" data-toggle-parent="${task.id}" aria-label="展开子工单"><svg class="icon"><use href="#i-chevron"/></svg></button><span class="work-id">${task.id}</span><span class="badge outline">父工单 · ${completed}/${task.children.length}</span></div>
+            <div class="work-title">${task.title}</div>
+            <div class="work-meta"><span>${stageLabel[task.status]}</span><span>·</span><span>${task.children.filter(child => child.blockedAt).length} 个阻塞</span><span>·</span><span>${task.updated}</span></div>
+          </div>
+          <div class="work-side">${task.children.some(child => child.blockedAt) ? `<span class="badge red">${task.children.filter(child => child.blockedAt).length} 阻塞</span>` : badgeMarkup(task.status)}</div>
+        </article>
+        <div class="child-list" ${open ? '' : 'hidden'}>${visibleChildren.map(child => taskRow(child, true)).join('')}</div>
+      </div>`;
+    }
+
+    function renderQueue() {
+      const project = projects[state.project];
+      const groups = groupOrder.map(group => ({ group, tasks: project.tasks.filter(task => task.group === group && (taskMatches(task) || task.children?.some(taskMatches))) })).filter(item => item.tasks.length);
+      if (!groups.length) {
+        queueContent.innerHTML = '<div class="empty-state"><strong>没有符合条件的工单</strong><span>调整搜索或切换队列视图后再试。</span></div>';
+        return;
+      }
+      queueContent.innerHTML = groups.map(({group, tasks}) => `<section class="queue-group"><div class="group-label">${groupLabel[group]} <span>${tasks.length}</span></div>${tasks.map(task => task.children ? parentRow(task) : taskRow(task)).join('')}</section>`).join('');
+    }
+
+    function renderInspector() {
+      const task = findTask(state.selectedTask) || flatTasks()[0];
+      if (!task) return;
+      state.selectedTask = task.id;
+      document.querySelector('#inspectorBody').innerHTML = `
+        <div class="inspector-id">${task.id} · VERSION ${task.version}</div>
+        <h2>${task.title}</h2>
+        <div class="inspector-badges">${badgeMarkup(task.status)}${blockedMarkup(task)}<span class="badge outline">${priorityLabel[task.priority]}</span></div>
+        <p class="inspector-description">${task.description}</p>
+        <div class="inspector-actions"><button class="button primary" type="button" data-open-task-page>打开完整工单</button><button class="button" type="button" data-preview-action="comment">发送消息</button><button class="button" type="button" data-preview-action="assign">${task.assignee ? '更换执行者' : '分配执行者'}</button></div>
+        <dl class="kv-list">
+          <div class="kv-row"><dt>当前阶段</dt><dd>${stageLabel[task.status]}</dd></div>
+          <div class="kv-row"><dt>执行者</dt><dd>${task.assignee ? task.assignee.name : '未分配'}</dd></div>
+          <div class="kv-row"><dt>讨论模式</dt><dd>${modeLabel[task.discussionMode]}</dd></div>
+          <div class="kv-row"><dt>执行模式</dt><dd>${modeLabel[task.executionMode]}</dd></div>
+          <div class="kv-row"><dt>验收模式</dt><dd>${modeLabel[task.acceptanceMode]}</dd></div>
+          <div class="kv-row"><dt>目标分支</dt><dd><code>${targetBranch(task)}</code></dd></div>
+          <div class="kv-row"><dt>基线提交</dt><dd><code>${baselineCommit(task)}</code></dd></div>
+          <div class="kv-row"><dt>任务分支</dt><dd><code>${task.branch}</code></dd></div>
+        </dl>
+        ${task.blockedAt ? `<section class="detail-section"><h3>阻塞标记</h3><div class="impact-note"><strong>${task.blockedAt}</strong><br>${task.blockedReason}</div></section>` : ''}
+        <section class="detail-section"><h3>验收标准</h3>${task.criteria.map(item => `<div class="criterion"><i></i><span>${item}</span></div>`).join('')}</section>`;
+      bindToastButtons();
+      document.querySelector('[data-open-task-page]').addEventListener('click', () => {
+        closeDrawer();
+        state.page = 'task';
+        renderCurrentPage();
+      });
+      document.querySelectorAll('[data-preview-action]').forEach(button => button.addEventListener('click', () => { renderTaskActionDrawer(button.dataset.previewAction); openDrawer(); }));
+    }
+
+    function renderFullTaskPage() {
+      const task = findTask(state.selectedTask) || flatTasks()[0];
+      if (!task) return;
+      document.querySelector('#fullTaskId').textContent = `${task.id} · VERSION ${task.version}`;
+      document.querySelector('#fullTaskTitle').textContent = task.title;
+      document.querySelector('#fullTaskBadges').innerHTML = `${badgeMarkup(task.status)}${blockedMarkup(task)}<span class="badge outline">${priorityLabel[task.priority]}</span>`;
+      document.querySelector('#fullTaskMeta').innerHTML = `<div class="task-meta-item"><span>项目</span><strong>${projects[state.project].name}</strong></div><div class="task-meta-item"><span>执行者</span><strong>${task.assignee?.name || '未分配'}</strong></div><div class="task-meta-item"><span>讨论</span><strong>${modeLabel[task.discussionMode]}</strong></div><div class="task-meta-item"><span>执行</span><strong>${modeLabel[task.executionMode]}</strong></div><div class="task-meta-item"><span>验收</span><strong>${modeLabel[task.acceptanceMode]}</strong></div><div class="task-meta-item"><span>更新</span><strong>${task.updated}</strong></div>`;
+      const abandonedPhase = task.abandonedFrom || 'todo';
+      const currentPhase = stageOrder.indexOf(task.status === 'abandoned' ? abandonedPhase : task.status);
+      const progressSummary = task.status === 'abandoned'
+        ? `已在${stageLabel[abandonedPhase]}阶段放弃`
+        : task.blockedAt
+          ? `${currentPhase + 1} / 5 · ${stageLabel[task.status]}阶段已阻塞`
+          : task.status === 'completed'
+            ? '5 / 5 · 流程已完成'
+            : `${currentPhase + 1} / 5 · 当前在${stageLabel[task.status]}阶段`;
+      document.querySelector('#fullTaskProgressSummary').textContent = progressSummary;
+      document.querySelector('#fullTaskPhases').innerHTML = stageOrder.map((phase,index) => {
+        const isCurrent = index === currentPhase;
+        const isDone = index < currentPhase;
+        const kind = isDone ? 'done' : isCurrent && task.status === 'abandoned' ? 'abandoned' : isCurrent && task.status === 'completed' ? 'complete' : isCurrent ? 'active' : 'upcoming';
+        const blocked = isCurrent && task.blockedAt ? ' blocked' : '';
+        const stateText = isDone ? '已完成' : kind === 'abandoned' ? '在此放弃' : kind === 'complete' ? '流程结束' : isCurrent && task.blockedAt ? '已阻塞' : isCurrent ? '当前阶段' : '待进入';
+        const mark = isDone || kind === 'complete' ? '✓' : kind === 'abandoned' ? '×' : index + 1;
+        return `<div class="phase-band-step ${kind}${blocked}" role="listitem" ${isCurrent ? 'aria-current="step"' : ''}><div class="phase-node"><span class="phase-node-mark" aria-hidden="true">${mark}</span><span class="phase-node-copy"><strong>${stageLabel[phase]}</strong><small>${stateText}</small></span></div></div>`;
+      }).join('');
+      const primary = document.querySelector('#primaryTaskAction');
+      const primaryLabels = { todo:'分配并进入讨论', discussion:'确认讨论结论', execution:'提交执行结果', acceptance:'提交验收结论', completed:'已完成', abandoned:'已放弃' };
+      primary.textContent = primaryLabels[task.status];
+      primary.disabled = ['completed','abandoned'].includes(task.status);
+      renderConversation(task);
+    }
+
+    function renderConversation(task) {
+      const body = document.querySelector('#fullTaskBody');
+      const index = task.status === 'abandoned' ? 0 : stageOrder.indexOf(task.status);
+      const entry = (avatar, author, time, content, phase) => `<article class="conversation-entry"><span class="entry-avatar">${avatar}</span><div class="entry-head"><strong>${author}</strong><time>${time}</time><span class="badge outline">${phase}</span></div><div class="entry-body">${content}</div></article>`;
+      let stream = `<section class="conversation-stream"><div class="conversation-intro"><h2>工单说明</h2><p>${task.description}</p></div>${entry('系','系统','今天 08:42',`<div class="system-event">创建工单，状态设为「待办」。目标分支 <code>${targetBranch(task)}</code>。</div>`,'待办')}`;
+      if (index >= 1) stream += `<div class="stage-divider"><strong>进入讨论</strong><span>今天 09:05</span></div>${entry(task.assignee?.initials || '周',task.assignee?.name || '周棠','今天 09:07','<p>先确认影响范围：配置摘要变化后暂停领取，但不终止已经运行的安全任务。</p><span class="attachment-chip">MD · runner-config-safety.md</span>','讨论')}${entry('林','林川','今天 09:18','<p>同意。请把“不终止已运行任务”加入不做范围，并把三项校验写入验收标准。</p>','讨论')}`;
+      if (index >= 2) stream += `${entry('结','系统','今天 09:31',`<div class="conclusion-block"><div class="entry-card-head"><strong>讨论结论</strong><span>VERSION ${task.conclusionVersion || 1} · 已冻结</span></div><dl class="structured-list"><div><dt>目标</dt><dd>配置变化时安全暂停新任务，并要求本机重新确认。</dd></div><div><dt>范围 / 不做</dt><dd>覆盖仓库、命令与禁止目录；不终止已运行任务。</dd></div><div><dt>实施方案</dt><dd>比较配置摘要，暂停领取，确认后生成新的许可记录。</dd></div><div><dt>验收条件</dt><dd>${task.criteria.join('；')}</dd></div><div><dt>风险</dt><dd>错误摘要可能导致项目长期暂停。</dd></div></dl></div>`,'讨论')}<div class="stage-divider"><strong>进入执行</strong><span>今天 09:32</span></div>${entry('系','系统','今天 09:33',`<div class="system-event">执行者由 runner-backup 更换为 ${task.assignee?.name || '未分配'}；旧租约已终止，历史完整保留。</div>`,'执行')}`;
+      if (index >= 2 && task.branch !== '—') stream += `${entry('Git','Git 集成','今天 10:14',`<div class="commit-event"><div class="entry-card-head"><strong><code>c1047be</code> ${task.id} 校验配置摘要并暂停领取</strong><span>6 files · +184 −27</span></div><p>已校验仓库、分支和完整工单 ID，并按 repo + SHA 去重。此提交仅作为执行证据。</p></div>`,'执行')}${entry('验','Runner 验证','今天 10:22',`<div class="system-event"><strong>自动验证通过</strong><div class="validation-grid"><span>build · 18.4s ✓</span><span>test · 42.8s ✓</span><span>lint · 7.2s ✓</span></div></div>`,'执行')}`;
+      if (index >= 3) stream += `<div class="stage-divider"><strong>进入验收</strong><span>今天 10:26</span></div>${entry('周','周棠','今天 10:34',`<div class="acceptance-card"><div class="entry-card-head"><strong>验收尝试 #2</strong><span>等待结构化结论</span></div><p>已对照 ${task.criteria.length} 项验收条件检查提交、文件变化和验证结果。请确认通过、要求修改、范围不清或放弃。</p><span class="attachment-chip">PNG · runner-paused-state.png</span></div>`,'验收')}`;
+      if (task.status === 'completed') stream += `${entry('验','验收人','昨天 17:21','<div class="acceptance-card"><div class="entry-card-head"><strong>验收通过</strong><span>ATTEMPT #2 · 不可覆盖</span></div><p>全部验收条件通过，工单进入完成状态。</p></div>','验收')}<div class="stage-divider"><strong>已完成</strong><span>昨天 17:21</span></div>`;
+      if (task.status === 'abandoned') stream += `<div class="stage-divider"><strong>已放弃</strong><span>今天 10:40</span></div>`;
+      if (task.blockedAt) stream += `${entry('!','系统',task.blockedAt,`<div class="system-event"><strong>已标记阻塞</strong><p>${task.blockedReason}</p></div>`,stageLabel[task.status])}`;
+      stream += `<div class="conversation-compose"><p>消息、Markdown、MD 文档、图片和附件都会进入同一条时间线。</p><button class="button primary" type="button" data-task-action="comment">继续对话</button></div></section>`;
+      body.innerHTML = stream;
+    }
+
+    function renderTaskActionDrawer(action) {
+      const task = findTask(state.selectedTask);
+      const titles = { comment:'发送消息', assign:'更换执行者', abandon:'放弃工单', advance:'推进当前阶段' };
+      document.querySelector('#inspectorTitle').textContent = titles[action];
+      if (action === 'comment') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · ${stageLabel[task.status]}</div><h2>继续对话</h2><form class="drawer-form"><div class="drawer-field"><label for="commentBody">消息</label><textarea id="commentBody" placeholder="支持 Markdown；消息会标记为当前阶段"></textarea></div><div class="drawer-field"><label for="commentAttachment">附件</label><input id="commentAttachment" type="file" accept=".md,image/*,.pdf,.txt,.zip" multiple><span class="field-help">支持 MD 文档、图片和其他附件。</span></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">发送消息</button></div></form>`;
+      if (action === 'assign') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · VERSION ${task.version}</div><h2>${task.assignee ? '更换执行者' : '分配执行者'}</h2><div class="impact-note">分配后，待办工单进入讨论。更换会终止旧租约、保留全部历史，并写入系统事件。</div><form class="drawer-form"><div class="drawer-field"><label for="taskAssignee">执行者</label><select id="taskAssignee"><optgroup label="成员"><option>林川</option><option>周棠</option><option>陈序</option></optgroup><optgroup label="当前项目已启用 Agents">${projects[state.project].agents.map(agent => `<option>${agent.name}</option>`).join('')}</optgroup></select></div><div class="drawer-field"><label for="assignReason">变更说明</label><textarea id="assignReason" placeholder="为什么分配或更换执行者"></textarea></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">确认分配</button></div></form>`;
+      if (action === 'abandon') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · ${stageLabel[task.status]}</div><h2>放弃工单</h2><div class="impact-note">任意未完成阶段都可放弃。当前租约会终止，原因和历史永久保留。</div><form class="drawer-form"><div class="drawer-field"><label for="abandonReason">放弃原因</label><textarea id="abandonReason" placeholder="必填：说明为何不再继续"></textarea></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button danger js-toast" type="button">确认放弃</button></div></form>`;
+      if (action === 'advance') {
+        if (task.status === 'todo') return renderTaskActionDrawer('assign');
+        if (task.status === 'discussion') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · DISCUSSION CONCLUSION v${(task.conclusionVersion || 0) + 1}</div><h2>冻结讨论结论</h2><form class="drawer-form">${[['goal','目标'],['scope','范围 / 不做'],['plan','实施方案'],['criteria','验收条件'],['risks','风险']].map(([id,label]) => `<div class="drawer-field"><label for="${id}">${label}</label><textarea id="${id}" placeholder="${label}"></textarea></div>`).join('')}<div class="impact-note">冻结后进入执行。后续实质范围变化会生成新版本，必要时退回讨论。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">冻结并进入执行</button></div></form>`;
+        if (task.status === 'execution') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · EXECUTION ATTEMPT</div><h2>提交执行结果</h2><form class="drawer-form"><div class="drawer-field"><label for="resultSummary">结果摘要</label><textarea id="resultSummary" placeholder="说明实现内容、已知限制和验证结果"></textarea></div><div class="drawer-field"><label for="resultAttachment">补充附件</label><input id="resultAttachment" type="file" multiple></div><div class="impact-note">提交后只进入验收，Git 提交不能单独触发完成。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">提交并进入验收</button></div></form>`;
+        if (task.status === 'acceptance') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${task.id} · ACCEPTANCE ATTEMPT</div><h2>提交验收结论</h2><form class="drawer-form"><div class="drawer-field"><label for="acceptanceOutcome">结构化结论</label><select id="acceptanceOutcome"><option>通过 → 完成</option><option>要求修改 → 执行</option><option>范围不清 → 讨论</option><option>放弃 → 放弃</option></select></div><div class="drawer-field"><label for="acceptanceNote">验收说明</label><textarea id="acceptanceNote" placeholder="记录依据、问题或返工要求"></textarea></div><div class="impact-note">本次验收不可覆盖；返工后会创建新的验收记录。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">提交验收结论</button></div></form>`;
+      }
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]')?.addEventListener('click', closeDrawer);
+    }
+
+    function updateCounts() {
+      const tasks = flatTasks();
+      const count = predicate => tasks.filter(predicate).length;
+      const values = {
+        railQueueCount: tasks.length,
+        railHumanCount: globalHumans.length,
+        railAgentCount: globalAgents.length,
+        tabAllCount: tasks.length,
+        tabTodoCount: count(task => task.status === 'todo'),
+        tabDiscussionCount: count(task => task.status === 'discussion'),
+        tabExecutionCount: count(task => task.status === 'execution'),
+        tabAcceptanceCount: count(task => task.status === 'acceptance'),
+        tabCompletedCount: count(task => task.status === 'completed'),
+        tabAbandonedCount: count(task => task.status === 'abandoned')
+      };
+      Object.entries(values).forEach(([id, value]) => {
+        const node = document.querySelector(`#${id}`);
+        if (node) node.textContent = value;
+      });
+    }
+
+    function agentState(agent) {
+      if (!projectAgentGrants[state.project].has(agent.name)) return ['未启用', 'outline'];
+      const meta = agent.contexts[state.project] || '在线空闲';
+      if (meta.includes('执行')) return ['正在执行', 'blue'];
+      if (meta.includes('待接受')) return ['待接受', 'amber'];
+      return ['在线空闲', 'green'];
+    }
+
+    function renderAgentInspector(agent) {
+      if (!agent) return;
+      const [label, kind] = agentState(agent);
+      const enabled = projectAgentGrants[state.project].has(agent.name);
+      const meta = agent.contexts[state.project] || '当前项目未启用';
+      const executing = enabled && meta.includes('执行');
+      const device = agent.device || `${agent.name}-runner`;
+      const grants = Object.entries(projects).map(([key, project]) => `<div class="kv-row"><dt>${project.name}</dt><dd><span class="badge ${projectAgentGrants[key].has(agent.name) ? 'green' : 'outline'}">${projectAgentGrants[key].has(agent.name) ? '已启用' : '未启用'}</span></dd></div>`).join('');
+      document.querySelector('#inspectorTitle').textContent = 'Agent 详情';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">AGENT IDENTITY · ${agent.name.toUpperCase()}</div><h2>${agent.name}</h2><div class="inspector-badges"><span class="badge ${kind}">${label}</span><span class="badge outline">已配对</span><span class="badge outline">组织级身份</span></div><p class="inspector-description">Agent 对所有项目可见；项目启用只授予接单资格，Git 凭据仍需在有效任务租约内临时签发。</p><div class="inspector-actions"><button class="button primary ${enabled ? 'js-toast' : ''}" type="button" ${enabled ? '' : 'data-enable-current-agent'}>${enabled ? '查看当前任务' : '在当前项目启用'}</button><button class="button" type="button" data-view-activity="${agent.name}" data-actor-type="agent">查看活动</button><button class="button js-toast" type="button">轮换 Agent Token</button><button class="button js-toast" type="button">撤销配对</button></div><dl class="kv-list"><div class="kv-row"><dt>Runner 设备</dt><dd><code>${device}</code></dd></div><div class="kv-row"><dt>Runner 状态</dt><dd>${label}</dd></div><div class="kv-row"><dt>当前工作</dt><dd>${meta}</dd></div><div class="kv-row"><dt>最后心跳</dt><dd>${enabled ? (executing ? '18 秒前' : '4 分钟前') : '—'}</dd></div></dl><section class="detail-section"><h3>Git 仓库能力</h3><div class="kv-list"><div class="kv-row"><dt>能力</dt><dd>随任务签发读写凭据</dd></div><div class="kv-row"><dt>长期 Git 凭据</dt><dd>无</dd></div><div class="kv-row"><dt>当前凭据</dt><dd><span class="badge ${executing ? 'blue' : 'outline'}">${executing ? '已签发 · 最长 1 小时' : '未签发'}</span></dd></div></div></section><section class="detail-section"><h3>项目启用状态</h3><div class="kv-list">${grants}</div></section><section class="detail-section"><h3>安全边界</h3><div class="criterion"><i></i><span>新 Agent 默认不对任何项目启用。</span></div><div class="criterion"><i></i><span>Git Token 仅交给 Runner 凭据适配器，不传给 Codex 或仓库命令。</span></div><div class="criterion"><i></i><span>同一 Agent 同时最多一个活跃租约；租约结束立即撤销凭据。</span></div></section>`;
+      bindToastButtons();
+      const enableButton = document.querySelector('[data-enable-current-agent]');
+      if (enableButton) enableButton.addEventListener('click', () => {
+        projectAgentGrants[state.project].add(agent.name);
+        state.selectedAgent = agent.name;
+        updateCounts();
+        renderMembersPage();
+        showToast(`${agent.name} 已在当前项目启用，可接收新任务`);
+      });
+    }
+
+    function renderHumanInspector(human) {
+      if (!human) return;
+      const member = projectMembers[state.project].find(item => item.username === human.username);
+      const roleLabel = member ? (member.role === 'developer' ? '开发者' : '查看者') : '未加入当前项目';
+      const active = human.status === 'active';
+      const access = Object.entries(projectMembers).filter(([, members]) => members.some(item => item.username === human.username)).map(([key, members]) => {
+        const membership = members.find(item => item.username === human.username);
+        return `<div class="kv-row"><dt>${projects[key].name}</dt><dd>${membership.role === 'developer' ? '开发者' : '查看者'}</dd></div>`;
+      }).join('') || '<div class="kv-row"><dt>项目访问</dt><dd>尚未加入任何项目</dd></div>';
+      document.querySelector('#inspectorTitle').textContent = '成员详情';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">HUMAN ACCOUNT · @${human.username}</div><h2>${human.name}</h2><div class="inspector-badges"><span class="badge ${member?.role === 'developer' ? 'blue' : 'outline'}">${roleLabel}</span><span class="badge ${active ? 'green' : 'red'}">${active ? '账户正常' : '账户已禁用'}</span>${human.systemRole === 'administrator' ? '<span class="badge outline">系统管理员</span>' : ''}</div><p class="inspector-description">所有项目都能看到这个人类账户；只有项目成员关系决定其在当前项目中的角色和访问范围。</p><div class="inspector-actions">${member ? '<button class="button primary js-toast" type="button">修改项目角色</button><button class="button js-toast" type="button">移出当前项目</button>' : `<button class="button primary" type="button" data-add-human="${human.username}">添加到当前项目</button>`}<button class="button" type="button" data-view-activity="${human.name}" data-actor-type="human">查看活动</button></div><dl class="kv-list"><div class="kv-row"><dt>当前项目角色</dt><dd>${roleLabel}</dd></div><div class="kv-row"><dt>当前工作</dt><dd>${member?.current || '未在当前项目工作'}</dd></div><div class="kv-row"><dt>加入当前项目</dt><dd>${member?.joined || '—'}</dd></div><div class="kv-row"><dt>最后活动</dt><dd>${human.lastSeen}</dd></div></dl><section class="detail-section"><h3>项目成员关系</h3><div class="kv-list">${access}</div></section><section class="detail-section"><h3>权限说明</h3><div class="criterion"><i></i><span>${member?.role === 'developer' ? '可以创建、分配、执行和验收当前项目工单。' : member ? '只能查看当前项目，不能分配、执行或验收工单。' : '尚无当前项目权限；添加成员关系后才可访问。'}</span></div><div class="criterion"><i></i><span>移出项目不会删除账户、消息、验收或历史署名。</span></div></section>`;
+      bindToastButtons();
+      const addButton = document.querySelector('#inspectorBody [data-add-human]');
+      if (addButton) addButton.addEventListener('click', () => renderAddHumanDrawer(human.username));
+    }
+
+    function userProjectAccess(user) {
+      return Object.entries(projectMembers).filter(([, members]) => members.some(member => member.username === user.username));
+    }
+
+    function renderManagedUserInspector(user) {
+      if (!user) return;
+      const active = user.status === 'active';
+      const isSelf = user.username === 'linchuan';
+      const access = userProjectAccess(user);
+      document.querySelector('#inspectorTitle').textContent = '账户详情';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">USER ACCOUNT · @${user.username}</div><h2>${user.name}</h2><div class="inspector-badges"><span class="badge ${active ? 'green' : 'red'}">${active ? '账户正常' : '账户已禁用'}</span><span class="badge outline">${user.systemRole === 'administrator' ? '系统管理员' : '普通用户'}</span>${isSelf ? '<span class="badge blue">当前账户</span>' : ''}</div><p class="inspector-description">这是组织级登录账户。项目访问由独立的成员关系控制，禁用账户不会删除历史署名。</p><div class="inspector-actions">${active ? `<button class="button primary" type="button" data-user-action="reset">重置密码</button><button class="button" type="button" data-user-action="disable" ${isSelf ? 'disabled' : ''}>禁用用户</button>` : '<button class="button primary" type="button" data-user-action="enable">启用用户</button>'}<button class="button" type="button" data-view-activity="${user.name}" data-actor-type="human">查看活动</button></div>${isSelf ? '<div class="impact-note">不能在此禁用当前登录账户。请由另一名系统管理员执行账户管理。</div>' : ''}<dl class="kv-list"><div class="kv-row"><dt>用户名</dt><dd><code>${user.username}</code></dd></div><div class="kv-row"><dt>系统角色</dt><dd>${user.systemRole === 'administrator' ? '系统管理员' : '普通用户'}</dd></div><div class="kv-row"><dt>项目关系</dt><dd>${access.length} 个项目</dd></div><div class="kv-row"><dt>最后活动</dt><dd>${user.lastSeen}</dd></div></dl><section class="detail-section"><h3>项目成员关系</h3><div class="kv-list">${access.map(([key,members]) => { const member = members.find(item => item.username === user.username); return `<div class="kv-row"><dt>${projects[key].name}</dt><dd>${member.role === 'developer' ? '开发者' : '查看者'}</dd></div>`; }).join('') || '<div class="kv-row"><dt>项目访问</dt><dd>尚未加入任何项目</dd></div>'}</div></section>`;
+      bindToastButtons();
+      document.querySelectorAll('#inspectorBody [data-user-action]').forEach(button => button.addEventListener('click', () => renderUserActionDrawer(button.dataset.userAction, user)));
+    }
+
+    function renderUserActionDrawer(action, user) {
+      const titles = { disable:'禁用用户', enable:'启用用户', reset:'重置密码' };
+      document.querySelector('#inspectorTitle').textContent = titles[action];
+      if (action === 'disable') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">@${user.username} · DESTRUCTIVE ACTION</div><h2>禁用 ${user.name}</h2><div class="impact-note">禁用后立即撤销该用户的全部登录会话，并禁止登录、新指派和人工验收。项目成员关系、消息、验收与历史署名全部保留。</div><form class="drawer-form"><div class="drawer-field"><label for="disableReason">禁用原因</label><textarea id="disableReason" required placeholder="必填：记录禁用原因"></textarea></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button danger js-toast" type="button">确认禁用</button></div></form>`;
+      if (action === 'enable') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">@${user.username} · ACCOUNT RECOVERY</div><h2>启用 ${user.name}</h2><div class="impact-note">启用后恢复登录和指派资格。原项目成员关系继续有效，但旧会话不会恢复。</div><form class="drawer-form"><div class="drawer-field"><label for="enableReason">启用说明</label><textarea id="enableReason" placeholder="记录恢复账户的依据"></textarea></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">确认启用</button></div></form>`;
+      if (action === 'reset') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">@${user.username} · PASSWORD RESET</div><h2>重置登录密码</h2><p class="inspector-description">重置后撤销该用户除当前操作外的全部会话，并要求下次登录修改密码。</p><form class="drawer-form"><div class="drawer-field"><label for="temporaryPassword">临时密码</label><input id="temporaryPassword" type="password" autocomplete="new-password" placeholder="至少 12 个字符" /></div><div class="drawer-field"><label for="passwordDelivery">交付方式</label><select id="passwordDelivery"><option>仅显示一次，由管理员安全交付</option><option>要求用户联系管理员</option></select></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">重置并撤销会话</button></div></form>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]')?.addEventListener('click', closeDrawer);
+    }
+
+    function renderNewUserDrawer() {
+      document.querySelector('#inspectorTitle').textContent = '创建用户';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">NEW USER ACCOUNT</div><h2>创建组织级用户</h2><p class="inspector-description">这里只创建登录账户。创建后仍需在成员页中为用户添加具体项目角色。</p><form class="drawer-form"><div class="drawer-field"><label for="newUserDisplayName">显示名称</label><input id="newUserDisplayName" maxlength="80" placeholder="例如：顾南" /></div><div class="drawer-field"><label for="newUsername">用户名</label><input id="newUsername" maxlength="40" pattern="[a-z0-9._-]+" placeholder="例如：gunan" /><span class="field-help">创建后不能自行修改；仅使用小写字母、数字、点、短横线和下划线。</span></div><div class="drawer-field"><label for="newUserRole">系统角色</label><select id="newUserRole"><option value="user">普通用户</option><option value="administrator">系统管理员</option></select><span class="field-help">项目开发者或查看者角色在各项目的成员页中单独设置。</span></div><div class="drawer-field"><label for="newUserPassword">临时密码</label><input id="newUserPassword" type="password" autocomplete="new-password" placeholder="至少 12 个字符" /></div><div class="drawer-field"><label for="passwordPolicy">首次登录</label><select id="passwordPolicy"><option>必须修改临时密码</option><option>允许管理员稍后要求修改</option></select></div><div class="impact-note">创建用户不会自动加入任何项目，也不会授予工单访问权限。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">创建用户</button></div></form>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function renderUserManagementPage() {
+      const query = (document.querySelector('#userManagementSearch').value || '').toLowerCase();
+      const users = globalHumans.filter(user => `${user.name} ${user.username} ${user.systemRole} ${user.status}`.toLowerCase().includes(query));
+      const disabled = users.filter(user => user.status === 'disabled').length;
+      document.querySelector('#userManagementCount').textContent = `${users.length} 个账户 · ${disabled} 个已禁用`;
+      document.querySelector('#userManagementTable').innerHTML = users.map(user => {
+        const access = userProjectAccess(user);
+        return `<article class="agent-table-row user-table-row ${state.selectedManagedUser === user.username ? 'selected' : ''}" data-managed-user="${user.username}"><div class="entity-name"><span class="avatar ${user.initials === '周' ? 'warm' : 'blue'}">${user.initials}</span><div class="entity-name-copy"><strong>${user.name}</strong><span>@${user.username}</span></div></div><div class="table-value">${user.systemRole === 'administrator' ? '系统管理员' : '普通用户'}</div><div class="table-value">${access.length ? `${access.length} 个项目` : '未加入项目'}</div><div class="table-value">${user.lastSeen}</div><div><span class="badge ${user.status === 'active' ? 'green' : 'red'}">${user.status === 'active' ? '正常' : '已禁用'}</span></div><button class="icon-button" type="button" aria-label="查看账户"><svg class="icon"><use href="#i-more"/></svg></button></article>`;
+      }).join('') || '<div class="empty-state"><strong>没有匹配的用户</strong><span>修改搜索条件后再试。</span></div>';
+      const selected = users.find(user => user.username === state.selectedManagedUser) || users[0];
+      if (selected) { state.selectedManagedUser = selected.username; renderManagedUserInspector(selected); }
+    }
+
+    function renderMembersPage() {
+      const query = (document.querySelector('#agentSearch').value || '').toLowerCase();
+      const humanMode = state.page === 'members';
+      document.querySelector('#memberPageTitle').textContent = humanMode ? '成员' : 'Agents';
+      document.querySelector('#memberPageDescription').textContent = humanMode ? '查看全部人类账户，并标记它们在当前项目中的角色。' : '查看全部 Agent，并标记它们是否在当前项目启用。';
+      document.querySelector('#newMemberLabel').textContent = humanMode ? '添加成员' : '创建 Agent';
+      document.querySelector('#agentSearch').placeholder = humanMode ? '搜索姓名或用户名…' : '搜索 Agent…';
+      if (humanMode) {
+        const humans = globalHumans.filter(human => `${human.name} ${human.username} ${human.systemRole}`.toLowerCase().includes(query));
+        const currentMembers = projectMembers[state.project];
+        document.querySelector('#agentSurfaceCount').textContent = `${humans.length} 个账户 · 当前项目 ${currentMembers.length} 名成员`;
+        document.querySelector('#memberTableHead').innerHTML = '<span>成员 / 账户</span><span>账户状态</span><span>当前工作</span><span>当前项目角色</span><span></span>';
+        document.querySelector('#agentTable').innerHTML = humans.map(human => {
+          const member = currentMembers.find(item => item.username === human.username);
+          const roleLabel = member ? (member.role === 'developer' ? '开发者' : '查看者') : '未加入';
+          return `<article class="agent-table-row ${state.selectedHuman === human.username ? 'selected' : ''}" data-human="${human.username}"><div class="entity-name"><span class="avatar ${human.initials === '周' ? 'warm' : 'blue'}">${human.initials}</span><div class="entity-name-copy"><strong>${human.name}</strong><span>@${human.username}${human.systemRole === 'administrator' ? ' · SYSTEM ADMIN' : ''}</span></div></div><div><span class="badge ${human.status === 'active' ? 'green' : 'red'}">${human.status === 'active' ? '正常' : '已禁用'}</span></div><div class="table-value">${member?.current || '未在当前项目工作'}</div><div>${member ? `<span class="badge ${member.role === 'developer' ? 'blue' : 'outline'}">${roleLabel}</span>` : `<button class="choice" type="button" data-add-human="${human.username}" ${human.status !== 'active' ? 'disabled' : ''}>添加</button>`}</div><button class="icon-button" type="button"><svg class="icon"><use href="#i-more"/></svg></button></article>`;
+        }).join('') || '<div class="empty-state"><strong>没有匹配的人类账户</strong><span>修改搜索条件后再试。</span></div>';
+        const selected = humans.find(human => human.username === state.selectedHuman) || humans[0];
+        if (selected) { state.selectedHuman = selected.username; renderHumanInspector(selected); }
+        return;
+      }
+      const agents = globalAgents.filter(agent => `${agent.name} ${Object.values(agent.contexts).join(' ')}`.toLowerCase().includes(query));
+      const enabledCount = agents.filter(agent => projectAgentGrants[state.project].has(agent.name)).length;
+      document.querySelector('#agentSurfaceCount').textContent = `${agents.length} 个 Agent · 当前项目启用 ${enabledCount}`;
+      document.querySelector('#memberTableHead').innerHTML = '<span>Agent / Runner</span><span>状态</span><span>当前工作</span><span>当前项目</span><span></span>';
+      document.querySelector('#agentTable').innerHTML = agents.map(agent => {
+        const [label, kind] = agentState(agent);
+        const enabled = projectAgentGrants[state.project].has(agent.name);
+        const meta = agent.contexts[state.project] || '未在当前项目运行';
+        return `<article class="agent-table-row ${state.selectedAgent === agent.name ? 'selected' : ''}" data-agent="${agent.name}"><div class="entity-name"><span class="avatar agent">${agent.initials}</span><div class="entity-name-copy"><strong>${agent.name}</strong><span>已配对 · AGENT TOKEN ACTIVE</span></div></div><div><span class="badge ${kind}">${label}</span></div><div class="table-value">${meta}</div><div><button class="choice ${enabled ? 'active' : ''}" type="button" data-agent-grant="${agent.name}">${enabled ? '已启用' : '启用'}</button></div><button class="icon-button" type="button"><svg class="icon"><use href="#i-more"/></svg></button></article>`;
+      }).join('') || '<div class="empty-state"><strong>没有匹配的 Agent</strong><span>修改搜索条件后再试。</span></div>';
+      const selected = agents.find(agent => agent.name === state.selectedAgent) || agents[0];
+      if (selected) { state.selectedAgent = selected.name; renderAgentInspector(selected); }
+    }
+
+    function renderSettingsInspector() {
+      document.querySelector('#inspectorTitle').textContent = '设置影响';
+      const enabledRunners = projectAgentGrants[state.project].size;
+      const project = projects[state.project];
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">PROJECT CONFIGURATION</div><h2>编辑仓库与分支策略</h2><div class="impact-note">保存后，Runner 将暂停这个项目，直到各主机重新确认配置摘要。已有工单的目标分支不会被静默改写。</div><form class="drawer-form"><div class="drawer-field"><label for="repoUrl">Git 仓库 URL</label><input id="repoUrl" value="${project.repo}" /></div><div class="drawer-field"><label for="defaultTarget">默认目标分支</label><select id="defaultTarget">${project.allowedTargets.map(branch => `<option ${branch === project.defaultTarget ? 'selected' : ''}>${branch}</option>`).join('')}</select></div><div class="drawer-field"><label for="allowedTargets">允许的目标分支</label><textarea id="allowedTargets">${project.allowedTargets.join('\n')}\n${project.allowedPattern}</textarea></div><div class="impact-note">精确分支必须已存在于 origin；<code>${project.allowedPattern}</code> 允许新建的 release 分支被选为工单目标。Runner 永远不能直接推送这些分支。</div><dl class="kv-list"><div class="kv-row"><dt>当前摘要</dt><dd>CFG-${state.project.toUpperCase()}-84C2</dd></div><div class="kv-row"><dt>已启用 Agent</dt><dd>${enabledRunners} / ${globalAgents.length}</dd></div><div class="kv-row"><dt>Runner 推送范围</dt><dd><code>projectboard/**</code></dd></div></dl><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">保存并要求重新确认</button></div></form>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function renderGitSetupDrawer(step = 'provider') {
+      const project = projects[state.project];
+      const providerName = gitSetupProvider === 'github' ? 'GitHub' : 'GitLab';
+      document.querySelector('#inspectorTitle').textContent = '自动配置 Git';
+
+      if (step === 'provider') {
+        document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${project.name.toUpperCase()} · GIT CONNECTION</div><h2>连接 Git 提供商</h2><p class="inspector-description">只安装一次提供商集成。安装覆盖读取和写入能力，实际运行时再按观察或执行用途签发降权短期 Token。</p><div class="setup-progress"><span class="active">选择提供商</span><span>确认权限</span><span>完成校验</span></div><div class="provider-options"><button class="provider-option ${gitSetupProvider === 'github' ? 'active' : ''}" type="button" data-git-provider="github"><span class="provider-mark">GH</span><span><strong>GitHub</strong><small>安装一个 Contents 读写 GitHub App，并集中接收已选仓库的 Push 事件。</small></span><span class="provider-check">✓</span></button><button class="provider-option ${gitSetupProvider === 'gitlab' ? 'active' : ''}" type="button" data-git-provider="gitlab"><span class="provider-mark">GL</span><span><strong>GitLab</strong><small>连接 GitLab.com 或自托管实例，自动创建 Webhook 和受控执行凭据。</small></span><span class="provider-check">✓</span></button></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary" type="button" data-git-next="permissions">继续</button></div>`;
+      } else {
+        const providerNote = gitSetupProvider === 'github'
+          ? '将跳转到 GitHub 官方安装页。组织管理员只需批准一次 Contents 读写权限并选择仓库；以后创建或启用 Agent 不再进入 GitHub。'
+          : 'GitLab 需要 Maintainer 或 Owner 完成一次配置授权；自动创建 Webhook 和执行凭据后，不保留项目管理权限。';
+        document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${providerName.toUpperCase()} · PERMISSION REVIEW</div><h2>确认自动配置范围</h2><p class="inspector-description">当前仓库：<code>${project.repo}</code></p><div class="setup-progress"><span class="done">选择提供商</span><span class="active">确认权限</span><span>完成校验</span></div><div class="impact-note">${providerNote}</div><div class="permission-list"><div class="permission-row"><div><strong>${gitSetupProvider === 'github' ? 'GitHub App Installation' : 'GitLab Integration'}</strong><span>安装覆盖仓库读取和写入；凭据代理持有密钥，Web 服务不直接接触。</span></div><span class="badge blue">读写</span></div><div class="permission-row"><div><strong>ProjectBoard Observer Token</strong><span>只读取提交、分支和文件变化；限定当前仓库，最长一小时。</span></div><span class="badge green">降权只读</span></div><div class="permission-row"><div><strong>Runner Executor Token</strong><span>仅在 Agent 已启用并持有有效执行租约时签发，限定当前仓库。</span></div><span class="badge blue">按任务读写</span></div><div class="permission-row"><div><strong>受保护分支</strong><span><code>main</code>、<code>develop</code>、<code>release/*</code> 禁止直接推送，集成不加入绕过名单。</span></div><span class="badge outline">不绕过</span></div></div><div class="drawer-footer"><button class="button" type="button" data-git-back>返回</button><button class="button primary" type="button" data-git-connect>前往 ${providerName} 授权</button></div>`;
+      }
+
+      document.querySelectorAll('[data-git-provider]').forEach(button => button.addEventListener('click', () => {
+        gitSetupProvider = button.dataset.gitProvider;
+        renderGitSetupDrawer('provider');
+      }));
+      document.querySelector('[data-git-next]')?.addEventListener('click', () => renderGitSetupDrawer('permissions'));
+      document.querySelector('[data-git-back]')?.addEventListener('click', () => renderGitSetupDrawer('provider'));
+      document.querySelector('[data-git-connect]')?.addEventListener('click', renderGitSetupLoading);
+      document.querySelector('[data-close-drawer]')?.addEventListener('click', closeDrawer);
+    }
+
+    function renderGitSetupLoading() {
+      const providerName = gitSetupProvider === 'github' ? 'GitHub' : 'GitLab';
+      document.querySelector('#inspectorTitle').textContent = '正在配置 Git';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="setup-loading" role="status" aria-live="polite"><span class="setup-spinner" aria-hidden="true"></span><strong>正在验证 ${providerName} 授权</strong><span>检查仓库身份、注册 Push 订阅，并分别验证观察只读 Token 与 Runner 任务级读写 Token。</span></div>`;
+      setTimeout(() => {
+        if (!inspector.classList.contains('open')) return;
+        renderGitSetupSuccess();
+      }, 900);
+    }
+
+    function renderGitSetupSuccess() {
+      const project = projects[state.project];
+      const providerName = gitSetupProvider === 'github' ? 'GitHub App' : 'GitLab';
+      document.querySelector('#inspectorTitle').textContent = 'Git 配置完成';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">CONNECTION VERIFIED · ${project.mark}</div><h2>${providerName} 已连接</h2><p class="inspector-description">一个安装已覆盖提交观察和 Runner 执行。ProjectBoard 已能自动发现包含完整工单 ID 的提交，新 Agent 无需再次授权 Git。</p><div class="setup-progress"><span class="done">选择提供商</span><span class="done">确认权限</span><span class="done">完成校验</span></div><div class="setup-result"><div class="setup-result-row"><i>✓</i><div><strong>仓库身份已验证</strong><span>${project.repo}</span></div></div><div class="setup-result-row"><i>✓</i><div><strong>观察 Token 已降权验证</strong><span>单仓库 Contents 只读；提交、分支与文件变化可读取。</span></div></div><div class="setup-result-row"><i>✓</i><div><strong>Push 订阅已创建并通过测试</strong><span>后续 Push 将触发提交扫描，重复事件按 delivery ID 去重。</span></div></div><div class="setup-result-row"><i>✓</i><div><strong>Runner 任务级读写已验证</strong><span>有效租约内签发，最长一小时；只向 <code>projectboard/**</code> 推送。</span></div></div></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>完成</button><button class="button primary js-toast" type="button">查看连接活动</button></div>`;
+      document.querySelector('#settingsGitProvider').textContent = providerName;
+      document.querySelector('#settingsRunnerGrant').textContent = '项目启用后按任务签发';
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    const settingExplanations = new Map([
+      ['Git 提供商', 'GitHub 只安装一个 Contents 读写 App；GitLab 使用一个项目集成。创建新 Agent 不会重复安装。'],
+      ['安装权限', '安装必须覆盖读写，才能同时支持提交观察和 Runner 推送；运行时 Token 会继续按用途降权。'],
+      ['运行时凭据', '观察 Token 降为单仓库只读；Runner Token 只在有效执行租约内签发为单仓库读写，最长一小时。'],
+      ['Push 订阅', 'Git 提供商在代码推送后通知 ProjectBoard；服务端仍会重新读取并校验提交，不能只相信通知内容。'],
+      ['Agent Git 能力', '所有 Runner/Agent 都是可读可写的；项目未启用或没有有效执行租约时，凭据代理不会签发 Git Token。'],
+      ['Git 仓库 URL', 'Runner 只在本机登记且远端地址完全匹配的仓库中工作。修改后，所有 Runner 必须重新确认配置。'],
+      ['默认目标分支', '新工单默认从这个长期分支建立基线。它可以被读取，但 Runner 永远不会直接推送。'],
+      ['允许的目标分支', '限制工单可以选择的长期分支；支持精确名称和受限模式，例如 release/*。'],
+      ['Runner 推送范围', 'Runner 只能 fast-forward 推送 ProjectBoard 创建的任务分支，不能推送目标分支、标签或其他分支。'],
+      ['禁止修改路径', '任务改动命中任一 glob 时，执行结果会被拒绝并转为阻塞，不能通过工单设置绕过。'],
+      ['Build', '执行结果提交前运行的构建命令。标记为必需时，退出码非零或超时都会阻止阶段完成。'],
+      ['Test', 'Runner 在自己的环境中独立运行测试，并保存退出码、耗时和截断日志作为执行证据。'],
+      ['Lint', '用于发现格式、静态规则或常见代码问题；是否必需及超时时间由项目管理员配置。'],
+      ['讨论模式', '人工模式等待明确确认；自动模式在生成包含目标、范围、方案、验收条件和风险的结构化结论后自动进入执行。'],
+      ['执行模式', '人工模式由执行者提交结果；自动模式在提交和必需验证满足条件后自动进入验收，但绝不能直接完成。'],
+      ['验收模式', '可由人类、不同于执行者的独立 Agent 或自动规则给出结构化结论。每次验收尝试都不可覆盖。'],
+      ['拆分确认', '控制 Agent 提出的子工单整体方案需要人工确认、自动物化，还是完全禁止自动拆分。']
+    ]);
+
+    function decorateSettingHelp() {
+      document.querySelectorAll('#settingsPage .setting-label').forEach(label => {
+        if (label.querySelector('.field-info')) return;
+        const name = label.textContent.trim();
+        const explanation = settingExplanations.get(name);
+        if (!explanation) return;
+        const help = document.createElement('button');
+        help.className = 'field-info';
+        help.type = 'button';
+        help.textContent = 'i';
+        help.dataset.tooltip = explanation;
+        help.setAttribute('aria-label', `${name}：${explanation}`);
+        label.append(help);
+      });
+    }
+
+    function renderNewTaskDrawer() {
+      document.querySelector('#inspectorTitle').textContent = '新建工单';
+      const enabledAgents = globalAgents.filter(agent => projectAgentGrants[state.project].has(agent.name));
+      const humanDevelopers = projectMembers[state.project].filter(member => member.role === 'developer' && member.status === 'active');
+      const project = projects[state.project];
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${project.name.toUpperCase()}</div><h2>创建工单</h2><p class="inspector-description">新工单默认进入待办；如果同时分配执行者，则立即进入讨论。目标分支决定 Runner 从哪里建立基线，但不会被自动合并。</p><form class="drawer-form"><div class="drawer-field"><label for="taskTitle">标题</label><input id="taskTitle" placeholder="简明描述需要完成的工作" /></div><div class="drawer-field"><label for="taskDescription">描述</label><textarea id="taskDescription" placeholder="背景、范围和必要上下文"></textarea></div><div class="drawer-field"><label for="taskCriteria">验收标准</label><textarea id="taskCriteria" placeholder="每行一条可验证标准"></textarea></div><div class="drawer-field"><label for="taskTargetBranch">目标分支</label><select id="taskTargetBranch">${project.allowedTargets.map(branch => `<option ${branch === project.defaultTarget ? 'selected' : ''}>${branch}</option>`).join('')}</select><span class="field-help">默认使用 <code>${project.defaultTarget}</code>；release 工单请选择具体版本分支。</span></div><div class="drawer-field"><label for="taskPriority">优先级</label><select id="taskPriority"><option>中</option><option>紧急</option><option>高</option><option>低</option></select></div><div class="drawer-field"><label for="taskAgent">执行者</label><select id="taskAgent"><option>暂不分配</option><optgroup label="人类成员">${humanDevelopers.map(member => `<option>${member.name} · @${member.username}</option>`).join('')}</optgroup><optgroup label="已启用 Agents">${enabledAgents.map(agent => `<option>${agent.name}</option>`).join('')}</optgroup></select><span class="field-help">只显示当前项目的开发者成员和已启用 Agent；查看者不能执行工单。</span></div><div class="drawer-field"><label for="taskDiscussionMode">讨论模式</label><select id="taskDiscussionMode"><option value="manual">人工确认</option><option value="auto">自动形成结论并进入执行</option></select></div><div class="drawer-field"><label for="taskExecutionMode">执行模式</label><select id="taskExecutionMode"><option value="manual">人工提交结果</option><option value="auto">满足提交和验证条件后自动进入验收</option></select></div><div class="drawer-field"><label for="taskAcceptanceMode">验收模式</label><select id="taskAcceptanceMode"><option value="human">人工</option><option value="independent_agent">独立 Agent</option><option value="auto">自动</option></select><span class="field-help">独立 Agent 不能与执行 Agent 相同；所有模式都必须留下不可覆盖的验收结论。</span></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">创建工单</button></div></form>`;
+      document.querySelector('#taskAgent optgroup').label = '成员';
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function renderNewAgentDrawer() {
+      document.querySelector('#inspectorTitle').textContent = '创建 Agent';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">AGENT IDENTITY</div><h2>登记新的 Runner 身份</h2><p class="inspector-description">先创建组织级 Agent，再用一次性配对码连接 Runner。新 Agent 对所有项目可见，但默认不启用。</p><form class="drawer-form" id="newAgentForm"><div class="drawer-field"><label for="agentName">Agent 名称</label><input id="agentName" placeholder="例如 runner-shanghai" autocomplete="off" /><span class="field-help">仅使用字母、数字、短横线或下划线；名称在组织内唯一。</span><span class="field-error" id="agentNameError" hidden></span></div><div class="drawer-field"><label for="agentNote">用途说明</label><textarea id="agentNote" placeholder="例如上海构建机，用于前端与 API 工单"></textarea></div><div class="impact-note">这里不配置 GitHub 权限。配对只建立 Runner 身份；项目启用且任务租约有效后，系统才会签发单仓库短期读写凭据。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary" type="submit">创建并生成配对码</button></div></form>`;
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+      document.querySelector('#newAgentForm').addEventListener('submit', event => {
+        event.preventDefault();
+        const nameInput = document.querySelector('#agentName');
+        const error = document.querySelector('#agentNameError');
+        const name = nameInput.value.trim();
+        const duplicate = globalAgents.some(agent => agent.name.toLowerCase() === name.toLowerCase());
+        if (!/^[a-zA-Z0-9_-]{3,48}$/.test(name) || duplicate) {
+          error.textContent = duplicate ? '该 Agent 名称已存在。' : '请输入 3–48 位字母、数字、短横线或下划线。';
+          error.hidden = false;
+          nameInput.focus();
+          return;
+        }
+        renderAgentPairingDrawer(name);
+      });
+    }
+
+    function makePairingCode() {
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      const segment = offset => Array.from(bytes.slice(offset, offset + 4), value => alphabet[value % alphabet.length]).join('');
+      return `PB-${segment(0)}-${segment(4)}`;
+    }
+
+    function renderAgentPairingDrawer(name) {
+      const code = makePairingCode();
+      const command = `projectboard-runner connect ${code}`;
+      document.querySelector('#inspectorTitle').textContent = '连接 Runner';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">PAIRING · ${name.toUpperCase()}</div><h2>一次性配对码</h2><p class="inspector-description">在准备承载 <strong>${name}</strong> 的 Runner 主机上执行下面的命令。新配对码会立即使旧码失效。</p><div class="pairing-code" data-no-i18n>${code}</div><div class="pairing-command"><code data-no-i18n>${command}</code><button class="button" type="button" data-copy-pairing>复制命令</button></div><div class="pairing-state"><span class="status-dot live"></span><div><strong>等待 Runner 连接</strong><span>10 分钟后失效 · 尚未签发任何 Git 凭据</span></div></div><div class="impact-note">Runner 只会取得 Agent Token。Git Token 由凭据代理在具体任务开始后另行签发，并只进入 Runner 的凭据适配器。</div><div class="drawer-footer"><button class="button" type="button" data-regenerate-pairing>生成新配对码</button><button class="button primary" type="button" data-simulate-pairing>模拟 Runner 完成配对</button></div>`;
+      document.querySelector('[data-copy-pairing]').addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(command); showToast('配对命令已复制'); }
+        catch { showToast(`请复制命令：${command}`); }
+      });
+      document.querySelector('[data-regenerate-pairing]').addEventListener('click', () => renderAgentPairingDrawer(name));
+      document.querySelector('[data-simulate-pairing]').addEventListener('click', () => renderAgentPairedDrawer(name));
+    }
+
+    function renderAgentPairedDrawer(name) {
+      let agent = globalAgents.find(item => item.name === name);
+      if (!agent) {
+        agent = { initials: name.slice(0, 2).toUpperCase(), name, type: 'agent', contexts: {}, device: `${name}-host-01` };
+        globalAgents.push(agent);
+      }
+      state.selectedAgent = name;
+      updateCounts();
+      if (state.page === 'agents') renderMembersPage();
+      document.querySelector('#inspectorTitle').textContent = '配对成功';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">RUNNER CONNECTED · ${name.toUpperCase()}</div><h2>${name} 已就绪</h2><div class="inspector-badges"><span class="badge green">已配对</span><span class="badge outline">所有项目默认未启用</span></div><p class="inspector-description">Agent 已成为组织级身份。现在可以在需要的项目中启用；这只授予接单资格，不会预先签发 Git 凭据。</p><div class="setup-result"><div class="setup-result-row"><i>✓</i><div><strong>Runner 设备已登记</strong><span><code>${agent.device}</code> · Windows · Runner 1.0.0</span></div></div><div class="setup-result-row"><i>✓</i><div><strong>Agent Token 已安全保存</strong><span>服务端仅保存哈希；可在详情中轮换或撤销配对。</span></div></div><div class="setup-result-row"><i>✓</i><div><strong>Git 权限尚未签发</strong><span>启用项目并获得有效任务租约后，按单仓库临时签发读写凭据。</span></div></div></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>稍后启用</button><button class="button primary" type="button" data-enable-created-agent>在当前项目启用</button></div>`;
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+      document.querySelector('[data-enable-created-agent]').addEventListener('click', () => {
+        projectAgentGrants[state.project].add(name);
+        updateCounts();
+        renderMembersPage();
+        renderAgentInspector(agent);
+        showToast(`${name} 已在当前项目启用，可接收新任务`);
+      });
+    }
+
+    function renderAddHumanDrawer(preselectedUsername = '') {
+      const existing = new Set(projectMembers[state.project].map(member => member.username));
+      const candidates = globalHumans.filter(user => !existing.has(user.username) && user.status === 'active');
+      document.querySelector('#inspectorTitle').textContent = '添加成员';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">PROJECT MEMBERSHIP</div><h2>添加到 ${projects[state.project].name}</h2><p class="inspector-description">从所有系统账户中选择。项目成员关系不会创建新账户，也不会影响该用户在其他项目中的角色。</p><form class="drawer-form"><div class="drawer-field"><label for="humanAccount">用户账户</label><select id="humanAccount">${candidates.map(user => `<option value="${user.username}" ${user.username === preselectedUsername ? 'selected' : ''}>${user.name} · @${user.username}</option>`).join('')}</select></div><div class="drawer-field"><label for="humanRole">项目角色</label><select id="humanRole"><option value="developer">开发者 · 可创建、执行和验收</option><option value="viewer">查看者 · 只读访问</option></select></div><div class="impact-note">添加后立即获得当前项目访问权限。系统管理员无需加入项目即可管理，但仍可拥有项目成员关系用于工作指派。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">添加到当前项目</button></div></form>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function auditEvents() {
+      const project = projects[state.project];
+      const tasks = flatTasks(project).slice(0, 5);
+      const actions = ['进入验收', '执行者已更换', '租约心跳已续期', '讨论结论 v2 已冻结', 'Git 提交已自动关联'];
+      const types = ['acceptance','assignment','lease','discussion','git'];
+      const base = tasks.map((task, index) => ({ id:`EVT-${state.project.toUpperCase()}-${1048-index}`, time:index === 0 ? '今天\n10:18' : index === 1 ? '今天\n10:04' : `今天\n09:${52-index*7}`, action:actions[index], detail:index === 2 ? '租约延长至未来 30 分钟' : task.title, actor:task.assignee?.name || 'system', actorType:task.assignee?.type || 'system', target:task.id, type:types[index], source:index === 2 || index === 4 ? 'Runner API' : 'Web' }));
+      if (!state.activityActor) return base;
+      const actor = state.activityActor;
+      const task = tasks.find(item => item.assignee?.name === actor.name) || tasks[0];
+      const actorEvents = actor.type === 'agent' ? [
+        ['Git 提交已自动关联', `${task.id} · c1047be · 完整工单 ID 已校验`, 'git', task.id, 'Runner API'],
+        ['自动验证通过', 'build、test、lint 全部通过', 'execution', task.id, 'Runner API'],
+        ['租约心跳已续期', '租约延长至未来 30 分钟', 'lease', task.id, 'Runner API'],
+        ['提交执行结果', '执行结果已进入验收，不会直接完成', 'acceptance', task.id, 'Runner API']
+      ] : [
+        ['提交验收结论', `${task.id} · 结论：要求修改`, 'acceptance', task.id, 'Web'],
+        ['发送讨论消息', '补充了范围边界和验收条件', 'discussion', task.id, 'Web'],
+        ['更换执行者', `${task.id} · 旧租约已终止`, 'assignment', task.id, 'Web'],
+        ['项目成员关系已更新', `${projects[state.project].name} · 开发者`, 'membership', state.project, 'Web'],
+        ['密码已由管理员重置', '其他登录会话已撤销', 'account', `@${globalHumans.find(user => user.name === actor.name)?.username || 'user'}`, 'Web'],
+        ['登录成功', 'Windows · Codex Desktop', 'auth', `@${globalHumans.find(user => user.name === actor.name)?.username || 'user'}`, 'Web']
+      ];
+      return [...base, ...actorEvents.map((event,index) => ({ id:`EVT-ACTOR-${actor.type.toUpperCase()}-${index+1}`, time:index === 0 ? '今天\n10:42' : index === 1 ? '今天\n10:11' : index === 2 ? '今天\n09:47' : '昨天\n18:21', action:event[0], detail:event[1], actor:actor.name, actorType:actor.type, type:event[2], target:event[3], source:event[4] }))];
+    }
+
+    const eventTypeView = {
+      acceptance:['验收','green'], assignment:['指派','outline'], lease:['租约','blue'], discussion:['讨论','amber'],
+      git:['Git','blue'], execution:['执行','blue'], auth:['登录','outline'], account:['账户','outline'], membership:['成员关系','amber']
+    };
+
+    function renderEventInspector(event) {
+      if (!event) return;
+      document.querySelector('#inspectorTitle').textContent = '事件详情';
+      const [typeLabel,typeKind] = eventTypeView[event.type] || [event.type,'outline'];
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">${event.id}</div><h2>${event.action}</h2><div class="inspector-badges"><span class="badge ${typeKind}">${typeLabel}</span><span class="badge green">不可修改</span></div><p class="inspector-description">${event.detail}</p><dl class="kv-list"><div class="kv-row"><dt>发生时间</dt><dd>${event.time.replace('\n',' ')}</dd></div><div class="kv-row"><dt>执行者</dt><dd>${event.actor}<br><span class="field-help">${event.actorType === 'agent' ? 'Agent 身份' : event.actorType === 'human' ? '人类用户' : '系统'}</span></dd></div><div class="kv-row"><dt>对象</dt><dd>${event.target}</dd></div><div class="kv-row"><dt>项目</dt><dd>${projects[state.project].name}</dd></div><div class="kv-row"><dt>来源</dt><dd>${event.source || 'Web'}</dd></div></dl><section class="detail-section"><h3>结构化负载</h3><pre class="payload">{\n  "requestId": "req_${event.id.toLowerCase()}",\n  "actorType": "${event.actorType}",\n  "result": "recorded",\n  "sensitiveFields": "[REDACTED]"\n}</pre></section>`;
+    }
+
+    function renderActivityPage() {
+      const query = (document.querySelector('#activitySearch').value || '').toLowerCase();
+      const allEvents = auditEvents();
+      const events = allEvents.filter(event => (!state.activityActor || (event.actor === state.activityActor.name && event.actorType === state.activityActor.type)) && (state.activityType === 'all' || event.type === state.activityType) && `${event.action} ${event.detail} ${event.actor} ${event.target} ${event.type}`.toLowerCase().includes(query));
+      const scope = document.querySelector('#activityScope');
+      scope.hidden = !state.activityActor;
+      if (state.activityActor) {
+        document.querySelector('#activityScopeAvatar').textContent = state.activityActor.initials;
+        document.querySelector('#activityScopeAvatar').className = `avatar ${state.activityActor.type === 'agent' ? 'agent' : 'blue'}`;
+        document.querySelector('#activityScopeName').textContent = state.activityActor.name;
+        document.querySelector('#activityScopeMeta').textContent = `身份活动 · ${projects[state.project].name} · ${events.length} 条事件`;
+        document.querySelector('#activityScopeType').textContent = state.activityActor.type === 'agent' ? 'Agent 身份' : '人类用户';
+      }
+      document.querySelector('#activitySurfaceCount').textContent = `${events.length} 条事件`;
+      document.querySelector('#auditTable').innerHTML = events.map(event => { const [typeLabel,typeKind] = eventTypeView[event.type] || [event.type,'outline']; return `<article class="audit-row ${state.selectedEvent === event.id ? 'selected' : ''}" data-event="${event.id}"><div class="audit-time">${event.time.replace('\n','<br>')}</div><div><span class="badge ${typeKind} event-kind">${typeLabel}</span></div><div class="audit-action"><strong>${event.action}</strong><span>${event.detail}</span></div><div class="table-value">${event.actor}<br><span class="field-help">${event.actorType === 'agent' ? 'Agent' : event.actorType === 'human' ? '人类' : '系统'}</span></div><div class="table-value">${event.target}</div><button class="icon-button" type="button" aria-label="查看事件"><svg class="icon"><use href="#i-more"/></svg></button></article>`; }).join('') || `<div class="empty-state"><strong>没有匹配的活动</strong><span>${state.activityActor ? '当前身份在此项目中没有符合条件的事件。' : '修改搜索条件后再试。'}</span></div>`;
+      const selected = events.find(event => event.id === state.selectedEvent) || events[0];
+      if (selected) { state.selectedEvent = selected.id; renderEventInspector(selected); }
+    }
+
+    function renderProjectsPage() {
+      const query = (document.querySelector('#projectManagementSearch').value || '').toLowerCase();
+      const entries = Object.entries(projects).filter(([, project]) => `${project.name} ${project.repo}`.toLowerCase().includes(query));
+      document.querySelector('#projectManagementCount').textContent = `${entries.length} 个项目`;
+      document.querySelector('#projectManagementTable').innerHTML = entries.map(([key, project]) => {
+        const participantCount = projectMembers[key].length + projectAgentGrants[key].size;
+        return `<article class="agent-table-row project-table-row"><div class="entity-name"><span class="project-mark" style="background:${project.color}">${project.mark}</span><div class="entity-name-copy"><strong>${project.name}</strong><span>${key.toUpperCase()}</span></div></div><div><span class="badge green">活跃</span></div><div class="table-value">${project.repo}<br><code>→ ${project.defaultTarget}</code></div><div class="table-value">${projectMembers[key].length} 人 · ${projectAgentGrants[key].size} Agents</div><button class="button" type="button" data-open-project="${key}">打开</button></article>`;
+      }).join('') || '<div class="empty-state"><strong>没有匹配的项目</strong><span>修改搜索条件，或创建一个新项目。</span></div>';
+    }
+
+    function renderNewProjectDrawer() {
+      document.querySelector('#inspectorTitle').textContent = '新建项目';
+      document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">PROJECT SETUP</div><h2>创建项目工作空间</h2><p class="inspector-description">先建立项目与可信仓库的关系，其他执行规则可以稍后在项目设置中完善。</p><form class="drawer-form"><div class="drawer-field"><label for="projectTitle">项目名称</label><input id="projectTitle" placeholder="例如 Billing Service" /></div><div class="drawer-field"><label for="projectKey">项目标识</label><input id="projectKey" placeholder="例如 billing" /><span class="field-help">用于工单编号、API 路径和任务分支；创建后不可修改。</span></div><div class="drawer-field"><label for="projectRepoUrl">Git 仓库 URL</label><input id="projectRepoUrl" placeholder="github.com/acme/billing" /><span class="field-help">Runner 本地登记的 origin 地址必须完全匹配。</span></div><div class="impact-note"><strong>创建后的安全默认值</strong><br>目标分支为 <code>main</code>；Runner 只允许推送 <code>projectboard/**</code>；当前用户成为开发者；所有 Agent 默认不启用。项目说明、release 分支、验证命令和禁止路径可在项目设置中补充。</div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">创建并打开项目</button></div></form>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function renderAccountActionDrawer(action) {
+      const titles = { profile:'编辑个人资料', password:'修改密码', sessions:'管理登录会话' };
+      document.querySelector('#inspectorTitle').textContent = titles[action];
+      if (action === 'profile') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">PERSONAL PROFILE</div><h2>编辑个人资料</h2><form class="drawer-form"><div class="drawer-field"><label for="accountDisplayName">显示名称</label><input id="accountDisplayName" value="林川" /><span class="field-help">用于工单执行者、对话和验收署名。</span></div><div class="drawer-field"><label for="accountUsername">用户名</label><input id="accountUsername" value="linchuan" disabled /><span class="field-help">用户名用于登录，由管理员维护。</span></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">保存资料</button></div></form>`;
+      if (action === 'password') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">ACCOUNT SECURITY</div><h2>修改登录密码</h2><p class="inspector-description">保存后保留当前会话，其他设备上的会话将全部失效。</p><form class="drawer-form"><div class="drawer-field"><label for="currentPassword">当前密码</label><input id="currentPassword" type="password" autocomplete="current-password" /></div><div class="drawer-field"><label for="newPassword">新密码</label><input id="newPassword" type="password" autocomplete="new-password" /><span class="field-help">至少 12 个字符，不得与当前密码相同。</span></div><div class="drawer-field"><label for="confirmPassword">确认新密码</label><input id="confirmPassword" type="password" autocomplete="new-password" /></div><div class="drawer-footer"><button class="button" type="button" data-close-drawer>取消</button><button class="button primary js-toast" type="button">修改密码</button></div></form>`;
+      if (action === 'sessions') document.querySelector('#inspectorBody').innerHTML = `<div class="inspector-id">ACTIVE SESSIONS</div><h2>登录会话</h2><div class="impact-note">撤销会话会让对应设备立即退出，但不会影响正在运行的 Runner，因为 Agent 使用独立 Token。</div><dl class="kv-list"><div class="kv-row"><dt>当前设备</dt><dd>Windows · Codex Desktop<br>192.168.1.24 · 当前在线</dd></div><div class="kv-row"><dt>Chrome</dt><dd>macOS · 上海<br>昨天 18:21</dd></div><div class="kv-row"><dt>Edge</dt><dd>Windows · 杭州<br>7 月 31 日</dd></div></dl><div class="drawer-footer"><button class="button" type="button" data-close-drawer>关闭</button><button class="button primary js-toast" type="button">退出其他所有会话</button></div>`;
+      bindToastButtons();
+      document.querySelector('[data-close-drawer]').addEventListener('click', closeDrawer);
+    }
+
+    function renderCurrentPage() {
+      const pageNames = { queue:'任务队列', task:state.selectedTask || '工单', members:'成员', agents:'Agents', users:'用户管理', settings:'项目设置', activity:'活动记录', projects:'项目管理', account:'我的账号' };
+      const visiblePageId = state.page === 'members' ? 'agentsPage' : `${state.page}Page`;
+      document.querySelectorAll('.workspace-page').forEach(page => page.hidden = page.id !== visiblePageId);
+      document.querySelectorAll('.rail-link[data-page]').forEach(link => link.classList.toggle('active', link.dataset.page === state.page || (state.page === 'task' && link.dataset.page === 'queue')));
+      document.querySelector('#breadcrumbProject').textContent = state.page === 'projects' ? '全部项目' : state.page === 'account' ? '个人' : state.page === 'users' ? '系统' : projects[state.project].name;
+      document.querySelector('#breadcrumbPage').textContent = pageNames[state.page];
+      if (state.page === 'queue') { document.querySelector('#inspectorTitle').textContent = '工单详情'; renderQueue(); renderInspector(); }
+      if (state.page === 'task') renderFullTaskPage();
+      if (state.page === 'members' || state.page === 'agents') renderMembersPage();
+      if (state.page === 'settings') {
+        const project = projects[state.project];
+        document.querySelector('#settingsGitProvider').textContent = project.repo.toLowerCase().includes('gitlab') ? 'GitLab' : 'GitHub App';
+        document.querySelector('#settingsRepo').textContent = project.repo;
+        document.querySelector('#settingsDefaultBranch').textContent = project.defaultTarget;
+        document.querySelector('#settingsAllowedBranches').innerHTML = `${project.allowedTargets.map(branch => `<code>${branch}</code>`).join(' · ')} · <code>${project.allowedPattern}</code>`;
+        renderSettingsInspector();
+      }
+      if (state.page === 'activity') renderActivityPage();
+      if (state.page === 'users') renderUserManagementPage();
+      if (state.page === 'projects') renderProjectsPage();
+    }
+
+    function renderProjectContext() {
+      const project = projects[state.project];
+      document.querySelector('#projectName').textContent = project.name;
+      document.querySelector('#breadcrumbProject').textContent = project.name;
+      document.querySelector('#projectRepo').textContent = project.repo;
+      document.querySelector('#projectMark').textContent = project.mark;
+      document.querySelector('#projectMark').style.background = project.color;
+      document.querySelector('#queueScope').textContent = `仅显示 ${project.name} 中当前可见的工作。`;
+      document.querySelectorAll('.project-option').forEach(option => option.classList.toggle('selected', option.dataset.project === state.project));
+      updateCounts();
+      renderCurrentPage();
+    }
+
+    function renderProjectOptions() {
+      document.querySelector('#projectTotal').textContent = `${Object.keys(projects).length} 个活跃项目`;
+      document.querySelector('#projectOptions').innerHTML = Object.entries(projects).map(([key, project]) => {
+        const open = project.tasks.flatMap(task => task.children ? [task, ...task.children] : [task]).filter(task => task.status !== 'completed').length;
+        return `<button class="project-option ${key === state.project ? 'selected' : ''}" type="button" data-project="${key}"><span class="project-mark" style="background:${project.color}">${project.mark}</span><span class="project-option-copy"><strong>${project.name}</strong><span>${project.repo}</span></span><span class="project-option-meta"><span class="selected-check">✓</span><span>${open}</span></span></button>`;
+      }).join('');
+    }
+
+    function selectProject(key) {
+      state.project = key;
+      state.tab = 'all';
+      state.mineOnly = false;
+      state.search = '';
+      state.selectedTask = projects[key].tasks[0]?.id || null;
+      state.selectedHuman = projectMembers[key][0]?.username || null;
+      state.selectedAgent = globalAgents[0]?.name || null;
+      state.selectedEvent = null;
+      document.querySelector('#queueSearch').value = '';
+      document.querySelector('#mineToggle').classList.remove('active');
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === 'all'));
+      const params = new URLSearchParams(location.search);
+      params.delete('variant');
+      params.set('project', key);
+      history.replaceState({}, '', `${location.pathname}?${params.toString()}${location.hash}`);
+      closeProjectMenu();
+      closeDrawer();
+      renderProjectContext();
+      showToast(`已切换到 ${projects[key].name}`);
+    }
+
+    function openProjectMenu() {
+      const rect = projectTrigger.getBoundingClientRect();
+      const left = Math.max(12, Math.min(rect.left, window.innerWidth - 316));
+      const top = Math.min(rect.bottom + 7, window.innerHeight - 290);
+      projectMenu.style.left = `${left}px`;
+      projectMenu.style.top = `${top}px`;
+      projectSearch.value = '';
+      document.querySelectorAll('.project-option').forEach(option => option.hidden = false);
+      projectMenu.showPopover();
+      requestAnimationFrame(() => projectSearch.focus());
+    }
+
+    function closeProjectMenu() {
+      if (projectMenu.matches(':popover-open')) projectMenu.hidePopover();
+    }
+
+    function showToast(message = '原型交互：操作已记录') {
+      toast.textContent = message;
+      toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 1500);
+    }
+
+    function openDrawer() {
+      if (!inspector.classList.contains('open')) {
+        const queue = document.querySelector('.queue');
+        const rail = document.querySelector('.rail');
+        drawerSnapshot = { windowX: window.scrollX, windowY: window.scrollY, queue: queue.scrollTop, rail: rail.scrollTop };
+        drawerReturnFocus = document.activeElement;
+        document.querySelector('.masthead').inert = true;
+        queue.inert = true;
+        rail.inert = true;
+      }
+      inspector.classList.add('open');
+      inspector.setAttribute('aria-hidden', 'false');
+      drawerBackdrop.classList.add('open');
+      requestAnimationFrame(() => document.querySelector('#closeInspector').focus({ preventScroll: true }));
+    }
+
+    function closeDrawer() {
+      inspector.classList.remove('open');
+      inspector.setAttribute('aria-hidden', 'true');
+      drawerBackdrop.classList.remove('open');
+      const queue = document.querySelector('.queue');
+      const rail = document.querySelector('.rail');
+      document.querySelector('.masthead').inert = false;
+      queue.inert = false;
+      rail.inert = false;
+      if (drawerSnapshot) {
+        queue.scrollTop = drawerSnapshot.queue;
+        rail.scrollTop = drawerSnapshot.rail;
+        window.scrollTo(drawerSnapshot.windowX, drawerSnapshot.windowY);
+      }
+      if (drawerReturnFocus?.isConnected) drawerReturnFocus.focus({ preventScroll: true });
+      drawerSnapshot = null;
+      drawerReturnFocus = null;
+    }
+
+    function bindToastButtons() {
+      document.querySelectorAll('.js-toast').forEach(button => {
+        if (button.dataset.toastBound) return;
+        button.dataset.toastBound = 'true';
+        button.addEventListener('click', () => showToast());
+      });
+    }
+
+    projectTrigger.addEventListener('click', event => {
+      event.stopPropagation();
+      projectMenu.matches(':popover-open') ? closeProjectMenu() : openProjectMenu();
+    });
+    projectMenu.addEventListener('toggle', event => projectTrigger.setAttribute('aria-expanded', String(event.newState === 'open')));
+    projectSearch.addEventListener('input', () => {
+      const query = projectSearch.value.trim().toLowerCase();
+      document.querySelectorAll('.project-option').forEach(option => option.hidden = Boolean(query) && !option.textContent.toLowerCase().includes(query));
+    });
+    projectSearch.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { closeProjectMenu(); projectTrigger.focus(); }
+    });
+    document.querySelector('#projectOptions').addEventListener('click', event => {
+      const option = event.target.closest('[data-project]');
+      if (option) selectProject(option.dataset.project);
+    });
+
+    queueContent.addEventListener('click', event => {
+      const toggle = event.target.closest('[data-toggle-parent]');
+      if (toggle) {
+        const id = toggle.dataset.toggleParent;
+        state.expandedParents.has(id) ? state.expandedParents.delete(id) : state.expandedParents.add(id);
+        renderQueue();
+        return;
+      }
+      const row = event.target.closest('[data-task]');
+      if (!row) return;
+      state.selectedTask = row.dataset.task;
+      renderQueue();
+      renderInspector();
+      openDrawer();
+    });
+
+    document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => {
+      state.tab = tab.dataset.tab;
+      document.querySelectorAll('.tab').forEach(item => item.classList.toggle('active', item === tab));
+      renderQueue();
+    }));
+    document.querySelector('#queueSearch').addEventListener('input', event => { state.search = event.target.value.trim(); renderQueue(); });
+    document.querySelector('#mineToggle').addEventListener('click', event => {
+      state.mineOnly = !state.mineOnly;
+      event.currentTarget.classList.toggle('active', state.mineOnly);
+      renderQueue();
+    });
+    document.querySelector('#closeInspector').addEventListener('click', closeDrawer);
+    drawerBackdrop.addEventListener('click', closeDrawer);
+    drawerBackdrop.addEventListener('wheel', event => event.preventDefault(), { passive: false });
+    drawerBackdrop.addEventListener('touchmove', event => event.preventDefault(), { passive: false });
+    document.querySelectorAll('.rail-link[data-page]').forEach(link => link.addEventListener('click', () => {
+      state.page = link.dataset.page;
+      if (state.page === 'members' || state.page === 'agents') document.querySelector('#agentSearch').value = '';
+      if (state.page === 'users') document.querySelector('#userManagementSearch').value = '';
+      if (state.page === 'activity') { state.activityActor = null; state.activityType = 'all'; state.selectedEvent = null; document.querySelector('#activitySearch').value = ''; document.querySelector('#activityTypeFilter').value = 'all'; }
+      closeDrawer();
+      renderCurrentPage();
+    }));
+    document.querySelector('#agentSearch').addEventListener('input', renderMembersPage);
+    document.querySelector('#agentTable').addEventListener('click', event => {
+      const addHumanButton = event.target.closest('[data-add-human]');
+      if (addHumanButton) {
+        renderAddHumanDrawer(addHumanButton.dataset.addHuman);
+        openDrawer();
+        return;
+      }
+      const grantButton = event.target.closest('[data-agent-grant]');
+      if (grantButton) {
+        const name = grantButton.dataset.agentGrant;
+        const grants = projectAgentGrants[state.project];
+        grants.has(name) ? grants.delete(name) : grants.add(name);
+        state.selectedAgent = name;
+        updateCounts();
+        renderMembersPage();
+        showToast(`${name} 已${grants.has(name) ? '在当前项目启用' : '从当前项目停用'}`);
+        return;
+      }
+      const humanRow = event.target.closest('[data-human]');
+      if (humanRow) {
+        state.selectedHuman = humanRow.dataset.human;
+        renderMembersPage();
+        openDrawer();
+        return;
+      }
+      const row = event.target.closest('[data-agent]');
+      if (!row) return;
+      state.selectedAgent = row.dataset.agent;
+      renderMembersPage();
+      openDrawer();
+    });
+    document.querySelectorAll('.setting-choice').forEach(group => group.addEventListener('click', event => {
+      const choice = event.target.closest('.choice');
+      if (!choice) return;
+      group.querySelectorAll('.choice').forEach(item => item.classList.toggle('active', item === choice));
+      showToast('设置已修改，保存后生效');
+    }));
+    document.querySelector('#activitySearch').addEventListener('input', renderActivityPage);
+    document.querySelector('#activityTypeFilter').addEventListener('change', event => { state.activityType = event.target.value; state.selectedEvent = null; renderActivityPage(); });
+    document.querySelector('#clearActivityActor').addEventListener('click', () => {
+      state.activityActor = null;
+      state.selectedEvent = null;
+      renderActivityPage();
+    });
+    document.querySelector('#userManagementSearch').addEventListener('input', renderUserManagementPage);
+    document.querySelector('#userManagementTable').addEventListener('click', event => {
+      const row = event.target.closest('[data-managed-user]');
+      if (!row) return;
+      state.selectedManagedUser = row.dataset.managedUser;
+      renderUserManagementPage();
+      openDrawer();
+    });
+    document.querySelector('#auditTable').addEventListener('click', event => {
+      const row = event.target.closest('[data-event]');
+      if (!row) return;
+      state.selectedEvent = row.dataset.event;
+      renderActivityPage();
+      openDrawer();
+    });
+    document.querySelector('#newTaskButton').addEventListener('click', () => { renderNewTaskDrawer(); openDrawer(); });
+    document.querySelector('#newMemberButton').addEventListener('click', () => {
+      state.page === 'members' ? renderAddHumanDrawer() : renderNewAgentDrawer();
+      openDrawer();
+    });
+    document.querySelector('#newUserButton').addEventListener('click', () => { renderNewUserDrawer(); openDrawer(); });
+    document.querySelector('#inspectorBody').addEventListener('click', event => {
+      const activityButton = event.target.closest('[data-view-activity]');
+      if (!activityButton) return;
+      const name = activityButton.dataset.viewActivity;
+      const type = activityButton.dataset.actorType;
+      const identity = type === 'agent' ? globalAgents.find(agent => agent.name === name) : globalHumans.find(user => user.name === name);
+      state.activityActor = { name, type, initials: identity?.initials || name.slice(0,2).toUpperCase() };
+      state.activityType = 'all';
+      state.selectedEvent = null;
+      document.querySelector('#activitySearch').value = '';
+      document.querySelector('#activityTypeFilter').value = 'all';
+      closeDrawer();
+      state.page = 'activity';
+      renderCurrentPage();
+    });
+    document.querySelector('#accountButton').addEventListener('click', () => { closeDrawer(); state.page = 'account'; renderCurrentPage(); });
+    document.querySelector('#languageSwitch').addEventListener('click', () => {
+      state.locale = state.locale === 'en' ? 'zh-CN' : 'en';
+      applyLanguage();
+    });
+    document.querySelector('#accountPage').addEventListener('click', event => {
+      const action = event.target.closest('[data-account-action]');
+      if (!action) return;
+      renderAccountActionDrawer(action.dataset.accountAction);
+      openDrawer();
+    });
+    document.querySelector('#manageProjectsButton').addEventListener('click', () => { closeProjectMenu(); closeDrawer(); state.page = 'projects'; renderCurrentPage(); });
+    document.querySelector('#projectManagementSearch').addEventListener('input', renderProjectsPage);
+    document.querySelector('#projectManagementTable').addEventListener('click', event => {
+      const open = event.target.closest('[data-open-project]');
+      if (!open) return;
+      state.page = 'queue';
+      switchProject(open.dataset.openProject);
+    });
+    document.querySelector('#newProjectButton').addEventListener('click', () => { renderNewProjectDrawer(); openDrawer(); });
+    document.querySelector('#openSettingsDrawer').addEventListener('click', () => { renderSettingsInspector(); openDrawer(); });
+    document.querySelector('#openGitSetup').addEventListener('click', () => { renderGitSetupDrawer(); openDrawer(); });
+    document.querySelector('#backToQueue').addEventListener('click', () => { closeDrawer(); state.page = 'queue'; renderCurrentPage(); });
+    document.querySelector('#taskPage').addEventListener('click', event => {
+      const action = event.target.closest('[data-task-action]');
+      if (!action) return;
+      renderTaskActionDrawer(action.dataset.taskAction);
+      openDrawer();
+    });
+    window.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && inspector.classList.contains('open')) closeDrawer();
+    });
+
+    decorateSettingHelp();
+    renderProjectOptions();
+    state.selectedTask = projects[state.project].tasks[0]?.id || null;
+    renderProjectContext();
+    bindToastButtons();
+    const languageObserver = new MutationObserver(queueLanguagePass);
+    languageObserver.observe(document.body, { childList:true, subtree:true, characterData:true, attributes:true, attributeFilter:['placeholder','aria-label','title','data-tooltip','label'] });
+    applyLanguage();
+  </script>
+</body>
+</html>
