@@ -956,3 +956,144 @@
     border-top: 1px solid var(--line);
   }
 }
+
+.page-title p:empty {
+  display: none;
+}
+
+.simple-settings-page {
+  width: min(980px, 100%);
+  display: grid;
+  gap: 18px;
+}
+
+.settings-sheet {
+  border: 1px solid #dde1e7;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.settings-sheet-head {
+  min-height: 64px;
+  padding: 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid #e7e9ee;
+}
+
+.settings-sheet-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 680;
+  letter-spacing: -.015em;
+}
+
+.setting-state {
+  min-height: 25px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #f1f3f6;
+  color: #606571;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.setting-state.blue {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.simple-setting-form {
+  padding: 22px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.simple-setting-form .form-error {
+  grid-column: 1 / -1;
+}
+
+.simple-setting-form .button {
+  min-width: 88px;
+  min-height: 40px;
+}
+
+.simple-setting-rows {
+  margin: 0;
+}
+
+.simple-setting-rows > div {
+  min-height: 52px;
+  padding: 13px 22px;
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 22px;
+  align-items: center;
+  border-bottom: 1px solid #eceef2;
+}
+
+.simple-setting-rows > div:last-child {
+  border-bottom: 0;
+}
+
+.simple-setting-rows dt {
+  color: #727783;
+  font-size: 12px;
+}
+
+.simple-setting-rows dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #20232a;
+  font-size: 12px;
+  font-weight: 560;
+}
+
+.simple-empty-setting {
+  min-height: 116px;
+  padding: 22px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.simple-empty-setting strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+@media (max-width: 620px) {
+  .simple-settings-page {
+    gap: 12px;
+  }
+
+  .settings-sheet-head,
+  .simple-setting-form,
+  .simple-setting-rows > div,
+  .simple-empty-setting {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .simple-setting-form {
+    grid-template-columns: 1fr;
+  }
+
+  .simple-setting-form .button {
+    width: 100%;
+  }
+
+  .simple-setting-rows > div {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}

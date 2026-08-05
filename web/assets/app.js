@@ -67,23 +67,15 @@ function passwordForm(){openDrawer('Change password',formShell(field('Current pa
 renderSystemSettings=async function(){
   const settings=await api('/api/system/settings');
   const value=settings.publicUrl||location.origin;
-  $('#workspace').innerHTML=header(t('globalSettings'),'统一管理访问地址与 Git 提交同步策略。')+`<div class="content settings-stage system-control-plane">
-    <section class="settings-overview settings-overview--system">
-      <div><span class="eyebrow">SYSTEM CONTROL / 01</span><h2>一个地址，服务所有项目</h2><p>提供商只在授权完成后将浏览器带回这里。本机地址可以直接使用，不需要公网隧道。</p></div>
-      <div class="settings-status-cluster"><span class="settings-status signal"><i></i>按需同步</span><span class="settings-status muted"><i></i>Webhook 已关闭</span></div>
+  $('#workspace').innerHTML=header(t('globalSettings'),'')+`<div class="content simple-settings-page">
+    <section class="settings-sheet">
+      <header class="settings-sheet-head"><h2>服务地址</h2><span class="setting-state">${settings.publicUrl?'已配置':'未保存'}</span></header>
+      <form class="simple-setting-form" id="systemSettingsForm">${field('ProjectBoard URL','publicUrl','url',value,'required')}<div class="form-error" hidden></div><button class="button primary" type="submit">${t('save')}</button></form>
     </section>
-    <div class="settings-plane-grid">
-      <section class="settings-panel settings-panel--address">
-        <div class="settings-panel-head"><span class="settings-index">01</span><div><span class="eyebrow">PROJECTBOARD ADDRESS</span><h3>全局回调地址</h3></div></div>
-        <p class="settings-lead">GitHub 与 GitLab 共用这一处地址。修改后，新发起的授权流程会自动采用新地址。</p>
-        <form class="form system-address-form" id="systemSettingsForm">${field('ProjectBoard URL','publicUrl','url',value,'required')}<div class="address-preview"><span>当前入口</span><code>${escapeHTML(value)}</code></div><div class="form-error" hidden></div><button class="button primary" type="submit">${t('save')}全局地址</button></form>
-      </section>
-      <section class="settings-panel settings-panel--sync">
-        <div class="settings-panel-head"><span class="settings-index">02</span><div><span class="eyebrow">COMMIT SIGNAL</span><h3>提交同步路径</h3></div></div>
-        <div class="sync-route" aria-label="提交同步触发路径"><div class="sync-trigger"><span class="sync-icon">${icon('user')}</span><div><strong>项目成员</strong><small>点击“同步最近提交”</small></div></div><div class="sync-route-line"><span></span></div><div class="sync-trigger"><span class="sync-icon">${icon('bot')}</span><div><strong>活动 Runner</strong><small>在有效 Run 与租约内通知</small></div></div><div class="sync-destination"><span class="project-mark">PB</span><div><strong>ProjectBoard 查询提供商</strong><small>最近 30 条 · 按仓库 / SHA 去重</small></div></div></div>
-        <div class="policy-lock"><span>${icon('shield')}</span><p><strong>不会后台运行</strong>没有 Webhook 监听，也没有定时轮询；每次查询都有明确触发者并写入审计。</p></div>
-      </section>
-    </div>
+    <section class="settings-sheet">
+      <header class="settings-sheet-head"><h2>提交同步</h2></header>
+      <dl class="simple-setting-rows"><div><dt>触发方式</dt><dd>手动或 Runner</dd></div><div><dt>同步模式</dt><dd><span class="setting-state blue">按需</span></dd></div></dl>
+    </section>
   </div>`;
   $('#systemSettingsForm').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,button=$('button[type=submit]',form),error=$('.form-error',form);button.disabled=true;error.hidden=true;try{await api('/api/system/settings',{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(form)))});toast('系统设置已保存');renderSystemSettings()}catch(x){error.textContent=x.message;error.hidden=false;button.disabled=false}};
 };
@@ -92,17 +84,15 @@ renderSettings=async function(){
   if(!state.project)return renderQueue();
   let grant=null;try{grant=await api(`/api/projects/${state.project.id}/repository-grant`)}catch{}
   const actions=`<button class="button" id="editProject">编辑项目</button>${grant?`<button class="button" id="syncCommits">${icon('activity')}同步最近提交</button>`:''}<button class="button primary" id="gitGrant">${icon('git')}${grant?'更改 Git 授权':'自动配置 Git'}</button>`;
-  const grantDetails=grant?`<div class="authorization-summary"><div class="authorization-mark">${icon('git')}</div><div><span class="eyebrow">ACTIVE REPOSITORY GRANT</span><h3>${escapeHTML(grant.repositoryName)}</h3><p>${escapeHTML(grant.authorizationName)}</p></div><span class="settings-status signal"><i></i>已授权</span></div><dl class="settings-facts"><div><dt>提供商</dt><dd>${escapeHTML(grant.provider)}</dd></div><div><dt>访问范围</dt><dd>${escapeHTML(grant.accessLevel)}</dd></div><div><dt>提交同步</dt><dd>按需触发</dd></div></dl>`:`<div class="authorization-empty"><span class="authorization-mark">${icon('git')}</span><span class="eyebrow">REPOSITORY GRANT REQUIRED</span><h3>还没有连接代码仓库</h3><p>自动配置 Git 后，选择仓库并确认项目的精确读写范围。授权可以复用，但每个项目仍拥有独立、可撤销的 Grant。</p></div>`;
-  $('#workspace').innerHTML=header(t('settings'),'仓库边界、分支规则与同步入口。',actions)+`<div class="content settings-stage project-control-plane">
-    <section class="settings-overview settings-overview--project">
-      <div class="project-identity"><span class="project-mark settings-project-mark">${escapeHTML(state.project.key.slice(0,2).toUpperCase())}</span><div><span class="eyebrow">PROJECT / ${escapeHTML(state.project.key)}</span><h2>${escapeHTML(state.project.name)}</h2><p>${escapeHTML(state.project.repositoryUrl)}</p></div></div>
-      <div class="settings-status-cluster"><span class="settings-status ${grant?'signal':'warning'}"><i></i>${grant?'仓库已连接':'等待 Git 授权'}</span><span class="settings-status muted">配置版本 ${state.project.configVersion}</span></div>
+  const grantDetails=grant?`<dl class="simple-setting-rows"><div><dt>状态</dt><dd><span class="setting-state blue">已连接</span></dd></div><div><dt>仓库</dt><dd>${escapeHTML(grant.repositoryName)}</dd></div><div><dt>提供商</dt><dd>${escapeHTML(grant.provider)}</dd></div><div><dt>访问范围</dt><dd>${escapeHTML(grant.accessLevel)}</dd></div><div><dt>同步方式</dt><dd>按需</dd></div></dl>`:`<div class="simple-empty-setting"><span class="setting-state">未连接</span><strong>尚未配置 Git 仓库</strong></div>`;
+  $('#workspace').innerHTML=header(t('settings'),escapeHTML(state.project.name),actions)+`<div class="content simple-settings-page project-simple-settings">
+    <section class="settings-sheet">
+      <header class="settings-sheet-head"><h2>Git 仓库</h2></header>${grantDetails}
     </section>
-    <div class="settings-plane-grid project-settings-grid">
-      <section class="settings-panel settings-panel--authorization"><div class="settings-panel-head"><span class="settings-index">01</span><div><span class="eyebrow">ACCESS BOUNDARY</span><h3>仓库授权</h3></div></div>${grantDetails}</section>
-      <section class="settings-panel settings-panel--repository"><div class="settings-panel-head"><span class="settings-index">02</span><div><span class="eyebrow">BRANCH ROUTE</span><h3>仓库与分支</h3></div></div><dl class="settings-facts settings-facts--stack"><div><dt>Repository URL</dt><dd>${escapeHTML(state.project.repositoryUrl)}</dd></div><div><dt>默认目标分支</dt><dd>${escapeHTML(state.project.defaultTargetBranch)}</dd></div><div><dt>允许的目标分支</dt><dd>${escapeHTML((state.project.allowedTargetBranches||[]).join(', ')||'未设置')}</dd></div></dl></section>
-    </div>
-    <section class="settings-policy-rail"><div><span class="policy-number">A</span><div><strong>Runner 执行边界</strong><p>Runner 只能推送受控任务分支；推送后可在当前项目的有效 Run 与租约内请求同步。</p></div></div><div><span class="policy-number">B</span><div><strong>凭据与审计</strong><p>没有 Webhook 与后台轮询。提供商密钥加密保存，每次人工或 Runner 同步均限定到项目并留下审计记录。</p></div></div></section>
+    <section class="settings-sheet">
+      <header class="settings-sheet-head"><h2>仓库与分支</h2><span class="setting-state">版本 ${state.project.configVersion}</span></header>
+      <dl class="simple-setting-rows"><div><dt>Repository URL</dt><dd>${escapeHTML(state.project.repositoryUrl)}</dd></div><div><dt>默认分支</dt><dd>${escapeHTML(state.project.defaultTargetBranch)}</dd></div><div><dt>允许分支</dt><dd>${escapeHTML((state.project.allowedTargetBranches||[]).join(', ')||'未设置')}</dd></div></dl>
+    </section>
   </div>`;
   $('#editProject').onclick=()=>editProjectForm(state.project);$('#gitGrant').onclick=grantForm;const sync=$('#syncCommits');if(sync)sync.onclick=async()=>{sync.disabled=true;try{const result=await api(`/api/projects/${state.project.id}/sync-commits`,{method:'POST',body:'{}'});toast(`已查询 ${result.fetched} 条提交，新增关联 ${result.inserted} 条`)}catch(error){toast(error.message)}finally{sync.disabled=false}};
 };

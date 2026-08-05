@@ -9,12 +9,12 @@ FORM: Reference-led Operate redesign, pinned to the local ScriptBoard interface 
 :root {
   --ink: #17191f;
   --ink-soft: #606571;
-  --canvas: #f4f5f7;
-  --surface: #f4f5f7;
+  --canvas: #f3f4f6;
+  --surface: #f3f4f6;
   --raised: #fff;
   --line: #dfe2e8;
   --line-soft: #e8eaf0;
-  --signal: #536fd7;
+  --signal: #2563eb;
   --signal-ink: #fff;
   --danger: #b84646;
   --health: #2f8065;
@@ -143,8 +143,8 @@ body {
 }
 
 .nav button.active {
-  background: #e9edfb;
-  color: #405dc8;
+  background: #eff6ff;
+  color: #2563eb;
   font-weight: 680;
 }
 
@@ -154,7 +154,7 @@ body {
   inset: 8px auto 8px -12px;
   width: 2px;
   border-radius: 0 2px 2px 0;
-  background: #536fd7;
+  background: #2563eb;
 }
 
 .rail-foot {
@@ -225,14 +225,14 @@ body {
 }
 
 .button.primary {
-  border-color: #536fd7;
-  background: #536fd7;
+  border-color: #2563eb;
+  background: #2563eb;
   color: #fff;
 }
 
 .button.primary:hover {
-  border-color: #405dc8;
-  background: #405dc8;
+  border-color: #1d4ed8;
+  background: #1d4ed8;
   color: #fff;
 }
 
