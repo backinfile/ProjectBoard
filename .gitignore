@@ -8,5 +8,7 @@ data/
 *.db-shm
 *.db-wal
 .env
+.env.*
+!.env.example
 runner-state.json
 runner-worktrees/

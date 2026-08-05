@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname, platform, release } from 'node:os';
 import { dirname, resolve } from 'node:path';

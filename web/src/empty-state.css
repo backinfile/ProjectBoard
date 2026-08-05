@@ -1,0 +1,58 @@
+.no-projects {
+  min-height: min(590px, calc(100dvh - 194px));
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  padding: 64px 24px 84px;
+  text-align: center;
+  background: var(--surface);
+}
+
+.no-projects-mark {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 4px;
+  border: 1px solid var(--ink);
+  border-radius: 12px;
+  background: var(--ink);
+  color: var(--accent);
+  box-shadow: 10px 10px 0 var(--accent);
+}
+
+.no-projects-eyebrow {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-family: "Aptos Mono", "Cascadia Code", monospace;
+  font-size: .68rem;
+  font-weight: 750;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.no-projects h2 {
+  margin: 0;
+  font-family: "Bahnschrift SemiCondensed", "Aptos Display", sans-serif;
+  font-size: clamp(2rem, 4vw, 3.2rem);
+  font-weight: 820;
+  letter-spacing: -.035em;
+}
+
+.no-projects > p:not(.no-projects-eyebrow) {
+  max-width: 460px;
+  margin: 0;
+  color: var(--muted);
+  font-size: .86rem;
+  line-height: 1.65;
+}
+
+.no-projects .primary { margin-top: 12px; }
+
+@media (max-width: 600px) {
+  .no-projects {
+    min-height: calc(100dvh - 222px);
+    padding: 48px 18px 68px;
+  }
+}

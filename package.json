@@ -3,11 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "bin": { "projectboard-runner": "dist/runner/main.js", "projectboard-mcp": "dist/mcp/main.js" },
+  "bin": {
+    "projectboard-runner": "dist/runner/main.js",
+    "projectboard-mcp": "dist/mcp/main.js"
+  },
   "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "concurrently -k \"tsx watch src/server/main.ts\" \"vite --host 0.0.0.0\"",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -p tsconfig.server.json && vite build && node scripts/build-runner-package.mjs",
     "start": "node dist/server/main.js",
     "broker": "node dist/server/broker.js",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json",
@@ -27,6 +30,7 @@
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "jose": "^6.0.12",
+    "lucide-react": "^1.28.0",
     "marked": "^16.1.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
