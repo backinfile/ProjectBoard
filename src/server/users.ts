@@ -20,7 +20,7 @@ export async function createUserWithGeneratedPassword(db: Db, actor: Actor, inpu
   const temporaryPassword = generatedTemporaryPassword();
   const systemRole = input.systemRole ?? 'user';
   db.run(
-    "INSERT INTO users(id,username,display_name,password_hash,system_role,status,must_change_password,created_at,updated_at) VALUES(?,?,?,?,?,'active',1,?,?)",
+    "INSERT INTO users(id,username,display_name,password_hash,system_role,status,must_change_password,created_at,updated_at) VALUES(?,?,?,?,?,'active',0,?,?)",
     id,
     input.username,
     input.displayName,
@@ -40,7 +40,7 @@ export async function resetUserWithGeneratedPassword(db: Db, actor: Actor, userI
   const temporaryPassword = generatedTemporaryPassword();
   const nextHash = await hashPassword(temporaryPassword);
   db.transaction(() => {
-    db.run('UPDATE users SET password_hash=?,must_change_password=1,updated_at=? WHERE id=?', nextHash, db.now(), userId);
+    db.run('UPDATE users SET password_hash=?,must_change_password=0,updated_at=? WHERE id=?', nextHash, db.now(), userId);
     db.run('UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL', db.now(), userId);
     audit(db, actor, 'account.password_reset', 'user', userId, null, {});
   });

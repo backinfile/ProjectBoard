@@ -8,7 +8,7 @@ describe('generated user passwords', () => {
   const cleanups: Array<() => void> = [];
   afterEach(() => cleanups.splice(0).forEach(cleanup => cleanup()));
 
-  it('creates a user with a generated temporary password that can authenticate', async () => {
+  it('creates a user with a generated password that can authenticate without a forced change', async () => {
     const test = fixture('create-user-password');
     cleanups.push(test.cleanup);
 
@@ -20,7 +20,7 @@ describe('generated user passwords', () => {
 
     expect(validatePassword(created.temporaryPassword)).toBe(true);
     const session = await login(test.db, 'new-user', created.temporaryPassword, { ip: '127.0.0.1' });
-    expect(session.user.mustChangePassword).toBe(true);
+    expect(session.user.mustChangePassword).toBe(false);
   });
 
   it('resets a user to a newly generated temporary password and invalidates the old one', async () => {
@@ -38,6 +38,6 @@ describe('generated user passwords', () => {
     expect(validatePassword(reset.temporaryPassword)).toBe(true);
     await expect(login(test.db, 'reset-user', created.temporaryPassword, { ip: '127.0.0.2' })).rejects.toMatchObject({ code: 'INVALID_CREDENTIALS' });
     const session = await login(test.db, 'reset-user', reset.temporaryPassword, { ip: '127.0.0.3' });
-    expect(session.user.mustChangePassword).toBe(true);
+    expect(session.user.mustChangePassword).toBe(false);
   });
 });
