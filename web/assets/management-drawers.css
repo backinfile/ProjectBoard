@@ -1,0 +1,168 @@
+.management-row,
+.user-row {
+  transition: background .14s, transform .14s;
+}
+
+.management-row:hover,
+.user-row:hover {
+  transform: translateX(3px);
+}
+
+.row-end,
+.user-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.row-end > .icon,
+.user-status > .icon {
+  color: var(--muted);
+  transition: transform .14s, color .14s;
+}
+
+.management-row:hover .row-end > .icon,
+.user-row:hover .user-status > .icon {
+  color: var(--ink);
+  transform: translateX(3px);
+}
+
+.user-identity {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.user-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+  background: var(--ink);
+  color: var(--signal);
+  font: 800 13px var(--display);
+}
+
+.user-avatar.large,
+.project-mark.large {
+  width: 54px;
+  height: 54px;
+  font-size: 22px;
+}
+
+.drawer-head .eyebrow {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.drawer-loading {
+  min-height: 50vh;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font: 700 10px var(--mono);
+  letter-spacing: .08em;
+}
+
+.eyebrow {
+  color: var(--muted);
+  font: 700 9px var(--mono);
+  letter-spacing: .1em;
+}
+
+.entity-summary,
+.user-summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 15px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.entity-summary h3 {
+  margin: 4px 0 8px;
+  font: 800 26px var(--display);
+}
+
+.entity-mark {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--raised);
+}
+
+.entity-mark .icon {
+  width: 23px;
+  height: 23px;
+}
+
+.user-summary p,
+.security-section p,
+.detail-copy {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.user-summary-badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.user-settings-form,
+.drawer-section {
+  padding: 22px 0;
+  border-top: 1px solid var(--line);
+}
+
+.user-memberships,
+.payload-kv {
+  margin-top: 12px;
+}
+
+.payload-kv dd {
+  overflow-wrap: anywhere;
+}
+
+.empty-note,
+.inline-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.drawer-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.secret-reveal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--raised);
+}
+
+.secret-reveal code {
+  overflow-wrap: anywhere;
+  font: 700 13px var(--mono);
+}
