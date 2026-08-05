@@ -72,10 +72,6 @@ renderSystemSettings=async function(){
       <header class="settings-sheet-head"><h2>服务地址</h2><span class="setting-state">${settings.publicUrl?'已配置':'未保存'}</span></header>
       <form class="simple-setting-form" id="systemSettingsForm">${field('ProjectBoard URL','publicUrl','url',value,'required')}<div class="form-error" hidden></div><button class="button primary" type="submit">${t('save')}</button></form>
     </section>
-    <section class="settings-sheet">
-      <header class="settings-sheet-head"><h2>提交同步</h2></header>
-      <dl class="simple-setting-rows"><div><dt>触发方式</dt><dd>手动或 Runner</dd></div><div><dt>同步模式</dt><dd><span class="setting-state blue">按需</span></dd></div></dl>
-    </section>
   </div>`;
   $('#systemSettingsForm').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,button=$('button[type=submit]',form),error=$('.form-error',form);button.disabled=true;error.hidden=true;try{await api('/api/system/settings',{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(form)))});toast('系统设置已保存');renderSystemSettings()}catch(x){error.textContent=x.message;error.hidden=false;button.disabled=false}};
 };
