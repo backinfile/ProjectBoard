@@ -27,9 +27,47 @@ PROJECTBOARD_ENV=production
 
 ## 项目授权
 
-管理员先保存 GitHub App 或 GitLab 的“提供商授权”。长期私钥或 Token 使用与 SQLite 数据库分离的主密钥进行 AES-GCM 加密。随后每个项目必须单独创建仓库 Grant，明确绑定授权、仓库、读写级别、批准人和批准时间。
+管理员在项目设置中点击“自动配置 Git”，再到 GitHub 或 GitLab 官方页面确认授权。回调成功后，ProjectBoard 会验证权限与 Webhook、读取可用仓库、按当前项目的 `repositoryUrl` 自动匹配，并在最终绑定前明确展示仓库和读写范围。授权或安装可以复用于多个项目，但每个项目仍创建独立、可撤销、可审计的仓库 Grant。
 
-多个项目可以复用同一个提供商授权，也可以分别创建授权；复用不会合并项目 Grant。撤销一个项目的 Grant 不影响其他项目，仍被项目使用的提供商授权不能直接撤销。`github-app.pem` 属于 GitHub App/提供商授权，不需要为每个项目复制。
+自动流程不会扩大提供商权限。GitHub installation token 只用于验证安装和枚举仓库；Runner 写凭据仍必须由单一项目 Grant、已启用 Agent、有效指派、Run 和租约共同约束。撤销一个项目的 Grant 不影响复用同一授权的其他项目，仍被项目使用的提供商授权不能直接撤销。
+
+### 部署方配置 GitHub App
+
+GitHub App 必须由部署方预先创建并配置，浏览器不会显示或接收 App ID、Installation ID 或 PEM 私钥。App 至少需要：
+
+- Repository permission：`Contents: Read and write`；不授予 Administration，也不要加入分支保护 bypass。
+- Webhook URL：`https://<ProjectBoard>/api/git/webhooks/github`，设置独立随机 secret，并订阅 Push 与 installation/repository 变化事件。
+- Setup URL：`https://<ProjectBoard>/api/git/connections/github/callback`，开启安装更新后的重定向。
+
+服务进程读取以下配置：
+
+```text
+PROJECTBOARD_PUBLIC_URL=https://projectboard.example.com
+PROJECTBOARD_GITHUB_APP_ID=<app id>
+PROJECTBOARD_GITHUB_APP_SLUG=<app slug>
+PROJECTBOARD_GITHUB_PRIVATE_KEY_FILE=/run/secrets/projectboard-github-app.pem
+PROJECTBOARD_GITHUB_WEBHOOK_SECRET=<webhook secret>
+# 只有自定义回调拓扑时才覆盖：
+PROJECTBOARD_GITHUB_WEBHOOK_URL=https://projectboard.example.com/api/git/webhooks/github
+```
+
+私钥文件应由部署系统挂载为仅服务账户可读，不要放入仓库、数据库、网页表单或环境变量。ProjectBoard 使用 App JWT 验证 installation，按 installation 枚举仓库，并检查 GitHub App Webhook URL 与部署配置一致。
+
+### 部署方配置 GitLab OAuth
+
+在 GitLab 创建 OAuth Application，回调 URL 设置为 `https://<ProjectBoard>/api/git/connections/gitlab/callback`，授予 `api` scope，然后配置：
+
+```text
+PROJECTBOARD_PUBLIC_URL=https://projectboard.example.com
+PROJECTBOARD_GITLAB_CLIENT_ID=<application id>
+PROJECTBOARD_GITLAB_CLIENT_SECRET=<application secret>
+PROJECTBOARD_GITLAB_BASE_URL=https://gitlab.com
+PROJECTBOARD_GITLAB_WEBHOOK_SECRET=<random secret>
+```
+
+GitLab 流程使用 authorization code、PKCE、一次性 state/nonce 和 15 分钟回调窗口。最终确认项目绑定时才创建并验证项目 Push Webhook。操作者对所选仓库需要足够的项目权限；选择写入范围时至少需要 Developer。若部署方没有配置 GitLab OAuth，界面仍提供明确标记的“高级 GitLab Token”降级入口；GitHub 私钥没有浏览器降级入口。
+
+授权失败、用户取消、回调过期、没有可用/匹配仓库、权限不足和 Webhook 验证失败都会保留为可恢复状态，不会静默创建项目 Grant。长期 GitLab Token/refresh token 仍使用与 SQLite 分离的 `data/secrets/master.key` 进行 AES-GCM 加密。
 
 ## Runner
 

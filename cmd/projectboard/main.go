@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/projectboard/projectboard/internal/mcpstdio"
 	"github.com/projectboard/projectboard/internal/ops"
+	"github.com/projectboard/projectboard/internal/providers"
 	"github.com/projectboard/projectboard/internal/server"
 )
 
@@ -58,6 +60,18 @@ func main() {
 		BootstrapUsername: env("PROJECTBOARD_BOOTSTRAP_USERNAME", "admin"),
 		BootstrapPassword: os.Getenv("PROJECTBOARD_BOOTSTRAP_PASSWORD"),
 		Production:        env("PROJECTBOARD_ENV", "development") == "production",
+		GitConnect: providers.GitConnectConfig{
+			PublicURL:           strings.TrimRight(os.Getenv("PROJECTBOARD_PUBLIC_URL"), "/"),
+			GitHubAppID:         os.Getenv("PROJECTBOARD_GITHUB_APP_ID"),
+			GitHubAppSlug:       os.Getenv("PROJECTBOARD_GITHUB_APP_SLUG"),
+			GitHubPrivateKey:    readSecretFile(os.Getenv("PROJECTBOARD_GITHUB_PRIVATE_KEY_FILE")),
+			GitHubWebhookURL:    env("PROJECTBOARD_GITHUB_WEBHOOK_URL", strings.TrimRight(os.Getenv("PROJECTBOARD_PUBLIC_URL"), "/")+"/api/git/webhooks/github"),
+			GitHubWebhookSecret: os.Getenv("PROJECTBOARD_GITHUB_WEBHOOK_SECRET"),
+			GitLabClientID:      os.Getenv("PROJECTBOARD_GITLAB_CLIENT_ID"),
+			GitLabClientSecret:  os.Getenv("PROJECTBOARD_GITLAB_CLIENT_SECRET"),
+			GitLabBaseURL:       env("PROJECTBOARD_GITLAB_BASE_URL", "https://gitlab.com"),
+			GitLabWebhookSecret: os.Getenv("PROJECTBOARD_GITLAB_WEBHOOK_SECRET"),
+		},
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -82,6 +96,18 @@ func main() {
 			log.Printf("graceful shutdown: %v", err)
 		}
 	}
+}
+
+func readSecretFile(file string) string {
+	if file == "" {
+		return ""
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		log.Printf("cannot read configured secret file %s: %v", file, err)
+		return ""
+	}
+	return string(data)
 }
 
 func env(name, fallback string) string {

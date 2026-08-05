@@ -31,6 +31,7 @@ type Config struct {
 	BootstrapUsername string
 	BootstrapPassword string
 	Production        bool
+	GitConnect        providers.GitConnectConfig
 }
 
 type domainError struct {
@@ -48,6 +49,7 @@ type Server struct {
 	config Config
 	static fs.FS
 	vault  *providers.Vault
+	git    *providers.GitConnector
 }
 
 type Application struct {
@@ -90,7 +92,7 @@ func New(config Config) (*Application, error) {
 		database.Close()
 		return nil, err
 	}
-	s := &Server{store: database, queue: workqueue.New(database), config: config, static: static, vault: vault}
+	s := &Server{store: database, queue: workqueue.New(database), config: config, static: static, vault: vault, git: providers.NewGitConnector(config.GitConnect)}
 	return &Application{handler: securityHeaders(s.routes()), server: s}, nil
 }
 
@@ -135,10 +137,18 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/agents/{id}/pairing-codes", s.handle(s.createPairingCode))
 	mux.HandleFunc("GET /api/provider-authorizations", s.handle(s.listAuthorizations))
 	mux.HandleFunc("POST /api/provider-authorizations", s.handle(s.createAuthorization))
+	mux.HandleFunc("GET /api/provider-authorizations/{id}/repositories", s.handle(s.authorizationRepositories))
 	mux.HandleFunc("DELETE /api/provider-authorizations/{id}", s.handle(s.revokeAuthorization))
 	mux.HandleFunc("GET /api/projects/{id}/repository-grant", s.handle(s.getRepositoryGrant))
 	mux.HandleFunc("POST /api/projects/{id}/repository-grant", s.handle(s.bindRepositoryGrant))
 	mux.HandleFunc("DELETE /api/projects/{id}/repository-grant", s.handle(s.revokeRepositoryGrant))
+	mux.HandleFunc("GET /api/git/connections", s.handle(s.gitConnectionConfiguration))
+	mux.HandleFunc("POST /api/git/connections/{provider}/start", s.handle(s.startGitConnection))
+	mux.HandleFunc("GET /api/git/connections/{provider}/callback", s.handle(s.gitConnectionCallback))
+	mux.HandleFunc("GET /api/git/connection-flows/{id}", s.handle(s.getGitConnection))
+	mux.HandleFunc("POST /api/git/connection-flows/{id}/complete", s.handle(s.completeGitConnection))
+	mux.HandleFunc("POST /api/git/connection-flows/{id}/cancel", s.handle(s.cancelGitConnection))
+	mux.HandleFunc("POST /api/git/webhooks/{provider}", s.handle(s.gitWebhook))
 	mux.HandleFunc("GET /api/work-items", s.handle(s.listWorkItems))
 	mux.HandleFunc("POST /api/work-items", s.handle(s.createWorkItem))
 	mux.HandleFunc("GET /api/work-items/{id}", s.handle(s.getWorkItem))
@@ -1200,7 +1210,7 @@ func (s *Server) listAuthorizations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT p.id,p.provider,p.name,p.base_url,p.app_id,p.installation_id,p.status,p.created_at,(SELECT COUNT(*) FROM project_repository_grants g WHERE g.authorization_id=p.id AND g.revoked_at IS NULL) FROM provider_authorizations p ORDER BY p.name`)
+	rows, err := s.store.DB.Query(`SELECT p.id,p.provider,p.name,p.base_url,p.app_id,p.installation_id,p.status,p.created_at,(SELECT COUNT(*) FROM project_repository_grants g WHERE g.authorization_id=p.id AND g.revoked_at IS NULL),m.external_account,m.webhook_status FROM provider_authorizations p LEFT JOIN provider_authorization_metadata m ON m.authorization_id=p.id ORDER BY p.name`)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1209,10 +1219,10 @@ func (s *Server) listAuthorizations(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var id, provider, name, base, status, created string
-		var appID, installation *string
+		var appID, installation, externalAccount, webhookStatus *string
 		var count int
-		_ = rows.Scan(&id, &provider, &name, &base, &appID, &installation, &status, &created, &count)
-		out = append(out, map[string]any{"id": id, "provider": provider, "name": name, "baseUrl": base, "appId": appID, "installationId": installation, "status": status, "createdAt": created, "bindingCount": count})
+		_ = rows.Scan(&id, &provider, &name, &base, &appID, &installation, &status, &created, &count, &externalAccount, &webhookStatus)
+		out = append(out, map[string]any{"id": id, "provider": provider, "name": name, "baseUrl": base, "appId": appID, "installationId": installation, "status": status, "createdAt": created, "bindingCount": count, "externalAccount": externalAccount, "webhookStatus": webhookStatus})
 	}
 	writeJSON(w, 200, out)
 }
@@ -1235,6 +1245,10 @@ func (s *Server) createAuthorization(w http.ResponseWriter, r *http.Request) {
 		WebhookSecret  string `json:"webhookSecret"`
 	}
 	decode(r, &in)
+	if in.Provider == "github" {
+		writeError(w, &domainError{422, "GITHUB_BROWSER_SECRET_FORBIDDEN", "GitHub App credentials must be configured by the deployment; connect GitHub from project settings", nil})
+		return
+	}
 	if in.Provider != "github" && in.Provider != "gitlab" {
 		writeError(w, &domainError{422, "INVALID_PROVIDER", "Provider must be github or gitlab", nil})
 		return
@@ -1323,10 +1337,35 @@ func (s *Server) bindRepositoryGrant(w http.ResponseWriter, r *http.Request) {
 	if in.AccessLevel == "" {
 		in.AccessLevel = "write"
 	}
+	if in.AccessLevel != "read" && in.AccessLevel != "write" {
+		writeError(w, &domainError{422, "INVALID_ACCESS_LEVEL", "Access level must be read or write", nil})
+		return
+	}
 	var authorizationStatus string
 	if err := s.store.DB.QueryRow("SELECT status FROM provider_authorizations WHERE id=?", in.AuthorizationID).Scan(&authorizationStatus); err != nil || authorizationStatus != "active" {
 		writeError(w, &domainError{422, "AUTHORIZATION_UNAVAILABLE", "Provider authorization is missing or revoked", nil})
 		return
+	}
+	var catalogCount int
+	if err := s.store.DB.QueryRow("SELECT COUNT(*) FROM provider_authorization_repositories WHERE authorization_id=?", in.AuthorizationID).Scan(&catalogCount); err != nil {
+		writeError(w, err)
+		return
+	}
+	if catalogCount > 0 {
+		var canWrite bool
+		err := s.store.DB.QueryRow("SELECT repository_name,clone_url,default_branch,can_write FROM provider_authorization_repositories WHERE authorization_id=? AND repository_id=?", in.AuthorizationID, in.RepositoryID).Scan(&in.RepositoryName, &in.CloneURL, &in.DefaultBranch, &canWrite)
+		if err == sql.ErrNoRows {
+			writeError(w, &domainError{422, "REPOSITORY_NOT_AUTHORIZED", "Repository is not available to this verified provider connection", nil})
+			return
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if in.AccessLevel == "write" && !canWrite {
+			writeError(w, &domainError{422, "INSUFFICIENT_REPOSITORY_PERMISSION", "The provider connection does not have write permission for this repository", nil})
+			return
+		}
 	}
 	id, stamp := security.Token(18), now()
 	_, err := s.store.DB.Exec(`INSERT INTO project_repository_grants(id,project_id,authorization_id,repository_id,repository_name,clone_url,default_branch,access_level,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET authorization_id=excluded.authorization_id,repository_id=excluded.repository_id,repository_name=excluded.repository_name,clone_url=excluded.clone_url,default_branch=excluded.default_branch,access_level=excluded.access_level,approved_by=excluded.approved_by,approved_at=excluded.approved_at,revoked_at=NULL`, id, projectID, in.AuthorizationID, in.RepositoryID, in.RepositoryName, in.CloneURL, in.DefaultBranch, in.AccessLevel, a.ID, stamp)
