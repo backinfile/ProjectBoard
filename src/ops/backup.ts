@@ -1,2 +1,0 @@
-import { DatabaseSync } from 'node:sqlite';import{mkdirSync}from'node:fs';import{dirname,resolve}from'node:path';
-const source=resolve(process.env.PROJECTBOARD_DB??'./data/projectboard.db');const target=resolve(process.argv[2]??`./data/backups/projectboard-${new Date().toISOString().replace(/[:.]/g,'-')}.db`);mkdirSync(dirname(target),{recursive:true});const db=new DatabaseSync(source);db.exec(`VACUUM INTO '${target.replaceAll("'","''")}'`);db.close();console.log(target);

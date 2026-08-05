@@ -1,2 +1,0 @@
-import{copyFileSync,existsSync}from'node:fs';import{resolve}from'node:path';
-const source=resolve(process.argv[2]??'');const target=resolve(process.env.PROJECTBOARD_DB??'./data/projectboard.db');if(!existsSync(source))throw new Error('Backup file does not exist');if(existsSync(`${target}-wal`)||existsSync(`${target}-shm`))throw new Error('Stop ProjectBoard and remove/checkpoint WAL files before restore');copyFileSync(source,target);console.log(`Restored ${source} to ${target}`);

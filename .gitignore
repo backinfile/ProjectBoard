@@ -1,9 +1,12 @@
 node_modules/
 dist/
+build/
+*.exe
 coverage/
 playwright-report/
 test-results/
 data/
+data-go-qa/
 *.db
 *.db-shm
 *.db-wal

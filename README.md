@@ -1,79 +1,75 @@
 # ProjectBoard
 
-ProjectBoard is a production-oriented work-item queue for human and Agent collaboration. The implementation follows [PLAN.md](./PLAN.md) and the information architecture in [projectboard-ui-prototype.html](./projectboard-ui-prototype.html); neither source file is generated or replaced by the application.
+ProjectBoard 是一个供人类与 Agent 协作的项目工单台。服务端、Runner、MCP、迁移和备份均由 Go 实现；浏览器端是嵌入二进制的静态 HTML、CSS 与原生 JavaScript，不需要 Node.js、pnpm 或独立前端服务。
 
-## Included
+## 安装与启动
 
-- Final six-value work-item stage model (`todo → discussion → execution → acceptance → completed`, plus terminal `abandoned`) with additive blockers, optimistic versions, idempotency, immutable discussion/execution/acceptance attempts, continuous conversation, attachments, dependencies and two-level decomposition.
-- Organization users, Argon2id passwords, server-side sessions, CSRF/Origin checks, administrator lifecycle controls, per-project developer/viewer membership, separate Agent identities, one-time 10-minute Runner pairing and hashed Agent tokens.
-- SQLite WAL persistence with foreign keys, busy timeout, partial unique indexes for one live lease per work item and Agent, append-only audit events, NDJSON export, online-safe `VACUUM INTO` backup and offline restore tooling.
-- GitHub App and GitLab project-token adapters behind a separately started Credential Broker. GitHub installation tokens are reduced to one repository and `contents:read` for observers or `contents:write` for a valid leased Runner. GitLab creates per-project read/write repository tokens and revokes them. Plaintext provider tokens are held only in Broker memory and never persisted.
-- Signed/idempotent provider webhooks, observer re-fetch/reconciliation, exact work-item-ID commit matching, repository/branch ownership validation and `(repository, SHA)` deduplication.
-- Runner pairing, trusted local repository/config digest registration, isolated worktrees, sanitized Codex environment, controlled credential helper, exact task branches, protected-path checks, configured validation commands, fast-forward-only push and structured result submission. Linux systemd and Windows tray launchers are in `deploy/` and `src/runner/`.
-- JSON Web/Runner API and all MCP tools listed in the plan.
-- Responsive Chinese/English React UI with project queue, members, Agents, settings, users, projects, activity, account and continuous work-item pages. The five-stage track remains horizontally readable on narrow screens. Drawers are fixed overlays and do not resize or scroll the underlying page.
-
-## Local setup
-
-Requires Node.js 24+ and pnpm 11+.
+需要 Go 1.26 或下载已编译的 `projectboard` 与 `projectboard-runner`。
 
 ```bash
-pnpm install
-copy .env.example .env
-pnpm build
-pnpm start
+go build -o projectboard ./cmd/projectboard
+go build -o projectboard-runner ./cmd/projectboard-runner
+projectboard serve
 ```
 
-Run the Credential Broker under a separate OS identity/environment:
+默认地址为 `http://localhost:3333`，数据写入 `./data`。首次启动会创建管理员；未设置密码时，随机密码只在服务日志中显示一次。自动化部署可以设置：
 
-```bash
-pnpm broker
+```text
+PORT=3333
+PROJECTBOARD_DATA_DIR=./data
+PROJECTBOARD_DB=./data/projectboard.db
+PROJECTBOARD_BOOTSTRAP_USERNAME=admin
+PROJECTBOARD_BOOTSTRAP_PASSWORD=<至少 12 位强密码>
+PROJECTBOARD_ENV=production
 ```
 
-The Web/API listens on `http://localhost:3333`; the Broker listens only on `127.0.0.1:3334`. For development, `pnpm dev` starts Vite and the API. On the first start, ProjectBoard creates the bootstrap administrator, generates a secure password, and prints it once to the server log. The administrator can sign in immediately without a forced password change. Set `PROJECTBOARD_BOOTSTRAP_PASSWORD` only when deployment automation needs to provide its own strong password.
+`PROJECTBOARD_ENV=production` 会启用 Secure 会话 Cookie，请在 TLS 反向代理后使用。
+
+## 项目授权
+
+管理员先保存 GitHub App 或 GitLab 的“提供商授权”。长期私钥或 Token 使用与 SQLite 数据库分离的主密钥进行 AES-GCM 加密。随后每个项目必须单独创建仓库 Grant，明确绑定授权、仓库、读写级别、批准人和批准时间。
+
+多个项目可以复用同一个提供商授权，也可以分别创建授权；复用不会合并项目 Grant。撤销一个项目的 Grant 不影响其他项目，仍被项目使用的提供商授权不能直接撤销。`github-app.pem` 属于 GitHub App/提供商授权，不需要为每个项目复制。
 
 ## Runner
 
-After an administrator creates an Agent in the UI, run the one-time command shown only in the pairing drawer:
+在网页中创建 Agent、为项目启用它并生成一次性配对码：
 
 ```bash
+set PROJECTBOARD_URL=http://localhost:3333
 projectboard-runner connect PB-XXXX-XXXX
-projectboard-runner register <project-id> /trusted/local/repository
+projectboard-runner register <project-id> <本地仓库路径>
 projectboard-runner poll --watch
-projectboard-runner execute PB-123
-projectboard-runner submit PB-123 <run-id> <lease-id>
+projectboard-runner claim <work-item-id> <version>
 ```
 
-Runner expects Codex CLI to be preinstalled and logged in. It deliberately does not install project toolchains. Missing commands fail validation and should be reported as a blocker.
+Agent Token 只存入当前用户的系统配置目录，文件权限为仅当前用户可读写；它不会进入项目仓库。Runner 不保存 Git 提供商长期密钥。
 
-For MCP, set `PROJECTBOARD_URL` and `PROJECTBOARD_AGENT_TOKEN`, then start `projectboard-mcp` over stdio.
+## MCP
 
-## Verification
+MCP 已内置，不需要单独安装服务：
+
+- `projectboard serve` 在 `/mcp` 提供带 Agent Bearer Token 的 HTTP MCP。
+- `projectboard mcp` 提供 stdio MCP，并通过 `PROJECTBOARD_URL` 与 `PROJECTBOARD_AGENT_TOKEN` 连接同一个服务。
+
+## 数据库、备份与恢复
 
 ```bash
-pnpm typecheck
-pnpm lint
-pnpm test
-pnpm test:e2e
-pnpm build
-pnpm security:check
+projectboard migrate
+projectboard backup ./backups/projectboard.db
+# 恢复前停止服务
+projectboard restore ./backups/projectboard.db
 ```
 
-Back up and restore:
+恢复前会执行 SQLite 完整性检查，并把原数据库保留为 `projectboard.db.before-restore`。`data/secrets/master.key` 必须与数据库分别安全备份；缺少它将无法解密提供商授权。
+
+## 验证
 
 ```bash
-pnpm backup -- ./data/backups/projectboard.db
-# Stop Web/API and Broker first:
-pnpm restore -- ./data/backups/projectboard.db
+go test ./...
+go vet ./...
+go build ./cmd/projectboard
+go build ./cmd/projectboard-runner
 ```
 
-## Deployment-provided configuration
-
-The code is complete without embedding deployment secrets. Operators must provide:
-
-- secure capture of the one-time generated bootstrap password (or an explicitly configured strong password), a Broker shared secret and HTTPS/public base URL;
-- one GitHub App ID/private-key file/webhook secret, configured with selected repositories and installation-level `Contents: read & write`; or GitLab OAuth application metadata plus a Broker-only Maintainer/Owner token file;
-- provider Rulesets/Protected Branches for `main`, `develop`, `release/*` and tags, with the ProjectBoard integration excluded from bypass;
-- TLS termination, persistent `data/` storage, filesystem ACLs for Runner state/Broker keys, and scheduled backup retention.
-
-Provider authorization cannot be fabricated locally: an organization administrator must install the GitHub App/select repositories or authorize GitLab once. Creating, pairing or enabling additional Agents never repeats that authorization.
+正式发布前按仓库流程先在 `dev` 完成测试和 README 检查，再合并到 `release`。
