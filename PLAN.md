@@ -39,7 +39,7 @@ Browser
 Git Credential Broker
   -> one GitHub App installation per account / selected repositories
   -> down-scoped observer and Runner installation tokens
-  -> provider webhook verification
+  -> explicit human/Runner commit sync notification
   -> provider private key / client secret in isolated secret storage
 
 Runner Host
@@ -140,8 +140,8 @@ RunnerStatus
 
 ### 4.2.1 GitProviderInstallation、RepositoryBinding 与凭据签发
 
-- `GitProviderInstallation` 保存 provider、外部 installation/application ID、授权仓库集合、Webhook 状态和权限摘要；不保存可直接使用的 provider token。
-- GitHub 使用单个 GitHub App 完成仓库读取、Push/PR Webhook 和 Runner 写入。安装级权限为 `Contents: read & write`，每次签发再用 `repository_ids` 和 `permissions` 缩小到单仓库、单用途。
+- `GitProviderInstallation` 保存 provider、外部 installation/application ID、授权仓库集合、同步模式和权限摘要；不保存可直接使用的 provider token。
+- GitHub 使用单个 GitHub App 完成仓库读取和 Runner 写入，不订阅 Webhook。安装级权限为 `Contents: read & write`，每次签发再用 `repository_ids` 和 `permissions` 缩小到单仓库、单用途。
 - `RepositoryBinding` 把一个 Project 精确绑定到安装中的一个外部 repository ID、规范化 clone URL、默认分支和 provider；不能只以可变仓库名称作为身份。
 - Git Credential Broker 是深 Module；Interface 只暴露 `issueObserverCredential(repositoryId)` 与 `issueRunnerCredential(runId, leaseId)`。GitHub App 与 GitLab OAuth/Token 是该 seam 上的 Adapter，调用者不能自行传入任意权限或仓库。
 - `issueObserverCredential` 只返回读取提交、分支和文件变化所需的权限；`issueRunnerCredential` 从 run、assignment、AgentProjectGrant、lease 和 RepositoryBinding 推导唯一仓库及写权限。
@@ -329,11 +329,11 @@ todo | discussion | execution | acceptance
 
 ### 8.1 Git provider 与短期凭据
 
-- 管理员从项目设置点击“自动配置 Git”，在 GitHub/GitLab 官方授权页完成一次明确确认；回调后自动登记安装、选择仓库、创建/验证 Webhook 并保存权限摘要。
+- 管理员先在全局系统设置保存 ProjectBoard 回调地址，再从项目设置点击“自动配置 Git”；GitHub 通过 App Manifest Flow 自动提交最小 App 配置并在服务端交换 App ID、slug 与 PEM，管理员只在 GitHub 官方页明确确认，随后安装、选择仓库并保存权限摘要。GitLab 在官方 OAuth 页完成确认。
 - GitHub 使用一个 GitHub App。ProjectBoard 观察提交时由 Broker 签发单仓库 `contents: read` token；Runner 执行时签发单仓库 `contents: write` token，最长一小时且任务结束后主动撤销。
 - AgentProjectGrant 只表达 Agent 是否可用于当前项目，不存 Git 权限等级；所有已启用 Agent 的 Git 能力一致，但只有有效 run + assignment + lease 能触发写 token 签发。
 - Runner 通过受控 credential adapter 使用 token 完成 clone、fetch 和任务分支 push；token 不写入仓库 remote URL、Git config、磁盘日志或 Codex 环境。
-- 提供商回调、installation 变化、仓库增删、Webhook delivery、token 签发/撤销与失败原因全部写入审计；delivery ID 和 requestId 都必须幂等。
+- 提供商回调、installation 变化、仓库增删、按需提交查询、token 签发/撤销与失败原因全部写入审计；repository/SHA 和 requestId 都必须幂等。
 - 自动配置可以检测分支保护；创建或修改 provider Ruleset/Protected Branch 是独立的高影响操作，必须展示变更预览并再次确认，且不保留 Administration 权限。
 
 ### 8.2 本地仓库登记
@@ -365,8 +365,8 @@ Runner 提交执行结果前必须：
 
 ### 8.5 Commit 自动关联
 
-- Git provider Push Webhook 是托管仓库的主要发现路径；ProjectBoard 使用观察用只读 token 重新获取完整提交集合，不能只相信 webhook payload。
-- Runner 在 fetch、提交、push 和验收准备时扫描新 commit message，作为本地仓库支持和 Webhook 漏事件补偿。
+- 人类在项目设置点击同步，或持有有效 Run 与租约的 Runner 在 push 后通知 ProjectBoard；ProjectBoard 使用单仓库只读 token 查询最近提交。
+- Runner 在 fetch、提交、push 和验收准备时扫描新 commit message，并通过显式通知触发服务端查询；系统不监听 Webhook，也不运行后台轮询。
 - 只接受可从当前项目任务分支到达、且消息包含完整工单 ID 的 commit。
 - 服务端再次校验外部 repository ID、分支、ID 边界、提交可达性与 `(repo, SHA)` 去重后写入对话事件。
 
@@ -475,7 +475,7 @@ Runner 提交执行结果前必须：
 - `POST /api/agent/pair`
 - `GET /api/git/installations`、`POST /api/git/installations/:provider/start`
 - `GET /api/git/installations/:provider/callback`
-- `POST /api/git/webhooks/:provider`
+- `POST /api/projects/:id/sync-commits`、`POST /api/agent/projects/:id/sync-commits`
 - `POST /api/projects/:id/repository-binding`
 - `POST /api/work-items`
 - `PATCH /api/work-items/:id`
@@ -570,7 +570,7 @@ release_task
 - 单个 GitHub App installation 覆盖选择仓库，观察 token 降权为 read、Runner token 限定单仓库并为 write；未启用 Agent、错误项目、错误 run、过期 lease 和跨仓库请求全部拒绝。
 - 配对码只能消费一次且十分钟过期；成功配对后浏览器无法读取 Agent Token，撤销 Agent Token 或停用项目授权会停止新的 Git token 签发。
 - token 明文不会进入数据库、日志、remote URL、Codex 环境或审计负载；任务结束、租约失效和主动释放均撤销活动 token。
-- Webhook 签名、delivery ID 幂等、超大 Push 补拉、漏事件补偿、installation 仓库移除和权限降级均有测试。
+- 人类/Runner 同步授权、repository/SHA 幂等、完整工单 ID 关联、installation 仓库移除和权限降级均有测试。
 - 临时远端覆盖 main、develop、release/* 基线和任务分支 fast-forward push。
 - 完整工单 ID 边界匹配；错误仓库、错误分支、短 ID 和未知 commit 拒绝。
 - `(repo, SHA)` 去重，同一提交不会重复进入时间线。

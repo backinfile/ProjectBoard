@@ -35,6 +35,8 @@ func main() {
 		poll(os.Args[2:])
 	case "claim":
 		claim(os.Args[2:])
+	case "sync":
+		syncCommits(os.Args[2:])
 	case "pause", "resume":
 		setPaused(os.Args[1] == "pause")
 	default:
@@ -43,7 +45,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: projectboard-runner <connect|register|poll|claim|pause|resume>")
+	fmt.Fprintln(os.Stderr, "usage: projectboard-runner <connect|register|poll|claim|sync|pause|resume>")
 	os.Exit(2)
 }
 
@@ -109,6 +111,17 @@ func claim(args []string) {
 	}
 	var response any
 	call(s.Server, s.Token, "/api/agent/assignments/"+args[0]+"/accept", map[string]any{"expectedVersion": version}, &response)
+	encoded, _ := json.MarshalIndent(response, "", "  ")
+	fmt.Println(string(encoded))
+}
+
+func syncCommits(args []string) {
+	if len(args) != 1 {
+		log.Fatal("usage: projectboard-runner sync <project-id>")
+	}
+	s := load()
+	var response any
+	call(s.Server, s.Token, "/api/agent/projects/"+args[0]+"/sync-commits", map[string]any{}, &response)
 	encoded, _ := json.MarshalIndent(response, "", "  ")
 	fmt.Println(string(encoded))
 }

@@ -11,16 +11,13 @@ import (
 )
 
 type storedGitProviderSettings struct {
-	PublicURL           string `json:"publicUrl"`
-	GitHubAppID         string `json:"githubAppId,omitempty"`
-	GitHubAppSlug       string `json:"githubAppSlug,omitempty"`
-	GitHubPrivateKey    string `json:"githubPrivateKey,omitempty"`
-	GitHubWebhookURL    string `json:"githubWebhookUrl,omitempty"`
-	GitHubWebhookSecret string `json:"githubWebhookSecret,omitempty"`
-	GitLabClientID      string `json:"gitlabClientId,omitempty"`
-	GitLabClientSecret  string `json:"gitlabClientSecret,omitempty"`
-	GitLabBaseURL       string `json:"gitlabBaseUrl,omitempty"`
-	GitLabWebhookSecret string `json:"gitlabWebhookSecret,omitempty"`
+	PublicURL          string `json:"publicUrl"`
+	GitHubAppID        string `json:"githubAppId,omitempty"`
+	GitHubAppSlug      string `json:"githubAppSlug,omitempty"`
+	GitHubPrivateKey   string `json:"githubPrivateKey,omitempty"`
+	GitLabClientID     string `json:"gitlabClientId,omitempty"`
+	GitLabClientSecret string `json:"gitlabClientSecret,omitempty"`
+	GitLabBaseURL      string `json:"gitlabBaseUrl,omitempty"`
 }
 
 func (s *Server) gitClient() *providers.GitConnector {
@@ -67,15 +64,12 @@ func applyStoredGitSettings(config *providers.GitConnectConfig, provider string,
 		config.GitHubAppID = stored.GitHubAppID
 		config.GitHubAppSlug = stored.GitHubAppSlug
 		config.GitHubPrivateKey = stored.GitHubPrivateKey
-		config.GitHubWebhookURL = stored.GitHubWebhookURL
-		config.GitHubWebhookSecret = stored.GitHubWebhookSecret
 	}
 	if provider == "gitlab" {
 		config.PublicURL = stored.PublicURL
 		config.GitLabClientID = stored.GitLabClientID
 		config.GitLabClientSecret = stored.GitLabClientSecret
 		config.GitLabBaseURL = stored.GitLabBaseURL
-		config.GitLabWebhookSecret = stored.GitLabWebhookSecret
 	}
 }
 
@@ -98,20 +92,18 @@ func (s *Server) readStoredGitSettings(provider string) (storedGitProviderSettin
 
 func gitSettingsSummary(provider string, stored storedGitProviderSettings, updatedAt string) map[string]any {
 	if provider == "github" {
-		configured := stored.PublicURL != "" && stored.GitHubAppID != "" && stored.GitHubAppSlug != "" &&
-			stored.GitHubPrivateKey != "" && stored.GitHubWebhookURL != "" && stored.GitHubWebhookSecret != ""
+		configured := stored.PublicURL != "" && stored.GitHubAppID != "" && stored.GitHubAppSlug != "" && stored.GitHubPrivateKey != ""
 		return map[string]any{
 			"provider": provider, "configured": configured, "publicUrl": stored.PublicURL,
-			"appId": stored.GitHubAppID, "appSlug": stored.GitHubAppSlug, "webhookUrl": stored.GitHubWebhookURL,
-			"privateKeyConfigured": stored.GitHubPrivateKey != "", "webhookSecretConfigured": stored.GitHubWebhookSecret != "", "updatedAt": updatedAt,
+			"appId": stored.GitHubAppID, "appSlug": stored.GitHubAppSlug,
+			"privateKeyConfigured": stored.GitHubPrivateKey != "", "syncMode": "on_demand", "updatedAt": updatedAt,
 		}
 	}
-	configured := stored.PublicURL != "" && stored.GitLabClientID != "" && stored.GitLabClientSecret != "" &&
-		stored.GitLabBaseURL != "" && stored.GitLabWebhookSecret != ""
+	configured := stored.PublicURL != "" && stored.GitLabClientID != "" && stored.GitLabClientSecret != "" && stored.GitLabBaseURL != ""
 	return map[string]any{
 		"provider": provider, "configured": configured, "publicUrl": stored.PublicURL,
 		"clientId": stored.GitLabClientID, "baseUrl": stored.GitLabBaseURL,
-		"clientSecretConfigured": stored.GitLabClientSecret != "", "webhookSecretConfigured": stored.GitLabWebhookSecret != "", "updatedAt": updatedAt,
+		"clientSecretConfigured": stored.GitLabClientSecret != "", "syncMode": "on_demand", "updatedAt": updatedAt,
 	}
 }
 
@@ -160,88 +152,81 @@ func (s *Server) updateGitProviderSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var in struct {
-		PublicURL     string `json:"publicUrl"`
-		AppID         string `json:"appId"`
-		AppSlug       string `json:"appSlug"`
-		PrivateKey    string `json:"privateKey"`
-		WebhookURL    string `json:"webhookUrl"`
-		WebhookSecret string `json:"webhookSecret"`
-		ClientID      string `json:"clientId"`
-		ClientSecret  string `json:"clientSecret"`
-		BaseURL       string `json:"baseUrl"`
+		PublicURL    string `json:"publicUrl"`
+		AppID        string `json:"appId"`
+		AppSlug      string `json:"appSlug"`
+		PrivateKey   string `json:"privateKey"`
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
+		BaseURL      string `json:"baseUrl"`
 	}
 	decode(r, &in)
-	stored := storedGitProviderSettings{PublicURL: strings.TrimRight(strings.TrimSpace(in.PublicURL), "/")}
-	otherProvider := "gitlab"
-	if provider == "gitlab" {
-		otherProvider = "github"
-	}
-	other, _, otherErr := s.readStoredGitSettings(otherProvider)
-	if otherErr != nil && otherErr != sql.ErrNoRows {
-		writeError(w, otherErr)
+	publicURL, err := s.systemPublicURL()
+	if err == sql.ErrNoRows {
+		writeError(w, &domainError{409, "GLOBAL_PUBLIC_URL_REQUIRED", "Configure the ProjectBoard address in System settings first", nil})
 		return
 	}
-	if otherErr == nil && other.PublicURL != "" && stored.PublicURL != other.PublicURL {
-		writeError(w, &domainError{422, "PUBLIC_URL_MISMATCH", "GitHub and GitLab must use the same public ProjectBoard URL", nil})
+	if err != nil {
+		writeError(w, err)
 		return
 	}
+	stored := storedGitProviderSettings{PublicURL: publicURL}
 	if provider == "github" {
 		stored.GitHubAppID = strings.TrimSpace(in.AppID)
 		stored.GitHubAppSlug = strings.TrimSpace(in.AppSlug)
 		stored.GitHubPrivateKey = strings.TrimSpace(in.PrivateKey)
-		stored.GitHubWebhookSecret = strings.TrimSpace(in.WebhookSecret)
 		if stored.GitHubPrivateKey == "" {
 			stored.GitHubPrivateKey = previous.GitHubPrivateKey
-		}
-		if stored.GitHubWebhookSecret == "" {
-			stored.GitHubWebhookSecret = previous.GitHubWebhookSecret
-		}
-		stored.GitHubWebhookURL = strings.TrimSpace(in.WebhookURL)
-		if stored.GitHubWebhookURL == "" && stored.PublicURL != "" {
-			stored.GitHubWebhookURL = stored.PublicURL + "/api/git/webhooks/github"
 		}
 	} else {
 		stored.GitLabClientID = strings.TrimSpace(in.ClientID)
 		stored.GitLabClientSecret = strings.TrimSpace(in.ClientSecret)
-		stored.GitLabWebhookSecret = strings.TrimSpace(in.WebhookSecret)
 		if stored.GitLabClientSecret == "" {
 			stored.GitLabClientSecret = previous.GitLabClientSecret
-		}
-		if stored.GitLabWebhookSecret == "" {
-			stored.GitLabWebhookSecret = previous.GitLabWebhookSecret
 		}
 		stored.GitLabBaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
 		if stored.GitLabBaseURL == "" {
 			stored.GitLabBaseURL = "https://gitlab.com"
 		}
 	}
-	config := providers.GitConnectConfig{}
-	applyStoredGitSettings(&config, provider, stored)
-	connector := providers.NewGitConnector(config)
-	if err = connector.ValidateConfiguration(provider); err != nil {
+	if err = validateStoredGitProviderSettings(provider, stored); err != nil {
 		writeError(w, &domainError{422, "INVALID_PROVIDER_CONFIGURATION", err.Error(), nil})
 		return
 	}
-	plain, err := json.Marshal(stored)
+	stamp, err := s.saveGitProviderSettings(a, provider, stored)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, gitSettingsSummary(provider, stored, stamp))
+}
+
+func validateStoredGitProviderSettings(provider string, stored storedGitProviderSettings) error {
+	config := providers.GitConnectConfig{}
+	applyStoredGitSettings(&config, provider, stored)
+	return providers.NewGitConnector(config).ValidateConfiguration(provider)
+}
+
+func (s *Server) saveGitProviderSettings(a actor, provider string, stored storedGitProviderSettings) (string, error) {
+	if err := validateStoredGitProviderSettings(provider, stored); err != nil {
+		return "", err
+	}
+	plain, err := json.Marshal(stored)
+	if err != nil {
+		return "", err
+	}
 	encrypted, err := s.vault.Seal(string(plain))
 	if err != nil {
-		writeError(w, err)
-		return
+		return "", err
 	}
 	stamp := now()
 	_, err = s.store.DB.Exec(`INSERT INTO git_provider_settings(provider,encrypted_config,updated_by,updated_at) VALUES(?,?,?,?) ON CONFLICT(provider) DO UPDATE SET encrypted_config=excluded.encrypted_config,updated_by=excluded.updated_by,updated_at=excluded.updated_at`, provider, encrypted, a.ID, stamp)
 	if err != nil {
-		writeError(w, err)
-		return
+		return "", err
 	}
 	if err = s.reloadGitConnector(); err != nil {
-		writeError(w, fmt.Errorf("reload provider configuration: %w", err))
-		return
+		return "", fmt.Errorf("reload provider configuration: %w", err)
 	}
 	s.audit(a, "git.provider_settings_updated", "git_provider_settings", provider, "", map[string]any{"provider": provider})
-	writeJSON(w, http.StatusOK, gitSettingsSummary(provider, stored, stamp))
+	return stamp, nil
 }

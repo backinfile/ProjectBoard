@@ -2,10 +2,8 @@ package server_test
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
@@ -128,6 +126,10 @@ func TestRunnerPairsPollsAndClaimsAnAssignedWorkItem(t *testing.T) {
 	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+project["id"].(string)+"/agents/"+agent["id"].(string), csrf, map[string]any{})
 	pairing := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agent["id"].(string)+"/pairing-codes", csrf, map[string]any{})
 	paired := requestJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/pair", "", map[string]any{"code": pairing["code"], "deviceName": "test-runner", "os": "windows", "version": "1.0.0", "publicKeyDigest": "digest"})
+	status, code := requestAgentError(t, http.MethodPost, host.URL+"/api/agent/projects/"+project["id"].(string)+"/sync-commits", paired["agentToken"].(string))
+	if status != http.StatusForbidden || code != "ACTIVE_PROJECT_RUN_REQUIRED" {
+		t.Fatalf("sync without run = %d %s", status, code)
+	}
 	item := requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{"requestId": "runner-item-001", "projectId": project["id"], "title": "Run me", "descriptionMarkdown": "", "acceptanceCriteriaMarkdown": "done", "assigneeKind": "agent", "assigneeId": agent["id"]})
 	poll := requestAgentJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/poll", paired["agentToken"].(string), map[string]any{})
 	assignments := poll["assignments"].([]any)
@@ -141,6 +143,10 @@ func TestRunnerPairsPollsAndClaimsAnAssignedWorkItem(t *testing.T) {
 	claimed := requestAgentJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/assignments/"+item["id"].(string)+"/accept", paired["agentToken"].(string), map[string]any{"requestId": "claim-item-001", "expectedVersion": item["version"]})
 	if claimed["leaseId"] == "" || claimed["runId"] == "" {
 		t.Fatalf("claim=%#v, want lease and run", claimed)
+	}
+	status, code = requestAgentError(t, http.MethodPost, host.URL+"/api/agent/projects/"+project["id"].(string)+"/sync-commits", paired["agentToken"].(string))
+	if status != http.StatusConflict || code != "REPOSITORY_GRANT_REQUIRED" {
+		t.Fatalf("sync with active run = %d %s", status, code)
 	}
 }
 
@@ -188,15 +194,15 @@ func TestAutomaticGitHubConnectionVerifiesAndBindsRepository(t *testing.T) {
 			_, _ = io.WriteString(w, `{"token":"installation-token"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
 			_, _ = io.WriteString(w, `{"repositories":[{"id":101,"full_name":"acme/core","clone_url":"https://github.com/acme/core.git","html_url":"https://github.com/acme/core","default_branch":"main"}]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/app/hook/config":
-			_, _ = io.WriteString(w, `{"url":"https://projectboard.example/api/git/webhooks/github"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repositories/101/commits":
+			_, _ = io.WriteString(w, `[{"sha":"abc123","html_url":"https://github.com/acme/core/commit/abc123","commit":{"message":"CORE-1 implement sync","author":{"name":"Agent"}}}]`)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer providerAPI.Close()
 
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123", GitConnect: providers.GitConnectConfig{PublicURL: "https://projectboard.example", GitHubAppID: "42", GitHubAppSlug: "projectboard-test", GitHubPrivateKey: string(privatePEM), GitHubAPIURL: providerAPI.URL, GitHubWebURL: providerAPI.URL, GitHubWebhookURL: "https://projectboard.example/api/git/webhooks/github", GitHubWebhookSecret: "github-webhook-secret"}})
+	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123", GitConnect: providers.GitConnectConfig{PublicURL: "https://projectboard.example", GitHubAppID: "42", GitHubAppSlug: "projectboard-test", GitHubPrivateKey: string(privatePEM), GitHubAPIURL: providerAPI.URL, GitHubWebURL: providerAPI.URL}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,6 +214,7 @@ func TestAutomaticGitHubConnectionVerifiesAndBindsRepository(t *testing.T) {
 	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
 	csrf := login["csrfToken"].(string)
 	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "core", "name": "Core", "repositoryUrl": "https://github.com/acme/core.git"})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{"requestId": "sync-item-001", "projectId": project["id"], "title": "Sync recent commits", "descriptionMarkdown": "", "acceptanceCriteriaMarkdown": "commit is attached"})
 	flow := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/connections/github/start", csrf, map[string]any{"projectId": project["id"]})
 	authorizationURL, _ := url.Parse(flow["authorizationUrl"].(string))
 	state := authorizationURL.Query().Get("state")
@@ -232,7 +239,7 @@ func TestAutomaticGitHubConnectionVerifiesAndBindsRepository(t *testing.T) {
 		t.Fatalf("callback status=%d", callback.StatusCode)
 	}
 	status := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connection-flows/"+flow["id"].(string), csrf, nil)
-	if status["status"] != "ready" || status["matchedRepositoryId"] != "101" || status["webhookStatus"] != "verified" {
+	if status["status"] != "ready" || status["matchedRepositoryId"] != "101" || status["webhookStatus"] != "on_demand" {
 		t.Fatalf("flow status=%#v", status)
 	}
 	tamperedGrantBody, _ := json.Marshal(map[string]any{"authorizationId": status["authorizationId"], "repositoryId": "999", "repositoryName": "attacker/other", "cloneUrl": "https://github.com/attacker/other.git", "defaultBranch": "main", "accessLevel": "write"})
@@ -251,32 +258,15 @@ func TestAutomaticGitHubConnectionVerifiesAndBindsRepository(t *testing.T) {
 	if grant["repositoryName"] != "acme/core" || grant["accessLevel"] != "write" {
 		t.Fatalf("grant=%#v", grant)
 	}
+	synced := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/sync-commits", csrf, map[string]any{})
+	if synced["fetched"] != float64(1) || synced["inserted"] != float64(1) || synced["matchedWorkItems"] != float64(1) {
+		t.Fatalf("sync=%#v", synced)
+	}
+	repeated := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/sync-commits", csrf, map[string]any{})
+	if repeated["inserted"] != float64(0) {
+		t.Fatalf("duplicate sync inserted evidence: %#v", repeated)
+	}
 
-	payload := []byte(`{"action":"created"}`)
-	badRequest, _ := http.NewRequest(http.MethodPost, host.URL+"/api/git/webhooks/github", bytes.NewReader(payload))
-	badRequest.Header.Set("X-GitHub-Delivery", "delivery-invalid")
-	badRequest.Header.Set("X-Hub-Signature-256", "sha256=00")
-	badResponse, err := http.DefaultClient.Do(badRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	badResponse.Body.Close()
-	if badResponse.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("invalid webhook status=%d", badResponse.StatusCode)
-	}
-	mac := hmac.New(sha256.New, []byte("github-webhook-secret"))
-	_, _ = mac.Write(payload)
-	request, _ := http.NewRequest(http.MethodPost, host.URL+"/api/git/webhooks/github", bytes.NewReader(payload))
-	request.Header.Set("X-GitHub-Delivery", "delivery-1")
-	request.Header.Set("X-Hub-Signature-256", "sha256="+fmtHex(mac.Sum(nil)))
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("webhook status=%d", response.StatusCode)
-	}
 	secondFlow := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/connections/github/start", csrf, map[string]any{"projectId": project["id"]})
 	requestJSON(t, client, http.MethodPost, host.URL+"/api/git/connection-flows/"+secondFlow["id"].(string)+"/cancel", csrf, map[string]any{})
 	canceled := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connection-flows/"+secondFlow["id"].(string), csrf, nil)
@@ -292,7 +282,6 @@ func TestGitProviderSettingsAreConfiguredFromWebAndPersistEncrypted(t *testing.T
 		t.Fatal(err)
 	}
 	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
-	webhookSecret := "web-configured-hook-secret"
 
 	start := func() (*server.Application, *httptest.Server, *http.Client, string) {
 		t.Helper()
@@ -308,15 +297,15 @@ func TestGitProviderSettingsAreConfiguredFromWebAndPersistEncrypted(t *testing.T
 	}
 
 	handler, host, client, csrf := start()
+	requestJSON(t, client, http.MethodPut, host.URL+"/api/system/settings", csrf, map[string]any{"publicUrl": "http://127.0.0.1:3333"})
 	saved := requestJSON(t, client, http.MethodPut, host.URL+"/api/git/provider-settings/github", csrf, map[string]any{
-		"publicUrl": "https://projectboard.example", "appId": "42", "appSlug": "projectboard-app",
-		"privateKey": privatePEM, "webhookUrl": "https://projectboard.example/api/git/webhooks/github", "webhookSecret": webhookSecret,
+		"appId": "42", "appSlug": "projectboard-app", "privateKey": privatePEM,
 	})
-	if saved["configured"] != true || saved["privateKeyConfigured"] != true || saved["webhookSecretConfigured"] != true {
+	if saved["configured"] != true || saved["privateKeyConfigured"] != true || saved["syncMode"] != "on_demand" {
 		t.Fatalf("saved settings=%#v", saved)
 	}
 	savedJSON, _ := json.Marshal(saved)
-	if bytes.Contains(savedJSON, []byte("PRIVATE KEY")) || bytes.Contains(savedJSON, []byte(webhookSecret)) {
+	if bytes.Contains(savedJSON, []byte("PRIVATE KEY")) {
 		t.Fatalf("settings response exposed a secret: %s", savedJSON)
 	}
 	configuration := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connections", csrf, nil)
@@ -338,7 +327,7 @@ func TestGitProviderSettingsAreConfiguredFromWebAndPersistEncrypted(t *testing.T
 		t.Fatal(err)
 	}
 	database.Close()
-	if strings.Contains(encrypted, "PRIVATE KEY") || strings.Contains(encrypted, webhookSecret) {
+	if strings.Contains(encrypted, "PRIVATE KEY") {
 		t.Fatal("provider settings were stored without encryption")
 	}
 
@@ -351,12 +340,117 @@ func TestGitProviderSettingsAreConfiguredFromWebAndPersistEncrypted(t *testing.T
 	}
 	summary := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings", csrf, nil)
 	summaryJSON, _ := json.Marshal(summary)
-	if bytes.Contains(summaryJSON, []byte("PRIVATE KEY")) || bytes.Contains(summaryJSON, []byte(webhookSecret)) {
+	if bytes.Contains(summaryJSON, []byte("PRIVATE KEY")) {
 		t.Fatalf("settings summary exposed a secret: %s", summaryJSON)
 	}
 }
 
-func TestAutomaticGitLabOAuthUsesPKCEAndCreatesWebhook(t *testing.T) {
+func TestGitHubManifestFlowAutomaticallyCreatesProviderSettings(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
+	providerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/app-manifests/manifest-code/conversions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 42, "slug": "projectboard-auto", "pem": privatePEM,
+			"webhook_secret": "manifest-webhook-secret",
+		})
+	}))
+	defer providerAPI.Close()
+
+	handler, err := server.New(server.Config{
+		DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123",
+		GitConnect: providers.GitConnectConfig{GitHubAPIURL: providerAPI.URL, GitHubWebURL: providerAPI.URL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	flow := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/provider-settings/github/manifest/start", csrf, map[string]any{"detectedPublicUrl": "http://127.0.0.1:3333"})
+	registrationURL, err := url.Parse(flow["registrationUrl"].(string))
+	if err != nil || registrationURL.Query().Get("state") == "" {
+		t.Fatalf("registration URL=%v, err=%v", registrationURL, err)
+	}
+	var manifest map[string]any
+	if err = json.Unmarshal([]byte(flow["manifest"].(string)), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest["url"] != "http://127.0.0.1:3333" || manifest["setup_url"] != "http://127.0.0.1:3333/api/git/connections/github/callback" {
+		t.Fatalf("manifest=%#v", manifest)
+	}
+	if manifest["hook_attributes"] != nil || manifest["default_events"] != nil {
+		t.Fatalf("on-demand manifest unexpectedly configured webhooks: %#v", manifest)
+	}
+	systemSettings := requestJSON(t, client, http.MethodGet, host.URL+"/api/system/settings", csrf, nil)
+	if systemSettings["publicUrl"] != "http://127.0.0.1:3333" || systemSettings["gitSyncMode"] != "on_demand" {
+		t.Fatalf("auto-initialized system settings=%#v", systemSettings)
+	}
+	permissions := manifest["default_permissions"].(map[string]any)
+	if permissions["contents"] != "write" {
+		t.Fatalf("manifest silently changed permission boundary: %#v", permissions)
+	}
+
+	state := registrationURL.Query().Get("state")
+	tampered, err := client.Get(host.URL + "/api/git/provider-settings/github/manifest/callback?code=manifest-code&state=" + url.QueryEscape(state+"-tampered"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered.Body.Close()
+	pending := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings/github/manifest-flows/"+flow["id"].(string), csrf, nil)
+	if pending["status"] != "waiting_for_github" {
+		t.Fatalf("tampered callback changed flow: %#v", pending)
+	}
+
+	// The public tunnel hostname used by a local deployment does not share the localhost session cookie.
+	// The callback therefore authenticates the one-time state itself rather than depending on a browser session.
+	callback, err := http.Get(host.URL + "/api/git/provider-settings/github/manifest/callback?code=manifest-code&state=" + url.QueryEscape(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback.Body.Close()
+	if callback.StatusCode != http.StatusOK {
+		t.Fatalf("callback status=%d", callback.StatusCode)
+	}
+	completed := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings/github/manifest-flows/"+flow["id"].(string), csrf, nil)
+	if completed["status"] != "completed" {
+		t.Fatalf("flow=%#v", completed)
+	}
+	settings := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings", csrf, nil)
+	github := settings["github"].(map[string]any)
+	if github["configured"] != true || github["appId"] != "42" || github["appSlug"] != "projectboard-auto" {
+		t.Fatalf("GitHub settings=%#v", github)
+	}
+	encoded, _ := json.Marshal(settings)
+	if bytes.Contains(encoded, []byte(privatePEM)) || bytes.Contains(encoded, []byte("manifest-webhook-secret")) {
+		t.Fatalf("settings exposed manifest secrets: %s", encoded)
+	}
+
+	canceledFlow := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/provider-settings/github/manifest/start", csrf, map[string]any{"organization": "acme"})
+	organizationURL, _ := url.Parse(canceledFlow["registrationUrl"].(string))
+	if organizationURL.Path != "/organizations/acme/settings/apps/new" {
+		t.Fatalf("organization registration URL=%s", organizationURL)
+	}
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/git/provider-settings/github/manifest-flows/"+canceledFlow["id"].(string)+"/cancel", csrf, map[string]any{})
+	canceled := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings/github/manifest-flows/"+canceledFlow["id"].(string), csrf, nil)
+	if canceled["status"] != "failed" || canceled["errorCode"] != "GITHUB_SETUP_CANCELED" {
+		t.Fatalf("canceled manifest flow=%#v", canceled)
+	}
+}
+
+func TestAutomaticGitLabOAuthUsesPKCEAndOnDemandSync(t *testing.T) {
 	providerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -371,14 +465,12 @@ func TestAutomaticGitLabOAuthUsesPKCEAndCreatesWebhook(t *testing.T) {
 			_, _ = io.WriteString(w, `{"username":"operator","name":"Operator"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects":
 			_, _ = io.WriteString(w, `[{"id":202,"path_with_namespace":"acme/service","http_url_to_repo":"https://gitlab.example/acme/service.git","web_url":"https://gitlab.example/acme/service","default_branch":"main","permissions":{"project_access":{"access_level":40}}}]`)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/202/hooks":
-			_, _ = io.WriteString(w, `{"id":9,"url":"https://projectboard.example/api/git/webhooks/gitlab"}`)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer providerAPI.Close()
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123", GitConnect: providers.GitConnectConfig{PublicURL: "https://projectboard.example", GitLabClientID: "client-id", GitLabClientSecret: "client-secret", GitLabBaseURL: providerAPI.URL, GitLabWebhookSecret: "gitlab-hook-secret"}})
+	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123", GitConnect: providers.GitConnectConfig{PublicURL: "https://projectboard.example", GitLabClientID: "client-id", GitLabClientSecret: "client-secret", GitLabBaseURL: providerAPI.URL}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,16 +500,6 @@ func TestAutomaticGitLabOAuthUsesPKCEAndCreatesWebhook(t *testing.T) {
 	if grant["provider"] != "gitlab" || grant["repositoryName"] != "acme/service" {
 		t.Fatalf("grant=%#v", grant)
 	}
-}
-
-func fmtHex(value []byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, len(value)*2)
-	for index, item := range value {
-		out[index*2] = digits[item>>4]
-		out[index*2+1] = digits[item&15]
-	}
-	return string(out)
 }
 
 func requestJSON(t *testing.T, client *http.Client, method, endpoint, csrf string, body any) map[string]any {
@@ -458,4 +540,21 @@ func requestAgentJSON(t *testing.T, client *http.Client, method, endpoint, token
 		t.Fatalf("%s %s = %d %#v", method, endpoint, response.StatusCode, value)
 	}
 	return value
+}
+
+func requestAgentError(t *testing.T, method, endpoint, token string) (int, string) {
+	t.Helper()
+	request, _ := http.NewRequest(method, endpoint, bytes.NewReader([]byte("{}")))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var value map[string]any
+	_ = json.NewDecoder(response.Body).Decode(&value)
+	errorValue, _ := value["error"].(map[string]any)
+	code, _ := errorValue["code"].(string)
+	return response.StatusCode, code
 }

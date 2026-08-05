@@ -27,27 +27,36 @@ PROJECTBOARD_ENV=production
 
 ## 项目授权
 
-管理员在项目设置中点击“自动配置 Git”，再到 GitHub 或 GitLab 官方页面确认授权。回调成功后，ProjectBoard 会验证权限与 Webhook、读取可用仓库、按当前项目的 `repositoryUrl` 自动匹配，并在最终绑定前明确展示仓库和读写范围。授权或安装可以复用于多个项目，但每个项目仍创建独立、可撤销、可审计的仓库 Grant。
+管理员先在“系统设置”中保存一次 ProjectBoard 地址，再从项目设置点击“自动配置 Git”，到 GitHub 或 GitLab 官方页面确认授权。回调成功后，ProjectBoard 会验证权限、读取可用仓库、按当前项目的 `repositoryUrl` 自动匹配，并在最终绑定前明确展示仓库和读写范围。授权或安装可以复用于多个项目，但每个项目仍创建独立、可撤销、可审计的仓库 Grant。
 
 自动流程不会扩大提供商权限。GitHub installation token 只用于验证安装和枚举仓库；Runner 写凭据仍必须由单一项目 Grant、已启用 Agent、有效指派、Run 和租约共同约束。撤销一个项目的 Grant 不影响复用同一授权的其他项目，仍被项目使用的提供商授权不能直接撤销。
 
-### 在网页中配置 GitHub App
+### 一键配置 GitHub App
 
-GitHub App 仍需先在 GitHub 创建，但 ProjectBoard 侧不再使用环境变量或本地 PEM 路径。系统管理员进入“项目设置 → 自动配置 Git → Configure GitHub”，在网页中填写 Public ProjectBoard URL、App ID、App slug、Webhook URL、PEM 私钥和 Webhook secret。App 至少需要：
+系统管理员进入“项目设置 → 自动配置 Git → Set up GitHub automatically”，再在 GitHub 点击一次“Create GitHub App”。ProjectBoard 使用全局 ProjectBoard 地址和 GitHub App Manifest Flow 自动提交以下固定配置：
 
-- Repository permission：`Contents: Read and write`；不授予 Administration，也不要加入分支保护 bypass。
-- Webhook URL：`https://<ProjectBoard>/api/git/webhooks/github`，设置独立随机 secret，并订阅 Push 与 installation/repository 变化事件。
-- Setup URL：`https://<ProjectBoard>/api/git/connections/github/callback`，开启安装更新后的重定向。
+- Repository permission：`Contents: Read and write`；不申请 Administration，也不加入分支保护 bypass。
+- Setup URL：自动填写 `https://<ProjectBoard>/api/git/connections/github/callback`。
+- App ID、App slug 与 PEM 私钥：由 GitHub 生成并通过一次性、限时、带 state 校验的服务端回调自动交给 ProjectBoard。
+- Webhook 与后台轮询：均不启用。
 
-提交配置需要系统管理员身份与有效 CSRF 会话。PEM 和 Webhook secret 仅在保存时由浏览器提交，随后使用 `data/secrets/master.key` 进行 AES-GCM 加密；读取配置的 API 只返回“已配置”标志与非敏感字段，不回显密钥。请始终通过 HTTPS 使用管理页面，并保护、备份 `master.key`。ProjectBoard 使用 App JWT 验证 installation，按 installation 枚举仓库，并检查 GitHub App Webhook URL 与网页配置一致。
+如果 App 需要由 GitHub 组织持有，在向导的可选项中填写组织账号 slug；留空时由当前个人账号创建。GitHub 创建页仍会展示名称、权限和可见性，管理员必须明确确认，不会静默扩大权限。旧的逐字段表单保留在“Advanced manual configuration”中，仅作为降级入口。
+
+本地运行直接受支持。将全局 ProjectBoard 地址保存为 `http://127.0.0.1:3333` 或 `http://localhost:3333` 即可；GitHub 的回调由当前浏览器返回本机，不需要公网隧道。
+
+GitHub 返回的 PEM 不会显示给浏览器，而是直接使用 `data/secrets/master.key` 经 AES-GCM 加密后写入 SQLite；读取 API 只返回非敏感摘要。请保护并备份 `master.key`。ProjectBoard 随后使用 App JWT 验证 installation 并枚举仓库。
 
 ### 在网页中配置 GitLab OAuth
 
-在 GitLab 创建 OAuth Application，回调 URL 设置为 `https://<ProjectBoard>/api/git/connections/gitlab/callback` 并授予 `api` scope。然后进入“项目设置 → 自动配置 Git → Configure GitLab”，填写 Public ProjectBoard URL、Application ID、Application secret、GitLab Base URL 和 Webhook secret。
+在 GitLab 创建 OAuth Application，回调 URL 设置为 `<全局 ProjectBoard 地址>/api/git/connections/gitlab/callback` 并授予 `api` scope。然后进入“项目设置 → 自动配置 Git → Configure GitLab”，填写 Application ID、Application secret 和 GitLab Base URL。
 
-GitLab 流程使用 authorization code、PKCE、一次性 state/nonce 和 15 分钟回调窗口。最终确认项目绑定时才创建并验证项目 Push Webhook。操作者对所选仓库需要足够的项目权限；选择写入范围时至少需要 Developer。若无法创建 GitLab OAuth Application，界面仍提供明确标记的“高级 GitLab Token”降级入口。
+GitLab 流程使用 authorization code、PKCE、一次性 state/nonce 和 15 分钟回调窗口。操作者对所选仓库需要足够的项目权限；选择写入范围时至少需要 Developer。若无法创建 GitLab OAuth Application，界面仍提供明确标记的“高级 GitLab Token”降级入口。
 
-授权失败、用户取消、回调过期、没有可用/匹配仓库、权限不足和 Webhook 验证失败都会保留为可恢复状态，不会静默创建项目 Grant。提供商应用密钥、GitLab Token 与 refresh token 均使用与 SQLite 分离的 `data/secrets/master.key` 进行 AES-GCM 加密。
+授权失败、用户取消、回调过期、没有可用/匹配仓库、权限不足和提交查询失败都会保留为可恢复状态，不会静默创建项目 Grant。提供商应用密钥、GitLab Token 与 refresh token 均使用与 SQLite 分离的 `data/secrets/master.key` 进行 AES-GCM 加密。
+
+### 按需同步最近提交
+
+ProjectBoard 不监听 Webhook，也不在后台定时轮询。项目开发者可在“项目设置”点击“Sync recent commits”；持有当前项目有效 Run 与租约的 Runner 可执行 `projectboard-runner sync <project-id>`。ProjectBoard 随后签发受限的只读凭据，查询默认分支最近 30 个提交，把提交信息中包含完整工单 ID 的记录去重写入工单证据和连续对话，并记录同步审计事件。
 
 ## Runner
 
@@ -59,6 +68,7 @@ projectboard-runner connect PB-XXXX-XXXX
 projectboard-runner register <project-id> <本地仓库路径>
 projectboard-runner poll --watch
 projectboard-runner claim <work-item-id> <version>
+projectboard-runner sync <project-id>
 ```
 
 Agent Token 只存入当前用户的系统配置目录，文件权限为仅当前用户可读写；它不会进入项目仓库。Runner 不保存 Git 提供商长期密钥。

@@ -1,0 +1,155 @@
+package server
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/projectboard/projectboard/internal/providers"
+	"github.com/projectboard/projectboard/internal/security"
+)
+
+func (s *Server) syncProjectCommitsHuman(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.PathValue("id")
+	if err := s.requireDeveloper(projectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.syncProjectCommits(r.Context(), projectID, a)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) syncProjectCommitsAgent(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.agent(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.PathValue("id")
+	var active int
+	err := s.store.DB.QueryRow(`SELECT 1 FROM runner_runs rr JOIN work_items wi ON wi.id=rr.work_item_id JOIN leases l ON l.id=rr.lease_id WHERE rr.agent_id=? AND wi.project_id=? AND rr.ended_at IS NULL AND l.released_at IS NULL AND l.expires_at>? LIMIT 1`, a.ID, projectID, now()).Scan(&active)
+	if err != nil {
+		writeError(w, &domainError{403, "ACTIVE_PROJECT_RUN_REQUIRED", "Runner commit sync requires an active project run and lease", nil})
+		return
+	}
+	result, err := s.syncProjectCommits(r.Context(), projectID, a)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) syncProjectCommits(ctx context.Context, projectID string, a actor) (map[string]any, error) {
+	var provider, authorizationID, repositoryID, branch string
+	var installationID, encryptedSecret sql.NullString
+	err := s.store.DB.QueryRow(`SELECT p.provider,p.id,g.repository_id,g.default_branch,p.installation_id,p.encrypted_secret FROM project_repository_grants g JOIN provider_authorizations p ON p.id=g.authorization_id WHERE g.project_id=? AND g.revoked_at IS NULL AND p.status='active'`, projectID).Scan(&provider, &authorizationID, &repositoryID, &branch, &installationID, &encryptedSecret)
+	if err == sql.ErrNoRows {
+		return nil, &domainError{409, "REPOSITORY_GRANT_REQUIRED", "Connect and approve a repository before syncing commits", nil}
+	}
+	if err != nil {
+		return nil, err
+	}
+	var commits []providers.RecentCommit
+	if provider == "github" {
+		if !installationID.Valid {
+			return nil, fmt.Errorf("GitHub authorization has no installation ID")
+		}
+		commits, err = s.gitClient().RecentGitHubCommits(ctx, installationID.String, repositoryID, branch)
+	} else if provider == "gitlab" {
+		plain, openErr := s.vault.Open(encryptedSecret.String)
+		if openErr != nil {
+			return nil, openErr
+		}
+		var credential struct {
+			AccessToken string `json:"accessToken"`
+		}
+		if json.Unmarshal([]byte(plain), &credential) != nil {
+			credential.AccessToken = plain
+		}
+		commits, err = s.gitClient().RecentGitLabCommits(ctx, credential.AccessToken, repositoryID, branch)
+	} else {
+		err = fmt.Errorf("unsupported Git provider %q", provider)
+	}
+	if err != nil {
+		return nil, &domainError{502, "COMMIT_SYNC_FAILED", err.Error(), nil}
+	}
+	inserted, matches, err := s.recordRecentCommits(ctx, projectID, repositoryID, branch, commits, a)
+	if err != nil {
+		return nil, err
+	}
+	s.audit(a, "git.commits_synced", "repository", repositoryID, projectID, map[string]any{"provider": provider, "authorizationId": authorizationID, "fetched": len(commits), "inserted": inserted, "matchedWorkItems": matches})
+	return map[string]any{"provider": provider, "repositoryId": repositoryID, "fetched": len(commits), "inserted": inserted, "matchedWorkItems": matches, "commits": commits, "syncMode": "on_demand"}, nil
+}
+
+func (s *Server) recordRecentCommits(ctx context.Context, projectID, repositoryID, branch string, commits []providers.RecentCommit, a actor) (int, int, error) {
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT id,stage FROM work_items WHERE project_id=?`, projectID)
+	if err != nil {
+		return 0, 0, err
+	}
+	type workItem struct{ id, stage string }
+	items := []workItem{}
+	for rows.Next() {
+		var item workItem
+		if err = rows.Scan(&item.id, &item.stage); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		items = append(items, item)
+	}
+	rows.Close()
+	inserted, matches := 0, 0
+	for _, commit := range commits {
+		for _, item := range items {
+			if !containsWorkItemID(commit.Message, item.id) {
+				continue
+			}
+			matches++
+			result, execErr := s.store.DB.ExecContext(ctx, `INSERT OR IGNORE INTO git_commit_evidence(id,work_item_id,repository_id,commit_sha,message,author,branch,files_json,created_at) VALUES(?,?,?,?,?,?,?,'[]',?)`, security.Token(18), item.id, repositoryID, commit.SHA, commit.Message, nullableString(commit.Author), branch, now())
+			if execErr != nil {
+				return inserted, matches, execErr
+			}
+			changed, _ := result.RowsAffected()
+			if changed == 0 {
+				continue
+			}
+			inserted++
+			payload, _ := json.Marshal(map[string]any{"sha": commit.SHA, "message": commit.Message, "author": commit.Author, "branch": branch, "webUrl": commit.WebURL})
+			_, _ = s.store.DB.ExecContext(ctx, `INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, security.Token(18), item.id, "commit_evidence", item.stage, a.Type, nullableString(a.ID), string(payload), now())
+		}
+	}
+	return inserted, matches, nil
+}
+
+func containsWorkItemID(message, workItemID string) bool {
+	message = strings.ToUpper(message)
+	workItemID = strings.ToUpper(workItemID)
+	for start := 0; ; {
+		index := strings.Index(message[start:], workItemID)
+		if index < 0 {
+			return false
+		}
+		index += start
+		beforeOK := index == 0 || !isWorkItemIDCharacter(message[index-1])
+		after := index + len(workItemID)
+		afterOK := after == len(message) || !isWorkItemIDCharacter(message[after])
+		if beforeOK && afterOK {
+			return true
+		}
+		start = index + 1
+	}
+}
+
+func isWorkItemIDCharacter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '-'
+}

@@ -2,16 +2,13 @@ package server
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -307,33 +304,10 @@ func (s *Server) completeGitConnection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{422, "INSUFFICIENT_PROVIDER_PERMISSION", "The provider account cannot grant write access to this repository", nil})
 		return
 	}
-	provider := flow["provider"].(string)
 	webhookStatus := pointerValue(flow["webhookStatus"])
 	webhookURL := pointerValue(flow["webhookUrl"])
-	if provider == "gitlab" {
-		var sealed string
-		if err = s.store.DB.QueryRow("SELECT encrypted_secret FROM provider_authorizations WHERE id=?", pointerValue(flow["authorizationId"])).Scan(&sealed); err == nil {
-			var credential string
-			credential, err = s.vault.Open(sealed)
-			var data struct {
-				AccessToken string `json:"accessToken"`
-			}
-			if err == nil {
-				err = json.Unmarshal([]byte(credential), &data)
-			}
-			if err == nil {
-				webhookURL, err = s.gitClient().EnsureGitLabWebhook(r.Context(), selected.ID, data.AccessToken)
-			}
-		}
-		if err != nil {
-			s.failGitFlow(r.PathValue("id"), "ready", "WEBHOOK_VERIFICATION_FAILED", err.Error())
-			writeError(w, &domainError{502, "WEBHOOK_VERIFICATION_FAILED", "GitLab webhook verification failed; fix provider permissions or deployment configuration and retry", nil})
-			return
-		}
-		webhookStatus = "verified"
-	}
-	if webhookStatus != "verified" {
-		writeError(w, &domainError{409, "WEBHOOK_NOT_VERIFIED", "Provider webhook must be verified before binding the repository", nil})
+	if webhookStatus != "on_demand" {
+		writeError(w, &domainError{409, "SYNC_MODE_NOT_READY", "Provider authorization must use on-demand commit synchronization", nil})
 		return
 	}
 	grant, err := s.bindConnectedRepository(r.Context(), a, flow["projectId"].(string), pointerValue(flow["authorizationId"]), *selected, in.AccessLevel, webhookStatus, webhookURL)
@@ -377,48 +351,6 @@ func (s *Server) cancelGitConnection(w http.ResponseWriter, r *http.Request) {
 func (s *Server) failGitFlow(id, status, code, message string) {
 	_, _ = s.store.DB.Exec("UPDATE git_connection_flows SET status=?,error_code=?,error_message=?,updated_at=? WHERE id=?", status, code, message, now(), id)
 	s.auditGitFlow(id, "git.connection_"+status, map[string]any{"code": code})
-}
-
-func (s *Server) gitWebhook(w http.ResponseWriter, r *http.Request) {
-	provider := r.PathValue("provider")
-	secret := s.gitClient().WebhookSecret(provider)
-	if secret == "" {
-		writeError(w, &domainError{503, "WEBHOOK_NOT_CONFIGURED", "Provider webhook secret is not configured", nil})
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	deliveryID := ""
-	valid := false
-	if provider == "github" {
-		deliveryID = r.Header.Get("X-GitHub-Delivery")
-		signature := strings.TrimPrefix(r.Header.Get("X-Hub-Signature-256"), "sha256=")
-		provided, decodeErr := hex.DecodeString(signature)
-		mac := hmac.New(sha256.New, []byte(secret))
-		_, _ = mac.Write(body)
-		valid = decodeErr == nil && hmac.Equal(provided, mac.Sum(nil))
-	} else if provider == "gitlab" {
-		deliveryID = r.Header.Get("X-Gitlab-Event-UUID")
-		valid = subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Gitlab-Token")), []byte(secret)) == 1
-	}
-	if !valid || deliveryID == "" {
-		writeError(w, &domainError{401, "INVALID_WEBHOOK_SIGNATURE", "Webhook signature or delivery identifier is invalid", nil})
-		return
-	}
-	result, err := s.store.DB.Exec("INSERT OR IGNORE INTO webhook_deliveries(provider,delivery_id,received_at,result) VALUES(?,?,?,'accepted')", provider, deliveryID, now())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	inserted, _ := result.RowsAffected()
-	if inserted > 0 {
-		raw, _ := json.Marshal(map[string]any{"deliveryId": deliveryID, "event": r.Header.Get("X-GitHub-Event") + r.Header.Get("X-Gitlab-Event")})
-		_, _ = s.store.DB.Exec("INSERT INTO activity_events(id,actor_type,actor_id,event_type,object_type,object_id,source,payload_json,created_at) VALUES(?, 'provider', ?, 'git.webhook_received', 'webhook_delivery', ?, 'webhook', ?, ?)", security.Token(18), provider, deliveryID, string(raw), now())
-	}
-	writeJSON(w, 202, map[string]any{"accepted": true, "duplicate": inserted == 0})
 }
 
 func (s *Server) auditGitFlow(flowID, eventType string, payload any) {
@@ -465,9 +397,6 @@ func providerErrorCode(err error) string {
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "permission") || strings.Contains(message, "scope") {
 		return "INSUFFICIENT_PROVIDER_PERMISSION"
-	}
-	if strings.Contains(message, "webhook") {
-		return "WEBHOOK_VERIFICATION_FAILED"
 	}
 	return "PROVIDER_AUTHORIZATION_FAILED"
 }
