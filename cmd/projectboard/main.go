@@ -14,7 +14,6 @@ import (
 	"github.com/projectboard/projectboard/internal/mcpstdio"
 	"github.com/projectboard/projectboard/internal/ops"
 	"github.com/projectboard/projectboard/internal/server"
-	"github.com/projectboard/projectboard/internal/store"
 )
 
 func main() {
@@ -29,16 +28,6 @@ func main() {
 		if err := mcpstdio.RunEnvironment(); err != nil {
 			log.Fatal(err)
 		}
-		return
-	case "migrate":
-		database, err := store.Open(databasePath)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if err = database.Close(); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Println("database is up to date")
 		return
 	case "backup":
 		if len(os.Args) != 3 {
@@ -60,7 +49,7 @@ func main() {
 		return
 	case "serve":
 	default:
-		fmt.Fprintln(os.Stderr, "usage: projectboard <serve|mcp|migrate|backup|restore>")
+		fmt.Fprintln(os.Stderr, "usage: projectboard <serve|mcp|backup|restore>")
 		os.Exit(2)
 	}
 	handler, err := server.New(server.Config{

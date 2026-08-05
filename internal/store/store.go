@@ -13,6 +13,11 @@ import (
 type Store struct{ DB *sql.DB }
 
 func Open(file string) (*Store, error) {
+	info, statErr := os.Stat(file)
+	existing := statErr == nil && info.Size() > 0
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return nil, statErr
+	}
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return nil, err
 	}
@@ -27,12 +32,21 @@ func Open(file string) (*Store, error) {
 			return nil, err
 		}
 	}
+	if existing {
+		var version int
+		if err = db.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil || version != SchemaVersion {
+			db.Close()
+			return nil, fmt.Errorf("unsupported database schema: remove the data directory and start fresh")
+		}
+	}
 	if _, err = db.Exec(schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("migrate database: %w", err)
+		return nil, fmt.Errorf("initialize database: %w", err)
 	}
 	return &Store{DB: db}, nil
 }
+
+const SchemaVersion = 1
 
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -49,6 +63,8 @@ func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
 }
 
 const schema = `
+CREATE TABLE IF NOT EXISTS schema_metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, created_at TEXT NOT NULL);
+INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,1,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, system_role TEXT NOT NULL CHECK(system_role IN('administrator','user')), status TEXT NOT NULL DEFAULT 'active', must_change_password INTEGER NOT NULL DEFAULT 0, disabled_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_active_at TEXT);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, user_agent TEXT, ip TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_attempts(id TEXT PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded INTEGER NOT NULL, created_at TEXT NOT NULL);
@@ -62,8 +78,6 @@ CREATE TABLE IF NOT EXISTS runner_pairing_codes(id TEXT PRIMARY KEY, agent_id TE
 CREATE TABLE IF NOT EXISTS runner_devices(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), device_name TEXT NOT NULL, os TEXT NOT NULL, version TEXT NOT NULL, public_key_digest TEXT NOT NULL, paired_at TEXT NOT NULL, last_heartbeat_at TEXT, status TEXT NOT NULL DEFAULT 'idle');
 CREATE TABLE IF NOT EXISTS provider_authorizations(id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, app_id TEXT, installation_id TEXT, encrypted_secret TEXT NOT NULL, webhook_secret TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS project_repository_grants(id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE REFERENCES projects(id), authorization_id TEXT NOT NULL REFERENCES provider_authorizations(id), repository_id TEXT NOT NULL, repository_name TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, access_level TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, revoked_at TEXT);
-CREATE TABLE IF NOT EXISTS git_installations(id TEXT PRIMARY KEY, provider TEXT NOT NULL, external_installation_id TEXT NOT NULL, application_id TEXT, repositories_json TEXT NOT NULL, webhook_status TEXT NOT NULL, permissions_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(provider,external_installation_id));
-CREATE TABLE IF NOT EXISTS repository_bindings(id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE REFERENCES projects(id), installation_id TEXT NOT NULL REFERENCES git_installations(id), provider TEXT NOT NULL, external_repository_id TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(provider,external_repository_id));
 CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, description_markdown TEXT NOT NULL, acceptance_criteria_markdown TEXT NOT NULL, priority TEXT NOT NULL, stage TEXT NOT NULL, discussion_mode TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_mode TEXT NOT NULL, target_branch TEXT NOT NULL, assignee_kind TEXT, assignee_id TEXT, assignment_state TEXT, blocked_at TEXT, blocked_reason TEXT, abandoned_at TEXT, abandoned_reason TEXT, abandoned_from_stage TEXT, version INTEGER NOT NULL DEFAULT 1, lease_generation INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(project_id,number));
 CREATE TABLE IF NOT EXISTS work_item_dependencies(work_item_id TEXT NOT NULL REFERENCES work_items(id), depends_on_id TEXT NOT NULL REFERENCES work_items(id), created_at TEXT NOT NULL, PRIMARY KEY(work_item_id,depends_on_id), CHECK(work_item_id<>depends_on_id));
 CREATE TABLE IF NOT EXISTS assignments(id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id), assignee_kind TEXT NOT NULL, assignee_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, created_at TEXT NOT NULL, ended_at TEXT, ended_reason TEXT);

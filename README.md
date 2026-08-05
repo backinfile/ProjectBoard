@@ -55,7 +55,6 @@ MCP 已内置，不需要单独安装服务：
 ## 数据库、备份与恢复
 
 ```bash
-projectboard migrate
 projectboard backup ./backups/projectboard.db
 # 恢复前停止服务
 projectboard restore ./backups/projectboard.db
