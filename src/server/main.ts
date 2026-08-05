@@ -12,6 +12,7 @@ import { requireAdmin, requireDeveloper, requireHuman, projectRole, user as curr
 import { audit } from './audit.js';
 import { WorkItems } from './work-items.js';
 import { GitIntegration } from './git.js';
+import { bootstrapAdministrator } from './bootstrap.js';
 
 export const db = new Db();
 export const workItems = new WorkItems(db);
@@ -99,6 +100,6 @@ const web=resolve('dist/web');if(existsSync(web)){app.use(express.static(web));a
 app.use((err:any,_req:Request,res:Response,_next:NextFunction)=>{const status=err instanceof DomainError?err.status:err?.name==='ZodError'?422:err?.code?.startsWith('SQLITE_CONSTRAINT')?409:500;const code=err instanceof DomainError?err.code:err?.name==='ZodError'?'VALIDATION_ERROR':status===409?'CONFLICT':'INTERNAL_ERROR';if(status===500)console.error(err);res.status(status).json({error:{code,message:status===500?'Internal error':err.message,details:err instanceof DomainError?err.details:err?.issues}})});
 
 function projectOut(p:any){return{id:p.id,key:p.project_key,name:p.name,descriptionMarkdown:p.description_markdown,archivedAt:p.archived_at,repositoryUrl:p.repository_url,remoteName:p.remote_name,defaultTargetBranch:p.default_target_branch,allowedTargetBranches:JSON.parse(p.allowed_target_branches_json),validationCommands:JSON.parse(p.validation_commands_json),forbiddenPaths:JSON.parse(p.forbidden_paths_json),agentRulesMarkdown:p.agent_rules_markdown,discussionMode:p.discussion_mode,executionMode:p.execution_mode,acceptanceMode:p.acceptance_mode,configVersion:p.config_version}}
-async function bootstrap(){if((db.get<any>('SELECT COUNT(*) n FROM users')?.n??0)===0){const username=process.env.PROJECTBOARD_BOOTSTRAP_ADMIN??'admin',password=process.env.PROJECTBOARD_BOOTSTRAP_PASSWORD;if(!password||!validatePassword(password))throw new Error('Set PROJECTBOARD_BOOTSTRAP_PASSWORD to a strong password (12+ chars, letters and numbers)');const id=db.id(),now=db.now();db.run('INSERT INTO users VALUES(?,?,?,?,\'administrator\',\'active\',1,NULL,?,?,NULL)',id,username,'Administrator',await hashPassword(password),now,now);console.log(`Bootstrap administrator created: ${username}`)}}
+async function bootstrap(){const credentials=await bootstrapAdministrator(db,{username:process.env.PROJECTBOARD_BOOTSTRAP_ADMIN,password:process.env.PROJECTBOARD_BOOTSTRAP_PASSWORD});if(credentials){console.log(`Bootstrap administrator created: ${credentials.username}`);if(credentials.generated)console.log(`Generated bootstrap password: ${credentials.password}`)}}
 if(process.env.NODE_ENV!=='test'){await bootstrap();const port=Number(process.env.PORT??3333);app.listen(port,()=>console.log(`ProjectBoard listening on http://localhost:${port}`))}
 export default app;

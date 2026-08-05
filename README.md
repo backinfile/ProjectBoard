@@ -20,7 +20,6 @@ Requires Node.js 24+ and pnpm 11+.
 ```bash
 pnpm install
 copy .env.example .env
-# Set a strong PROJECTBOARD_BOOTSTRAP_PASSWORD in the environment.
 pnpm build
 pnpm start
 ```
@@ -31,7 +30,7 @@ Run the Credential Broker under a separate OS identity/environment:
 pnpm broker
 ```
 
-The Web/API listens on `http://localhost:3333`; the Broker listens only on `127.0.0.1:3334`. For development, `pnpm dev` starts Vite and the API. The first start creates the configured bootstrap administrator and requires a password change.
+The Web/API listens on `http://localhost:3333`; the Broker listens only on `127.0.0.1:3334`. For development, `pnpm dev` starts Vite and the API. On the first start, ProjectBoard creates the bootstrap administrator, generates a secure password, and prints it once to the server log. The administrator can sign in immediately without a forced password change. Set `PROJECTBOARD_BOOTSTRAP_PASSWORD` only when deployment automation needs to provide its own strong password.
 
 ## Runner
 
@@ -72,7 +71,7 @@ pnpm restore -- ./data/backups/projectboard.db
 
 The code is complete without embedding deployment secrets. Operators must provide:
 
-- a strong bootstrap password, Broker shared secret and HTTPS/public base URL;
+- secure capture of the one-time generated bootstrap password (or an explicitly configured strong password), a Broker shared secret and HTTPS/public base URL;
 - one GitHub App ID/private-key file/webhook secret, configured with selected repositories and installation-level `Contents: read & write`; or GitLab OAuth application metadata plus a Broker-only Maintainer/Owner token file;
 - provider Rulesets/Protected Branches for `main`, `develop`, `release/*` and tags, with the ProjectBoard integration excluded from bypass;
 - TLS termination, persistent `data/` storage, filesystem ACLs for Runner state/Broker keys, and scheduled backup retention.

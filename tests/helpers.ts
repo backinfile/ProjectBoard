@@ -3,7 +3,8 @@ import type { Actor } from '../src/shared/types.js';
 import { rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-export function fixture(name:string){const path=resolve(`data/test-${name}-${crypto.randomUUID()}.db`);const db=new Db(path);const now=db.now();const admin='u-admin',developer='u-dev',viewer='u-view',project='p-main',agent='a-one',agent2='a-two';
+export function fixture(name:string, options: { empty?: boolean } = {}){const path=resolve(`data/test-${name}-${crypto.randomUUID()}.db`);const db=new Db(path);const now=db.now();const admin='u-admin',developer='u-dev',viewer='u-view',project='p-main',agent='a-one',agent2='a-two';
+ if(options.empty)return{db,path,ids:{admin,developer,viewer,project,agent,agent2},actors:{admin:{type:'human',id:admin} as Actor,developer:{type:'human',id:developer} as Actor,viewer:{type:'human',id:viewer} as Actor,agent:{type:'agent',id:agent} as Actor,agent2:{type:'agent',id:agent2} as Actor},cleanup(){db.close();for(const suffix of ['','-wal','-shm'])rmSync(path+suffix,{force:true})}};
  db.run("INSERT INTO users VALUES(?,?,?,?, 'administrator','active',0,NULL,?,?,NULL)",admin,'admin','Admin','hash',now,now);
  db.run("INSERT INTO users VALUES(?,?,?,?, 'user','active',0,NULL,?,?,NULL)",developer,'dev','Developer','hash',now,now);
  db.run("INSERT INTO users VALUES(?,?,?,?, 'user','active',0,NULL,?,?,NULL)",viewer,'viewer','Viewer','hash',now,now);
