@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -280,6 +282,77 @@ func TestAutomaticGitHubConnectionVerifiesAndBindsRepository(t *testing.T) {
 	canceled := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connection-flows/"+secondFlow["id"].(string), csrf, nil)
 	if canceled["status"] != "canceled" || canceled["errorCode"] != "AUTHORIZATION_CANCELED" {
 		t.Fatalf("canceled flow=%#v", canceled)
+	}
+}
+
+func TestGitProviderSettingsAreConfiguredFromWebAndPersistEncrypted(t *testing.T) {
+	dataDir := t.TempDir()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}))
+	webhookSecret := "web-configured-hook-secret"
+
+	start := func() (*server.Application, *httptest.Server, *http.Client, string) {
+		t.Helper()
+		handler, startErr := server.New(server.Config{DataDir: dataDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
+		if startErr != nil {
+			t.Fatal(startErr)
+		}
+		host := httptest.NewServer(handler)
+		jar, _ := cookiejar.New(nil)
+		client := &http.Client{Jar: jar}
+		login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+		return handler, host, client, login["csrfToken"].(string)
+	}
+
+	handler, host, client, csrf := start()
+	saved := requestJSON(t, client, http.MethodPut, host.URL+"/api/git/provider-settings/github", csrf, map[string]any{
+		"publicUrl": "https://projectboard.example", "appId": "42", "appSlug": "projectboard-app",
+		"privateKey": privatePEM, "webhookUrl": "https://projectboard.example/api/git/webhooks/github", "webhookSecret": webhookSecret,
+	})
+	if saved["configured"] != true || saved["privateKeyConfigured"] != true || saved["webhookSecretConfigured"] != true {
+		t.Fatalf("saved settings=%#v", saved)
+	}
+	savedJSON, _ := json.Marshal(saved)
+	if bytes.Contains(savedJSON, []byte("PRIVATE KEY")) || bytes.Contains(savedJSON, []byte(webhookSecret)) {
+		t.Fatalf("settings response exposed a secret: %s", savedJSON)
+	}
+	configuration := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connections", csrf, nil)
+	if configuration["github"].(map[string]any)["configured"] != true {
+		t.Fatalf("connection configuration=%#v", configuration)
+	}
+
+	host.Close()
+	if err = handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", filepath.Join(dataDir, "projectboard.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encrypted string
+	if err = database.QueryRow("SELECT encrypted_config FROM git_provider_settings WHERE provider='github'").Scan(&encrypted); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if strings.Contains(encrypted, "PRIVATE KEY") || strings.Contains(encrypted, webhookSecret) {
+		t.Fatal("provider settings were stored without encryption")
+	}
+
+	handler, host, client, csrf = start()
+	defer handler.Close()
+	defer host.Close()
+	afterRestart := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connections", csrf, nil)
+	if afterRestart["github"].(map[string]any)["configured"] != true {
+		t.Fatalf("settings did not survive restart: %#v", afterRestart)
+	}
+	summary := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/provider-settings", csrf, nil)
+	summaryJSON, _ := json.Marshal(summary)
+	if bytes.Contains(summaryJSON, []byte("PRIVATE KEY")) || bytes.Contains(summaryJSON, []byte(webhookSecret)) {
+		t.Fatalf("settings summary exposed a secret: %s", summaryJSON)
 	}
 }
 

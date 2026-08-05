@@ -185,12 +185,57 @@
   border-radius: 8px;
   background: var(--raised);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   text-align: left;
   cursor: pointer;
   transition: border-color .14s, background .14s;
+}
+
+.configuration-meter {
+  display: grid;
+  gap: 3px;
+  margin: 2px 0 24px;
+  padding: 13px 14px;
+  border: 1px solid #d8def6;
+  border-radius: 8px;
+  background: #f4f6fd;
+}
+
+.configuration-meter strong {
+  color: #334fae;
+  font-size: 12px;
+}
+
+.configuration-meter span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.provider-settings-form textarea[name="privateKey"] {
+  min-height: 180px;
+  font: 11px/1.5 var(--mono);
+  resize: vertical;
+}
+
+.provider-callbacks {
+  display: grid;
+  gap: 7px;
+  padding: 13px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.provider-callbacks strong {
+  font-size: 11px;
+}
+
+.provider-callbacks code {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font: 11px/1.55 var(--mono);
 }
 
 .connection-provider.compact {

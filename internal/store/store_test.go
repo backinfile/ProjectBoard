@@ -29,7 +29,7 @@ func TestOpenCreatesOnlyCurrentAuthorizationTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	for _, table := range []string{"provider_authorizations", "project_repository_grants"} {
+	for _, table := range []string{"provider_authorizations", "git_provider_settings", "project_repository_grants"} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("current table %s missing", table)

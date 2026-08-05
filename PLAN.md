@@ -54,7 +54,7 @@ Runner Host
   -> structured result + conversation events
 ```
 
-- Web 服务不保存 OpenAI API Key、ChatGPT 凭据、GitHub App 私钥或 GitLab client secret；提供商密钥只存在于 Git Credential Broker 的独立密钥存储。
+- Web 服务不保存 OpenAI API Key 或 ChatGPT 凭据；系统管理员在网页中写入的 GitHub App 私钥与 GitLab client secret 由 Git Credential Broker 使用独立 master key 加密，读取 API 不回显明文。
 - ProjectBoard 对 GitHub 使用一个申请 `Contents: read & write` 的 GitHub App；Broker 按用途和单仓库降权签发最长一小时的 installation token：观察用途为 `read`，有效执行租约的 Runner 为 `write`。
 - Runner 复用本机 Codex 登录态，但不保存长期 Git 提供商凭据；短期 Git token 只交给 Runner 的受控 Git credential adapter，不进入 Codex 子进程环境、提示词或日志。
 - 服务端只保存 Agent Token 哈希；创建 Agent 时浏览器只展示十分钟有效的一次性配对码，Runner 原子消费后才取得只显示一次的 Agent Token，并存入本机安全凭据库。
@@ -146,7 +146,7 @@ RunnerStatus
 - Git Credential Broker 是深 Module；Interface 只暴露 `issueObserverCredential(repositoryId)` 与 `issueRunnerCredential(runId, leaseId)`。GitHub App 与 GitLab OAuth/Token 是该 seam 上的 Adapter，调用者不能自行传入任意权限或仓库。
 - `issueObserverCredential` 只返回读取提交、分支和文件变化所需的权限；`issueRunnerCredential` 从 run、assignment、AgentProjectGrant、lease 和 RepositoryBinding 推导唯一仓库及写权限。
 - `GitCredentialIssuance` 只记录 provider、installation、repository、Agent、run、用途、权限摘要、签发/过期/撤销时间与结果，不保存 token 明文。
-- GitHub App 私钥只由 Broker 持有；即使 Web 服务被攻破，也不能直接自行签发写 token。部署时可把 Broker 隔离为独立进程，并始终保持独立配置与 Interface。
+- GitHub App 私钥由管理员网页写入后只以加密形式保存，并仅由 Broker 解密使用；管理页必须通过 HTTPS 提供且读取 API 不返回明文。部署时仍可把 Broker 隔离为独立进程，并保持独立 Interface。
 - GitHub/GitLab 的仓库写权限不能代替分支级保护；`main`、`develop`、`release/*` 和 tag 由 provider Ruleset/Protected Branch 阻止直接写入，ProjectBoard App/Token 不得加入 bypass。
 
 ### 4.3 WorkItem

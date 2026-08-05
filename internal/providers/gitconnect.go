@@ -92,6 +92,34 @@ func (c *GitConnector) Configured(provider string) bool {
 	}
 }
 
+func (c *GitConnector) ValidateConfiguration(provider string) error {
+	if !c.Configured(provider) {
+		return fmt.Errorf("all required %s settings must be provided", provider)
+	}
+	for label, value := range map[string]string{"public URL": c.config.PublicURL} {
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("%s must be an absolute HTTP or HTTPS URL", label)
+		}
+	}
+	if provider == "github" {
+		parsed, err := url.Parse(c.config.GitHubWebhookURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("webhook URL must be an absolute HTTP or HTTPS URL")
+		}
+		if _, err = c.githubJWT(); err != nil {
+			return err
+		}
+	}
+	if provider == "gitlab" {
+		parsed, err := url.Parse(c.config.GitLabBaseURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("GitLab base URL must be an absolute HTTP or HTTPS URL")
+		}
+	}
+	return nil
+}
+
 func (c *GitConnector) WebhookSecret(provider string) string {
 	if provider == "github" {
 		return c.config.GitHubWebhookSecret

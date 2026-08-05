@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/projectboard/projectboard/internal/providers"
@@ -50,6 +51,7 @@ type Server struct {
 	static fs.FS
 	vault  *providers.Vault
 	git    *providers.GitConnector
+	gitMu  sync.RWMutex
 }
 
 type Application struct {
@@ -93,6 +95,10 @@ func New(config Config) (*Application, error) {
 		return nil, err
 	}
 	s := &Server{store: database, queue: workqueue.New(database), config: config, static: static, vault: vault, git: providers.NewGitConnector(config.GitConnect)}
+	if err = s.reloadGitConnector(); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("load web-managed Git provider settings: %w", err)
+	}
 	return &Application{handler: securityHeaders(s.routes()), server: s}, nil
 }
 
@@ -143,6 +149,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/repository-grant", s.handle(s.bindRepositoryGrant))
 	mux.HandleFunc("DELETE /api/projects/{id}/repository-grant", s.handle(s.revokeRepositoryGrant))
 	mux.HandleFunc("GET /api/git/connections", s.handle(s.gitConnectionConfiguration))
+	mux.HandleFunc("GET /api/git/provider-settings", s.handle(s.getGitProviderSettings))
+	mux.HandleFunc("PUT /api/git/provider-settings/{provider}", s.handle(s.updateGitProviderSettings))
 	mux.HandleFunc("POST /api/git/connections/{provider}/start", s.handle(s.startGitConnection))
 	mux.HandleFunc("GET /api/git/connections/{provider}/callback", s.handle(s.gitConnectionCallback))
 	mux.HandleFunc("GET /api/git/connection-flows/{id}", s.handle(s.getGitConnection))

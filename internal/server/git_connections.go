@@ -33,8 +33,8 @@ func (s *Server) gitConnectionConfiguration(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"github": map[string]any{"configured": s.git.Configured("github"), "label": "Connect GitHub"},
-		"gitlab": map[string]any{"configured": s.git.Configured("gitlab"), "label": "Connect GitLab", "manualFallback": true},
+		"github": map[string]any{"configured": s.gitClient().Configured("github"), "label": "Connect GitHub"},
+		"gitlab": map[string]any{"configured": s.gitClient().Configured("gitlab"), "label": "Connect GitLab", "manualFallback": true},
 	})
 }
 
@@ -48,7 +48,8 @@ func (s *Server) startGitConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := r.PathValue("provider")
-	if !s.git.Configured(provider) {
+	git := s.gitClient()
+	if !git.Configured(provider) {
 		writeError(w, &domainError{503, "PROVIDER_NOT_CONFIGURED", "The deployment has not configured this provider", map[string]any{"provider": provider}})
 		return
 	}
@@ -75,7 +76,7 @@ func (s *Server) startGitConnection(w http.ResponseWriter, r *http.Request) {
 	challengeDigest := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(challengeDigest[:])
 	state := flowID + "." + secretPart + "." + noncePart
-	authorizationURL, err := s.git.AuthorizationURL(provider, state, challenge)
+	authorizationURL, err := git.AuthorizationURL(provider, state, challenge)
 	if err != nil {
 		writeError(w, &domainError{503, "PROVIDER_NOT_CONFIGURED", err.Error(), nil})
 		return
@@ -104,6 +105,7 @@ func (s *Server) gitConnectionCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var result *providers.ConnectionResult
+	git := s.gitClient()
 	if provider == "github" {
 		installationID := r.URL.Query().Get("installation_id")
 		if installationID == "" {
@@ -111,7 +113,7 @@ func (s *Server) gitConnectionCallback(w http.ResponseWriter, r *http.Request) {
 			s.writeGitCallback(w, "Installation not completed", "No repository access was changed. You can close this window and retry.", false)
 			return
 		}
-		result, err = s.git.CompleteGitHub(r.Context(), installationID)
+		result, err = git.CompleteGitHub(r.Context(), installationID)
 	} else if provider == "gitlab" {
 		var sealedVerifier string
 		if scanErr := s.store.DB.QueryRow("SELECT sealed_verifier FROM git_connection_flows WHERE id=?", flowID).Scan(&sealedVerifier); scanErr != nil {
@@ -120,7 +122,7 @@ func (s *Server) gitConnectionCallback(w http.ResponseWriter, r *http.Request) {
 			var verifier string
 			verifier, err = s.vault.Open(sealedVerifier)
 			if err == nil {
-				result, err = s.git.CompleteGitLab(r.Context(), r.URL.Query().Get("code"), verifier)
+				result, err = git.CompleteGitLab(r.Context(), r.URL.Query().Get("code"), verifier)
 			}
 		}
 	} else {
@@ -320,7 +322,7 @@ func (s *Server) completeGitConnection(w http.ResponseWriter, r *http.Request) {
 				err = json.Unmarshal([]byte(credential), &data)
 			}
 			if err == nil {
-				webhookURL, err = s.git.EnsureGitLabWebhook(r.Context(), selected.ID, data.AccessToken)
+				webhookURL, err = s.gitClient().EnsureGitLabWebhook(r.Context(), selected.ID, data.AccessToken)
 			}
 		}
 		if err != nil {
@@ -379,7 +381,7 @@ func (s *Server) failGitFlow(id, status, code, message string) {
 
 func (s *Server) gitWebhook(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
-	secret := s.git.WebhookSecret(provider)
+	secret := s.gitClient().WebhookSecret(provider)
 	if secret == "" {
 		writeError(w, &domainError{503, "WEBHOOK_NOT_CONFIGURED", "Provider webhook secret is not configured", nil})
 		return
