@@ -60,6 +60,8 @@ ProjectBoard 不监听 Webhook，也不在后台定时轮询。项目开发者�
 
 ## Runner
 
+登录网页后可从“Runner 下载”页面直接下载与 ProjectBoard 服务端同目录中的平台二进制。部署时将 `projectboard-runner.exe` 或带平台后缀的 Runner 文件与 `projectboard` 放在同一目录，页面会自动识别，无需额外配置。
+
 在网页中创建 Agent、为项目启用它并生成一次性配对码：
 
 ```bash

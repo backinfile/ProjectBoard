@@ -13,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,6 +44,42 @@ func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
 		if response.StatusCode != http.StatusOK || !strings.Contains(string(body), check.want) {
 			t.Fatalf("GET %s = %d %q, want 200 containing %q", check.path, response.StatusCode, body, check.want)
 		}
+	}
+}
+
+func TestRunnerDownloadsAreDiscoveredAndServedToSignedInUsers(t *testing.T) {
+	downloadDir := t.TempDir()
+	runnerPath := filepath.Join(downloadDir, "projectboard-runner-linux-amd64")
+	if err := os.WriteFile(runnerPath, []byte("runner-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := server.New(server.Config{DataDir: t.TempDir(), RunnerDownloadDir: downloadDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	listed := requestJSON(t, client, http.MethodGet, host.URL+"/api/runner/downloads", "", nil)
+	downloads, ok := listed["downloads"].([]any)
+	if !ok || len(downloads) != 1 {
+		t.Fatalf("downloads=%#v, want one", listed["downloads"])
+	}
+	artifact := downloads[0].(map[string]any)
+	if artifact["platform"] != "Linux" || artifact["arch"] != "x64" {
+		t.Fatalf("artifact=%#v", artifact)
+	}
+	response, err := client.Get(host.URL + artifact["url"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || string(body) != "runner-binary" {
+		t.Fatalf("download=%d %q", response.StatusCode, body)
 	}
 }
 

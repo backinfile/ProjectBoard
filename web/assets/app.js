@@ -62,7 +62,6 @@ async function renderProjects(){const actions=`<button class="button primary" id
 function projectSettings(project){const isCurrent=project.id===state.project?.id;openDrawer('Project settings',`<section class="entity-summary"><span class="project-mark large">${escapeHTML(project.key.slice(0,2).toUpperCase())}</span><div><span class="eyebrow">PROJECT / ${escapeHTML(project.key)}</span><h3>${escapeHTML(project.name)}</h3><div>${badge(project.archivedAt?'archived':'active',project.archivedAt?'':'signal')} ${isCurrent?badge('current','signal'):''}</div></div></section><section class="drawer-section"><div class="kv"><div><dt>Repository</dt><dd>${escapeHTML(project.repositoryUrl)}</dd></div><div><dt>Default target</dt><dd>${escapeHTML(project.defaultTargetBranch)}</dd></div><div><dt>Allowed targets</dt><dd>${escapeHTML((project.allowedTargetBranches||[]).join(', ')||'—')}</dd></div><div><dt>Config version</dt><dd>${project.configVersion}</dd></div></div></section><div class="drawer-actions"><button class="button primary" id="openProject" type="button">${isCurrent?'Open task queue':'Switch to project'}</button><button class="button" id="editManagedProject" type="button">${icon('settings')}Edit settings</button></div>`,()=>{$('#openProject').onclick=()=>{state.project=project;localStorage.pbProject=project.id;state.page='queue';closeDrawer();renderShell()};$('#editManagedProject').onclick=()=>editProjectForm(project)})}
 async function renderActivity(){const data=state.project?await api(`/api/activity?projectId=${state.project.id}`):[];const rows=data.map((e,index)=>`<button class="table-row action management-row" data-event="${index}"><span><strong>${escapeHTML(e.event_type)}</strong><small>${escapeHTML(e.created_at)}</small></span><span>${escapeHTML(e.actor_type)}</span><span>${escapeHTML(e.object_type)}</span><span class="row-end">${escapeHTML(e.object_id)}${icon('chevron')}</span></button>`).join('');$('#workspace').innerHTML=header(t('activity'),'Append-only operational evidence. Select an event to inspect its recorded details.')+`<div class="content"><div class="table">${rows||'<p>No activity recorded.</p>'}</div></div>`;document.querySelectorAll('[data-event]').forEach(row=>row.onclick=()=>activityDetails(data[Number(row.dataset.event)]))}
 function activityDetails(event){let payload={};try{payload=JSON.parse(event.payload_json||'{}')}catch{payload={raw:event.payload_json}}const entries=Object.entries(payload).map(([key,value])=>`<div><dt>${escapeHTML(key)}</dt><dd>${escapeHTML(typeof value==='object'?JSON.stringify(value):value)}</dd></div>`).join()||'<p class="empty-note">No additional payload was recorded.</p>';openDrawer('Activity details',`<section class="entity-summary"><span class="entity-mark">${icon('activity')}</span><div><span class="eyebrow">AUDIT EVENT</span><h3>${escapeHTML(event.event_type)}</h3><div>${badge(event.source||'web')} ${badge(event.actor_type)}</div></div></section><section class="drawer-section"><div class="kv"><div><dt>Occurred</dt><dd>${escapeHTML(event.created_at)}</dd></div><div><dt>Actor ID</dt><dd>${escapeHTML(event.actor_id||'—')}</dd></div><div><dt>Object</dt><dd>${escapeHTML(`${event.object_type} / ${event.object_id}`)}</dd></div><div><dt>Event ID</dt><dd>${escapeHTML(event.id)}</dd></div></div></section><section class="drawer-section"><span class="eyebrow">RECORDED PAYLOAD</span><div class="kv payload-kv">${entries}</div></section>`)}
-async function renderAccount(){const actions=`<button class="button" id="signOut">${icon('log-out')}${t('logout')}</button>`;$('#workspace').innerHTML=header(t('account'),'Profile, password, and authenticated sessions.',actions)+`<div class="content settings-grid"><section class="settings-section"><h2>${escapeHTML(state.me.displayName)}</h2><div class="kv"><div><dt>Username</dt><dd>@${escapeHTML(state.me.username)}</dd></div><div><dt>Role</dt><dd>${escapeHTML(state.me.systemRole)}</dd></div><div><dt>Status</dt><dd>${escapeHTML(state.me.status)}</dd></div></div></section><section class="settings-section"><h2>Security</h2><button class="button" id="changePassword">Change password</button></section></div>`;$('#signOut').onclick=async()=>{await api('/api/auth/logout',{method:'POST',body:'{}'});state.me=null;renderLogin()};$('#changePassword').onclick=passwordForm}
 function passwordForm(){openDrawer('Change password',formShell(field('Current password','currentPassword','password','','required')+field('New password','newPassword','password','','required minlength="12"')),()=>wireForm('#drawerForm',d=>api('/api/me/change-password',{method:'POST',body:JSON.stringify(d)})))}
 renderSystemSettings=async function(){
   const settings=await api('/api/system/settings');
@@ -92,5 +91,33 @@ renderSettings=async function(){
   </div>`;
   $('#editProject').onclick=()=>editProjectForm(state.project);$('#gitGrant').onclick=grantForm;const sync=$('#syncCommits');if(sync)sync.onclick=async()=>{sync.disabled=true;try{const result=await api(`/api/projects/${state.project.id}/sync-commits`,{method:'POST',body:'{}'});toast(`已查询 ${result.fetched} 条提交，新增关联 ${result.inserted} 条`)}catch(error){toast(error.message)}finally{sync.disabled=false}};
 };
+
+zh.runnerDownloads='Runner 下载';
+en.runnerDownloads='Runner downloads';
+nav2.splice(2,0,['runnerDownloads','download']);
+
+async function renderRunnerDownloads(){
+  const result=await api('/api/runner/downloads');
+  const downloads=result.downloads||[];
+  const rows=downloads.map(item=>`<a class="runner-download-row" href="${escapeHTML(item.url)}" download="${escapeHTML(item.name)}"><span class="runner-download-icon">${icon('download')}</span><span><strong>${escapeHTML(item.platform)}</strong><small>${escapeHTML(item.arch)} · ${formatDownloadSize(item.size)}</small></span><span class="button primary">下载</span></a>`).join('');
+  $('#workspace').innerHTML=header(t('runnerDownloads'),'')+`<div class="content simple-settings-page"><section class="settings-sheet"><header class="settings-sheet-head"><h2>可用版本</h2><span class="setting-state">${downloads.length}</span></header><div class="runner-download-list">${rows||'<div class="simple-empty-setting"><strong>暂无可下载的 Runner</strong></div>'}</div></section></div>`;
+}
+
+function formatDownloadSize(bytes){
+  if(bytes<1024*1024)return `${Math.max(1,Math.round(bytes/1024))} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+const renderPageWithoutRunnerDownloads=renderPage;
+renderPage=async function(){
+  if(state.page==='runnerDownloads')return renderRunnerDownloads();
+  return renderPageWithoutRunnerDownloads();
+};
+
+async function renderAccount(){
+  const actions=`<button class="button" id="signOut">${icon('log-out')}${t('logout')}</button>`;
+  $('#workspace').innerHTML=header(t('account'),'',actions)+`<div class="content settings-grid"><section class="settings-section"><h2>${escapeHTML(state.me.displayName)}</h2><div class="kv"><div><dt>Username</dt><dd>${escapeHTML(state.me.username)}</dd></div><div><dt>Role</dt><dd>${escapeHTML(state.me.systemRole)}</dd></div><div><dt>Status</dt><dd>${escapeHTML(state.me.status)}</dd></div></div></section><section class="settings-section"><h2>Security</h2><button class="button" id="changePassword">Change password</button></section></div>`;
+  $('#signOut').onclick=async()=>{await api('/api/auth/logout',{method:'POST',body:'{}'});state.me=null;renderLogin()};$('#changePassword').onclick=passwordForm;
+}
 
 boot();

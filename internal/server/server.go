@@ -29,6 +29,7 @@ import (
 type Config struct {
 	DataDir           string
 	DatabasePath      string
+	RunnerDownloadDir string
 	BootstrapUsername string
 	BootstrapPassword string
 	Production        bool
@@ -123,6 +124,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/me/change-password", s.handle(s.changePassword))
 	mux.HandleFunc("GET /api/me/sessions", s.handle(s.sessions))
 	mux.HandleFunc("DELETE /api/me/sessions/{id}", s.handle(s.revokeSession))
+	mux.HandleFunc("GET /api/runner/downloads", s.handle(s.listRunnerDownloads))
+	mux.HandleFunc("GET /api/runner/downloads/{name}", s.handle(s.downloadRunner))
 	mux.HandleFunc("GET /api/system/settings", s.handle(s.getSystemSettings))
 	mux.HandleFunc("PUT /api/system/settings", s.handle(s.updateSystemSettings))
 	mux.HandleFunc("GET /api/projects", s.handle(s.listProjects))

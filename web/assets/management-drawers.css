@@ -1071,6 +1071,55 @@
   font-weight: 620;
 }
 
+.runner-download-list {
+  display: grid;
+}
+
+.runner-download-row {
+  min-height: 74px;
+  padding: 14px 22px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border-bottom: 1px solid #eceef2;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.runner-download-row:last-child {
+  border-bottom: 0;
+}
+
+.runner-download-row:hover {
+  background: #f8fafc;
+}
+
+.runner-download-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.runner-download-row strong,
+.runner-download-row small {
+  display: block;
+}
+
+.runner-download-row strong {
+  font-size: 13px;
+}
+
+.runner-download-row small {
+  margin-top: 4px;
+  color: #727783;
+  font-size: 11px;
+}
+
 @media (max-width: 620px) {
   .simple-settings-page {
     gap: 12px;
@@ -1095,5 +1144,10 @@
   .simple-setting-rows > div {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .runner-download-row {
+    padding-right: 16px;
+    padding-left: 16px;
   }
 }
