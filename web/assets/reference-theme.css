@@ -3928,3 +3928,279 @@ body {
     padding-left: 0;
   }
 }
+
+/* Unified page architecture for every project and administration tab. */
+.workspace {
+  --app-page-gutter: clamp(28px, 4.5vw, 56px);
+}
+
+.app-page-head {
+  margin: 0;
+  padding: 40px var(--app-page-gutter) 24px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.app-page-head .page-title {
+  align-items: flex-start;
+  gap: 28px;
+}
+
+.app-page-head .page-title > div:first-child {
+  min-width: 0;
+}
+
+.app-page-head .page-title h1 {
+  max-width: 920px;
+  font-size: clamp(32px, 3vw, 42px);
+  line-height: 1.04;
+}
+
+.app-page-head .page-title p {
+  max-width: 72ch;
+  margin-top: 9px;
+}
+
+.app-page-head .page-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.app-page-tabs {
+  min-height: 52px;
+  padding: 0 var(--app-page-gutter);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: stretch;
+  gap: 24px;
+  overflow-x: auto;
+  background: rgba(255,255,255,.42);
+  scrollbar-width: none;
+}
+
+.app-page-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.app-page-tab {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 52px;
+  padding: 0 1px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.app-page-tab::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--signal);
+  content: "";
+  opacity: 0;
+  transform: scaleX(.4);
+  transition: opacity .16s ease, transform .2s cubic-bezier(.2,.8,.2,1);
+}
+
+.app-page-tab:hover,
+.app-page-tab.active {
+  color: var(--ink);
+}
+
+.app-page-tab.active {
+  font-weight: 700;
+}
+
+.app-page-tab.active::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.app-page-tab > span {
+  margin-left: 5px;
+  color: #969ba5;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.app-page-content {
+  padding: 26px var(--app-page-gutter) 80px;
+}
+
+.app-page-toolbar {
+  min-height: 56px;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.app-page-toolbar .search {
+  flex: 1 1 360px;
+  max-width: none;
+}
+
+.app-list-surface {
+  width: 100%;
+  border-top: 1px solid var(--line);
+}
+
+.queue-page-content {
+  padding-top: 20px;
+}
+
+.queue-page-content .queue-content {
+  padding: 0;
+}
+
+.queue-page-content .queue-group {
+  margin: 0;
+}
+
+.queue-page-content .queue-group + .queue-group {
+  margin-top: 26px;
+}
+
+.queue-page-content .group-label {
+  padding-inline: 0;
+}
+
+.queue-count {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.table-row {
+  min-height: 66px;
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.notification-page {
+  padding-top: 26px;
+}
+
+.notification-summary {
+  min-height: 44px;
+  padding: 0 8px 14px;
+  align-items: center;
+}
+
+.notification-summary strong {
+  font: 700 18px var(--display);
+  letter-spacing: -.02em;
+}
+
+.notification-row {
+  min-height: 72px;
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.project-settings-page .project-settings-panel {
+  padding: 0 0 72px;
+}
+
+.settings-grid,
+.simple-settings-page,
+.project-settings-page,
+.notification-page {
+  max-width: none;
+  margin: 0;
+}
+
+.management-empty,
+.queue-empty,
+.simple-empty-setting {
+  min-height: 320px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.management-empty p,
+.queue-empty p,
+.simple-empty-setting p {
+  max-width: 54ch;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 620px) {
+  .workspace {
+    --app-page-gutter: 15px;
+  }
+
+  .app-page-head {
+    padding-top: 26px;
+    padding-bottom: 18px;
+  }
+
+  .app-page-head .page-title {
+    display: block;
+  }
+
+  .app-page-head .page-title h1 {
+    font-size: 30px;
+  }
+
+  .app-page-head .page-actions {
+    width: 100%;
+    margin: 16px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .app-page-tabs {
+    min-height: 48px;
+    gap: 20px;
+  }
+
+  .app-page-tab {
+    min-height: 48px;
+  }
+
+  .app-page-content {
+    padding-top: 18px;
+    padding-bottom: 60px;
+  }
+
+  .app-page-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .app-page-toolbar .search {
+    flex-basis: 100%;
+  }
+
+  .app-page-toolbar .button {
+    flex: 1 1 auto;
+  }
+
+  .queue-count {
+    width: 100%;
+    margin: 2px 0 0;
+    text-align: right;
+  }
+
+  .management-empty,
+  .queue-empty,
+  .simple-empty-setting {
+    min-height: 240px;
+  }
+}
