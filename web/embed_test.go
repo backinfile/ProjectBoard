@@ -121,3 +121,39 @@ func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
 		t.Error("task queue is missing per-stage tabs")
 	}
 }
+
+func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
+	app, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := Files.ReadFile("assets/reference-theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appSource := string(app)
+	cssSource := string(css)
+	for _, marker := range []string{
+		"task-detail-shell",
+		"task-workflow-track",
+		"task-conversation",
+		"task-inspector",
+		"task-composer-box",
+		"task-drawer-body",
+		"task-drawer-footer",
+		"stage-evidence-list",
+	} {
+		if !strings.Contains(appSource, marker) {
+			t.Errorf("task workflow is missing Variant A structure %q", marker)
+		}
+		if !strings.Contains(cssSource, "."+marker) {
+			t.Errorf("task workflow is missing Variant A styling for %q", marker)
+		}
+	}
+	if strings.Contains(appSource, "$('.context-message')?.remove()") {
+		t.Error("task rendering still removes the task description after rendering")
+	}
+	if strings.Contains(cssSource, ".task-workflow-track { display: none; }") {
+		t.Error("the six-stage workflow must remain reachable on narrow screens")
+	}
+}
