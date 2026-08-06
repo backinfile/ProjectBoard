@@ -1253,6 +1253,215 @@ body {
   }
 }
 
+/* Product identity and workspace switcher */
+.mast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-inline: 16px 12px;
+}
+
+.product-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.product-brand-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  line-height: 1.1;
+}
+
+.product-brand-copy strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: -.025em;
+}
+
+.product-brand-copy small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.project-switch {
+  grid-template-columns: 34px minmax(0, 1fr) 24px;
+  min-height: 66px;
+  margin: 0 0 14px;
+  padding: 9px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 5px 18px rgba(23, 25, 31, .045);
+  text-align: left;
+}
+
+.project-switch:hover {
+  border-color: var(--line-strong);
+  background: var(--subtle);
+  box-shadow: 0 7px 22px rgba(23, 25, 31, .07);
+}
+
+.project-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--signal) 54%, transparent);
+  outline-offset: 2px;
+}
+
+.project-switch-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.project-switch-copy small,
+.project-switch-copy strong,
+.project-switch-copy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-switch-copy small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.project-switch-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.project-switch-copy > span {
+  color: var(--muted);
+  font: 8px/1.25 var(--mono);
+}
+
+.project-switch-action {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.project-switch-action .icon {
+  width: 13px;
+  height: 13px;
+  transform: rotate(90deg);
+}
+
+/* Notifications are read-only rows; navigation is an explicit action. */
+.notification-row {
+  grid-template-columns: 34px minmax(0, 1fr) 8px auto;
+  cursor: default;
+}
+
+.notification-row:hover {
+  background: transparent;
+}
+
+.notification-copy {
+  min-width: 0;
+}
+
+.notification-unread {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+}
+
+.notification-task-link {
+  min-width: 104px;
+  justify-content: center;
+}
+
+.notification-task-link .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* On task detail, only the conversation stream owns vertical scrolling. */
+@media (min-width: 921px) {
+  .workspace:has(.task-detail-page-head) {
+    height: 100svh;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .task-detail-page-head {
+    flex: 0 0 auto;
+  }
+
+  .task-detail-page-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .task-detail-page-content .task-detail-grid {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .task-detail-page-content .task-conversation {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .task-detail-page-content .task-thread {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: #c4c9d2 transparent;
+  }
+
+  .task-detail-page-content .task-thread::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .task-detail-page-content .task-thread::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: #c4c9d2;
+    background-clip: padding-box;
+  }
+
+  .task-detail-page-content .task-composer {
+    position: static;
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .product-brand-copy small {
+    display: none;
+  }
+
+  .notification-row {
+    grid-template-columns: 30px minmax(0, 1fr) 7px;
+    align-items: start;
+  }
+
+  .notification-task-link {
+    grid-column: 2 / -1;
+    width: max-content;
+    min-width: 0;
+    margin-top: 4px;
+  }
+}
+
 /* Queue relationships, messages, settings hub, and conversation workspace */
 .rail {
   display: flex;
@@ -4202,5 +4411,40 @@ body {
   .queue-empty,
   .simple-empty-setting {
     min-height: 240px;
+  }
+}
+
+/* Final interaction ownership overrides (kept last to win legacy layers). */
+.notification-row {
+  grid-template-columns: 34px minmax(0, 1fr) 8px auto;
+}
+
+.notification-row > .notification-task-link {
+  grid-column: 4;
+  min-width: 104px;
+}
+
+@media (min-width: 921px) {
+  .task-detail-page-content.app-page-content {
+    padding-bottom: 0;
+  }
+
+  .task-detail-page-content .task-inspector {
+    height: 100%;
+    min-height: 0;
+    align-self: stretch;
+    border-left: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 620px) {
+  .notification-row {
+    grid-template-columns: 30px minmax(0, 1fr) 7px;
+  }
+
+  .notification-row > .notification-task-link {
+    grid-column: 2 / -1;
+    width: max-content;
+    min-width: 0;
   }
 }
