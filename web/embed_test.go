@@ -134,6 +134,8 @@ func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
 	appSource := string(app)
 	cssSource := string(css)
 	for _, marker := range []string{
+		"workflow-context-topbar",
+		"workflow-context-tabs",
 		"task-detail-shell",
 		"task-workflow-track",
 		"task-conversation",
@@ -142,12 +144,20 @@ func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
 		"task-drawer-body",
 		"task-drawer-footer",
 		"stage-evidence-list",
+		"project-settings-shell",
+		"project-prompt-form",
+		"project-action-form",
 	} {
 		if !strings.Contains(appSource, marker) {
 			t.Errorf("task workflow is missing Variant A structure %q", marker)
 		}
 		if !strings.Contains(cssSource, "."+marker) {
 			t.Errorf("task workflow is missing Variant A styling for %q", marker)
+		}
+	}
+	for _, copy := range []string{"executionContext", "projectSettingsDescription"} {
+		if !strings.Contains(appSource, copy) {
+			t.Errorf("task workflow is missing preview-aligned copy %q", copy)
 		}
 	}
 	if strings.Contains(appSource, "$('.context-message')?.remove()") {

@@ -16,6 +16,7 @@ FORM: Reference-led Operate redesign, pinned to the local ScriptBoard interface 
   --line-soft: #e8eaf0;
   --signal: #2563eb;
   --signal-ink: #fff;
+  --signal-soft: #e9edfb;
   --danger: #b84646;
   --health: #2f8065;
   --muted: #747986;
@@ -1250,50 +1251,6 @@ body {
     margin: -20px -20px 22px;
     padding: 18px 20px;
   }
-}
-
-/* Unified task configuration and settings surfaces */
-.task-config-form { gap: 16px; }
-.config-section {
-  padding: 18px;
-  border: 1px solid #dfe3ea;
-  border-radius: 14px;
-  background: linear-gradient(145deg,#fff,#f8f9fb);
-}
-.config-section > header { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; }
-.config-section > header > .icon { width: 30px; height: 30px; padding: 7px; border-radius: 8px; background: #edf2ff; color: var(--signal); }
-.config-section h3 { margin: 0; font-size: 13px; }
-.config-section header p { margin: 3px 0 0; color: #7c8290; font-size: 10px; line-height: 1.45; }
-.config-grid,.mode-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
-.mode-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
-.follower-chips { min-height: 42px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.follower-chips > span { padding: 5px 6px; border: 1px solid #dce1e9; border-radius: 999px; background: #fff; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; }
-.follower-chips > small { color: #858b97; }
-.follower-chips button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: #f1f3f6; display: grid; place-items: center; cursor: pointer; }
-.follower-chips button .icon { width: 12px; }
-.follower-picker { margin: 8px 0; }
-.follower-picker select { width: 100%; }
-.config-save { width: 100%; min-height: 44px; }
-
-.chat-composer {
-  grid-template-columns: minmax(0,1fr) 42px auto;
-  padding-block: 10px;
-  align-items: center;
-}
-.chat-composer .composer-main { padding: 7px 11px 6px; border: 1px solid #d7dce5; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(35,42,57,.05); }
-.chat-composer textarea { min-height: 30px; padding: 3px 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
-.chat-composer textarea:focus { border: 0; box-shadow: none; outline: none; }
-.composer-hint { display: block; color: #959ba7; font-size: 8px; }
-.composer-send { min-height: 42px; }
-
-.project-sync-stamp { margin-left: auto; padding-left: 20px; border-left: 1px solid #dde1e8; }
-.project-sync-stamp span,.project-sync-stamp strong { display: block; }
-.project-sync-stamp span { color: #858b97; font-size: 9px; }
-.project-sync-stamp strong { margin-top: 4px; font-size: 11px; }
-
-@media (max-width: 760px) {
-  .config-grid,.mode-grid { grid-template-columns: 1fr; }
-  .project-sync-stamp { width: 100%; margin: 8px 0 0; padding: 12px 0 0; border-left: 0; border-top: 1px solid #dde1e8; }
 }
 
 /* Queue relationships, messages, settings hub, and conversation workspace */
@@ -3186,4 +3143,666 @@ body {
   .stage-change-grid > i {
     transform: rotate(-90deg);
   }
+}
+
+/* Full Variant A workflow surface alignment */
+.mast,
+.rail {
+  width: 220px;
+}
+
+.mast {
+  height: 66px;
+  padding: 0 22px;
+}
+
+.mast .brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.rail {
+  inset-block-start: 66px;
+  padding: 8px 14px 18px;
+}
+
+.workspace {
+  margin-left: 220px;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .rail-primary [data-page="members"],
+.workspace-grid:has(.workflow-context-chrome) .rail-primary [data-page="agents"],
+.workspace-grid:has(.workflow-context-chrome) .rail-bottom {
+  display: none;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .project-switch {
+  grid-template-columns: 34px minmax(0, 1fr);
+  margin-bottom: 22px;
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+.workspace-grid:has(.workflow-context-chrome) .project-switch > .icon {
+  display: none;
+}
+
+.shell:has(.workflow-context-chrome) .mast-actions {
+  display: none;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .rail-foot {
+  margin-top: auto;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .nav button.active::before {
+  display: none;
+}
+
+.workflow-context-chrome {
+  position: relative;
+  z-index: 9;
+}
+
+.workflow-context-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  height: 56px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(238, 240, 244, .92);
+  backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+}
+
+.workflow-context-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.workflow-context-crumb button {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.workflow-context-crumb button:hover {
+  color: var(--ink);
+}
+
+.workflow-context-crumb strong {
+  color: var(--ink);
+}
+
+.workflow-context-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workflow-context-actions .icon-button,
+.workflow-context-actions .button {
+  min-height: 36px;
+}
+
+.workflow-context-actions .icon-button {
+  width: 36px;
+}
+
+.workflow-context-tabs {
+  height: 48px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--raised);
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.workflow-context-tabs button {
+  position: relative;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workflow-context-tabs button.active {
+  color: var(--signal);
+  font-weight: 700;
+}
+
+.workflow-context-tabs button.active::after {
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  background: var(--signal);
+  content: "";
+}
+
+.task-detail-shell {
+  min-height: calc(100svh - 104px);
+  background: var(--canvas);
+}
+
+.task-detail-header {
+  padding: 26px 32px 0;
+  background: var(--raised);
+}
+
+.task-detail-title-row {
+  margin: 11px 0 24px;
+}
+
+.task-detail-title-row h1 {
+  max-width: 760px;
+  font-size: clamp(25px, 3vw, 39px);
+  line-height: 1.1;
+}
+
+.task-workflow-scroll {
+  margin: 0 -32px;
+  padding: 0 32px;
+  overflow: visible;
+}
+
+.task-workflow-track {
+  min-width: 0;
+}
+
+.task-workflow-step {
+  min-height: 48px;
+  padding: 0 12px 11px 0;
+  border-top: 0;
+}
+
+.task-workflow-step::before {
+  content: none;
+}
+
+.task-workflow-step::after {
+  position: absolute;
+  z-index: 0;
+  top: 5px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--line);
+  content: "";
+}
+
+.task-workflow-step:last-child::after {
+  background: transparent;
+}
+
+.task-workflow-node {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--raised);
+}
+
+.task-workflow-step.done .task-workflow-node {
+  border-color: var(--health);
+  background: var(--health);
+}
+
+.task-workflow-step.done::after {
+  background: var(--health);
+}
+
+.task-workflow-step.active .task-workflow-node {
+  border-color: var(--signal);
+  background: var(--raised);
+  box-shadow: 0 0 0 4px var(--signal-soft);
+}
+
+.task-workflow-step.active::after {
+  background: var(--signal);
+}
+
+.task-workflow-step strong {
+  margin-top: 17px;
+}
+
+.task-description-entry {
+  margin-bottom: 22px;
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.task-description-entry > .entry-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: #eceef2;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.task-description-entry > div {
+  padding: 0;
+  background: transparent;
+}
+
+.task-description-entry header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.task-description-entry header strong {
+  font-size: 12px;
+}
+
+.task-description-entry header span {
+  color: var(--muted);
+  font: 9px/1 var(--mono);
+}
+
+.task-description-entry p {
+  margin-top: 7px;
+  padding: 12px 14px;
+  border-radius: 3px 12px 12px 12px;
+  background: #f7f8fa;
+}
+
+.task-conversation {
+  background: var(--raised);
+}
+
+.task-composer {
+  background: linear-gradient(0deg, var(--raised) 72%, rgba(255,255,255,0));
+}
+
+.task-inspector {
+  background: #f7f8fa;
+}
+
+.task-inspector dl > div {
+  grid-template-columns: 95px 1fr;
+}
+
+.project-settings-shell {
+  min-height: calc(100svh - 104px);
+  padding: 36px 34px 80px;
+  background: var(--canvas);
+}
+
+.project-settings-head {
+  margin: 0;
+  padding: 0 0 24px;
+  border-bottom: 1px solid var(--line-strong);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.project-settings-head > div {
+  min-width: 0;
+}
+
+.project-settings-head h1 {
+  margin: 0;
+  font: 760 clamp(30px, 3vw, 36px)/1.08 var(--display);
+  letter-spacing: -.035em;
+}
+
+.project-settings-head p {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.project-settings-head .button {
+  margin-left: auto;
+}
+
+.project-settings-shell > .content.project-settings-page {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.project-settings-tabs {
+  gap: 22px;
+  padding-top: 46px;
+}
+
+.project-settings-tabs button {
+  padding: 0 2px 15px;
+  font-size: 11px;
+}
+
+.project-settings-tabs button::after {
+  background: var(--signal);
+}
+
+.project-settings-tabs button.active {
+  color: var(--signal);
+}
+
+.project-settings-panel {
+  padding: 30px 0 0;
+}
+
+.project-policy-form,
+.project-repository-panel,
+.project-entity-panel {
+  gap: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.project-policy-form > section,
+.project-repository-panel > *,
+.project-entity-panel > * {
+  background: transparent;
+}
+
+.project-policy-form > section {
+  padding: 26px 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.project-policy-form > section:first-child {
+  padding-top: 0;
+}
+
+.project-policy-form > section > header,
+.project-entity-panel > header {
+  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 26px;
+}
+
+.project-policy-form h2,
+.project-entity-panel h2 {
+  font-size: 17px;
+}
+
+.project-policy-form > .button {
+  display: none;
+}
+
+.project-policy-row {
+  min-height: 88px;
+}
+
+.project-policy-row strong {
+  font-size: 12px;
+}
+
+.project-policy-row small {
+  max-width: 76ch;
+  font-size: 10px;
+}
+
+.project-setting-action {
+  min-height: 82px;
+}
+
+.project-repository-panel > .project-setting-action,
+.project-repository-panel > .simple-setting-rows,
+.project-repository-panel > .project-panel-actions,
+.project-entity-panel > header,
+.project-entity-row {
+  padding-right: 0;
+  padding-left: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.project-entity-panel > header {
+  padding-top: 0;
+  padding-bottom: 22px;
+}
+
+.project-prompt-form {
+  min-height: calc(100svh - 76px);
+}
+
+.project-action-form {
+  min-height: calc(100svh - 76px);
+}
+
+.project-prompt-items {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.project-prompt-item {
+  min-height: 62px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 10px;
+}
+
+.project-prompt-item > span {
+  color: var(--signal);
+  font: 650 10px/1 var(--mono);
+}
+
+.project-prompt-item p,
+.project-prompt-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.project-prompt-empty {
+  padding: 20px 0;
+  color: var(--ink-soft);
+}
+
+.project-prompt-add {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.project-prompt-add textarea {
+  min-height: 96px;
+}
+
+@media (max-width: 920px) {
+  .shell:has(.workflow-context-chrome) {
+    display: grid;
+    grid-template-rows: 58px 1fr;
+  }
+
+  .shell:has(.workflow-context-chrome) .mast {
+    position: sticky;
+    top: 0;
+    z-index: 32;
+    width: auto;
+    height: 58px;
+    padding: 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell:has(.workflow-context-chrome) .mast .brand span:last-child {
+    display: inline;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail {
+    position: fixed;
+    z-index: 33;
+    top: 0;
+    right: 14px;
+    bottom: auto;
+    left: 154px;
+    width: auto;
+    height: 58px;
+    padding: 9px 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .shell:has(.workflow-context-chrome) .project-switch,
+  .shell:has(.workflow-context-chrome) .rail-foot {
+    display: none;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary button {
+    width: 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary button span {
+    display: none;
+  }
+
+  .shell:has(.workflow-context-chrome) .workspace {
+    margin-left: 0;
+    min-height: calc(100svh - 58px);
+  }
+
+  .workflow-context-topbar {
+    top: 58px;
+  }
+
+  .workflow-context-tabs {
+    position: sticky;
+    top: 114px;
+    z-index: 8;
+  }
+}
+
+@media (max-width: 640px) {
+  .workflow-context-topbar {
+    padding: 0 14px;
+  }
+
+  .workflow-context-crumb > span {
+    display: none;
+  }
+
+  .workflow-context-tabs {
+    padding: 0 10px;
+  }
+
+  .workflow-context-actions .button {
+    min-width: 36px;
+    padding-inline: 8px;
+    font-size: 10px;
+  }
+
+  .task-detail-header {
+    padding: 20px 16px 0;
+  }
+
+  .task-workflow-scroll {
+    max-width: calc(100% + 32px);
+    margin: 0 -16px;
+    padding: 8px 16px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .task-workflow-track {
+    grid-template-columns: repeat(6, 110px);
+    min-width: 660px;
+  }
+
+  .project-settings-shell {
+    padding: 28px 16px 72px;
+  }
+
+  .project-settings-head {
+    display: block;
+  }
+
+  .project-settings-head .button {
+    margin: 18px 0 0;
+  }
+
+  .project-policy-form > section > header,
+  .project-entity-panel > header {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .project-prompt-add {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Unified task configuration and settings surfaces */
+.task-config-form { gap: 16px; }
+.config-section {
+  padding: 18px;
+  border: 1px solid #dfe3ea;
+  border-radius: 14px;
+  background: linear-gradient(145deg,#fff,#f8f9fb);
+}
+.config-section > header { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; }
+.config-section > header > .icon { width: 30px; height: 30px; padding: 7px; border-radius: 8px; background: #edf2ff; color: var(--signal); }
+.config-section h3 { margin: 0; font-size: 13px; }
+.config-section header p { margin: 3px 0 0; color: #7c8290; font-size: 10px; line-height: 1.45; }
+.config-grid,.mode-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.mode-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.follower-chips { min-height: 42px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.follower-chips > span { padding: 5px 6px; border: 1px solid #dce1e9; border-radius: 999px; background: #fff; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; }
+.follower-chips > small { color: #858b97; }
+.follower-chips button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: #f1f3f6; display: grid; place-items: center; cursor: pointer; }
+.follower-chips button .icon { width: 12px; }
+.follower-picker { margin: 8px 0; }
+.follower-picker select { width: 100%; }
+.config-save { width: 100%; min-height: 44px; }
+
+.chat-composer {
+  grid-template-columns: minmax(0,1fr) 42px auto;
+  padding-block: 10px;
+  align-items: center;
+}
+.chat-composer .composer-main { padding: 7px 11px 6px; border: 1px solid #d7dce5; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(35,42,57,.05); }
+.chat-composer textarea { min-height: 30px; padding: 3px 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
+.chat-composer textarea:focus { border: 0; box-shadow: none; outline: none; }
+.composer-hint { display: block; color: #959ba7; font-size: 8px; }
+.composer-send { min-height: 42px; }
+
+.project-sync-stamp { margin-left: auto; padding-left: 20px; border-left: 1px solid #dde1e8; }
+.project-sync-stamp span,.project-sync-stamp strong { display: block; }
+.project-sync-stamp span { color: #858b97; font-size: 9px; }
+.project-sync-stamp strong { margin-top: 4px; font-size: 11px; }
+
+@media (max-width: 760px) {
+  .config-grid,.mode-grid { grid-template-columns: 1fr; }
+  .project-sync-stamp { width: 100%; margin: 8px 0 0; padding: 12px 0 0; border-left: 0; border-top: 1px solid #dde1e8; }
 }
