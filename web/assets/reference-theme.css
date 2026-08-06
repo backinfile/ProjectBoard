@@ -3809,7 +3809,7 @@ body {
 
 /* Keep queue and other non-workflow pages inside the mobile viewport. */
 @media (max-width: 920px) {
-  .shell:not(:has(.workflow-context-chrome)) {
+  .shell {
     display: grid;
     grid-template-rows: 58px 1fr;
     width: 100%;
@@ -3817,7 +3817,7 @@ body {
     min-width: 0;
   }
 
-  .shell:not(:has(.workflow-context-chrome)) .mast {
+  .shell .mast {
     position: sticky;
     top: 0;
     z-index: 32;
@@ -3828,14 +3828,14 @@ body {
     border-bottom: 1px solid var(--line);
   }
 
-  .shell:not(:has(.workflow-context-chrome)) .workspace-grid,
-  .shell:not(:has(.workflow-context-chrome)) .workspace {
+  .shell .workspace-grid,
+  .shell .workspace {
     width: 100%;
     max-width: 100%;
     min-width: 0;
   }
 
-  .shell:not(:has(.workflow-context-chrome)) .rail {
+  .shell .rail {
     position: sticky;
     inset: auto;
     top: 58px;
@@ -3847,8 +3847,84 @@ body {
     border-bottom: 1px solid var(--line);
   }
 
-  .shell:not(:has(.workflow-context-chrome)) .workspace {
+  .shell .workspace {
     margin-left: 0;
     min-height: calc(100svh - 116px);
+  }
+}
+
+/* Task details and project settings use the shared project page architecture. */
+.task-detail-page-head .task-detail-back {
+  margin: 0 0 18px;
+  padding: 0;
+}
+
+.task-detail-page-head .page-title {
+  align-items: flex-start;
+}
+
+.task-detail-page-head .task-workflow-scroll {
+  width: 100%;
+  max-width: 100%;
+  margin: 28px 0 -26px;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.task-detail-page-content {
+  padding-top: 28px;
+}
+
+.task-detail-page-content .task-detail-grid {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.task-detail-page-content .task-conversation {
+  background: transparent;
+}
+
+.task-detail-page-content .task-thread {
+  padding-left: 0;
+}
+
+.task-detail-page-content .task-composer {
+  padding-left: 0;
+  background: linear-gradient(0deg, var(--canvas) 72%, rgba(244,245,247,0));
+}
+
+.project-settings-page .project-settings-tabs {
+  gap: 28px;
+  padding-top: 0;
+}
+
+.project-settings-page .project-settings-panel {
+  padding-top: 30px;
+}
+
+@media (max-width: 620px) {
+  .task-detail-page-head .page-actions {
+    width: 100%;
+  }
+
+  .task-detail-page-head .page-actions .button {
+    flex: 1 1 0;
+  }
+
+  .task-detail-page-head .task-workflow-scroll {
+    max-width: calc(100% + 30px);
+    margin: 22px -15px -16px;
+    padding: 0 15px;
+  }
+
+  .task-detail-page-content {
+    padding-top: 18px;
+  }
+
+  .task-detail-page-content .task-thread,
+  .task-detail-page-content .task-composer {
+    padding-right: 0;
+    padding-left: 0;
   }
 }

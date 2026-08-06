@@ -122,7 +122,7 @@ func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
 	}
 }
 
-func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
+func TestTaskWorkflowUsesSharedProjectPageStructure(t *testing.T) {
 	app, err := Files.ReadFile("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -134,9 +134,6 @@ func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
 	appSource := string(app)
 	cssSource := string(css)
 	for _, marker := range []string{
-		"workflow-context-topbar",
-		"workflow-context-tabs",
-		"task-detail-shell",
 		"task-workflow-track",
 		"task-conversation",
 		"task-inspector",
@@ -144,20 +141,39 @@ func TestTaskWorkflowMatchesVariantAStructure(t *testing.T) {
 		"task-drawer-body",
 		"task-drawer-footer",
 		"stage-evidence-list",
-		"project-settings-shell",
 		"project-prompt-form",
 		"project-action-form",
 	} {
 		if !strings.Contains(appSource, marker) {
-			t.Errorf("task workflow is missing Variant A structure %q", marker)
+			t.Errorf("task workflow is missing structure %q", marker)
 		}
 		if !strings.Contains(cssSource, "."+marker) {
-			t.Errorf("task workflow is missing Variant A styling for %q", marker)
+			t.Errorf("task workflow is missing styling for %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`class="page-head task-detail-page-head"`,
+		`class="content task-detail-page-content"`,
+		`header(t('projectSettings')`,
+		`class="content project-settings-page"`,
+	} {
+		if !strings.Contains(appSource, marker) {
+			t.Errorf("task workflow is missing shared project page structure %q", marker)
+		}
+	}
+	for _, legacy := range []string{
+		`workflowContextChrome('task'`,
+		`workflowContextChrome('settings'`,
+		`class="task-detail-shell"`,
+		`className='project-settings-shell'`,
+	} {
+		if strings.Contains(appSource, legacy) {
+			t.Errorf("task workflow still renders prototype-only structure %q", legacy)
 		}
 	}
 	for _, copy := range []string{"executionContext", "projectSettingsDescription"} {
 		if !strings.Contains(appSource, copy) {
-			t.Errorf("task workflow is missing preview-aligned copy %q", copy)
+			t.Errorf("task workflow is missing required copy %q", copy)
 		}
 	}
 	if strings.Contains(appSource, "$('.context-message')?.remove()") {
