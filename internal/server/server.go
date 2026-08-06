@@ -1,8 +1,10 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +116,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/agent/pair", s.handle(s.pairAgent))
 	mux.HandleFunc("POST /api/agent/poll", s.handle(s.pollAgent))
 	mux.HandleFunc("POST /api/agent/assignments/{id}/accept", s.handle(s.claimAssignment))
+	mux.HandleFunc("POST /api/agent/work-items/{id}/subtasks", s.handle(s.createAgentSubtask))
+	mux.HandleFunc("POST /api/agent/work-items/{id}/stage", s.handle(s.moveAgentWorkItemStage))
 	mux.HandleFunc("POST /api/agent/runs/{id}/heartbeat", s.handle(s.heartbeatRun))
 	mux.HandleFunc("POST /api/agent/runs/{id}/release", s.handle(s.releaseRun))
 	mux.HandleFunc("POST /api/agent/projects/{id}/sync-commits", s.handle(s.syncProjectCommitsAgent))
@@ -146,6 +150,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/enable", s.handle(s.enableUser))
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.handle(s.resetPassword))
 	mux.HandleFunc("POST /api/agents", s.handle(s.createAgent))
+	mux.HandleFunc("GET /api/agents", s.handle(s.listAgents))
 	mux.HandleFunc("POST /api/agents/{id}/pairing-codes", s.handle(s.createPairingCode))
 	mux.HandleFunc("GET /api/provider-authorizations", s.handle(s.listAuthorizations))
 	mux.HandleFunc("POST /api/provider-authorizations", s.handle(s.createAuthorization))
@@ -171,8 +176,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/work-items", s.handle(s.createWorkItem))
 	mux.HandleFunc("GET /api/work-items/{id}", s.handle(s.getWorkItem))
 	mux.HandleFunc("PATCH /api/work-items/{id}", s.handle(s.updateWorkItem))
+	mux.HandleFunc("POST /api/work-items/{id}/stage", s.handle(s.moveWorkItemStage))
 	mux.HandleFunc("POST /api/work-items/{id}/assign", s.handle(s.assignWorkItem))
 	mux.HandleFunc("POST /api/work-items/{id}/messages", s.handle(s.postMessage))
+	mux.HandleFunc("POST /api/work-items/{id}/attachments", s.handle(s.uploadAttachment))
+	mux.HandleFunc("GET /api/attachments/{attachmentId}", s.handle(s.downloadAttachment))
+	mux.HandleFunc("PUT /api/work-items/{id}/followers", s.handle(s.updateWorkItemFollowers))
 	mux.HandleFunc("POST /api/work-items/{id}/block", s.handle(s.blockWorkItem))
 	mux.HandleFunc("POST /api/work-items/{id}/unblock", s.handle(s.unblockWorkItem))
 	mux.HandleFunc("POST /api/work-items/{id}/abandon", s.handle(s.abandonWorkItem))
@@ -180,6 +189,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/work-items/{id}/submit-execution", s.handle(s.submitExecution))
 	mux.HandleFunc("POST /api/work-items/{id}/acceptance-attempts", s.handle(s.submitAcceptance))
 	mux.HandleFunc("GET /api/activity", s.handle(s.activity))
+	mux.HandleFunc("GET /api/notifications", s.handle(s.listNotifications))
+	mux.HandleFunc("POST /api/notifications/read-all", s.handle(s.readAllNotifications))
+	mux.HandleFunc("POST /api/notifications/{id}/read", s.handle(s.readNotification))
 	mux.HandleFunc("GET /api/activity/export", s.handle(s.exportActivity))
 	mux.HandleFunc("GET /", s.serveStatic)
 	return mux
@@ -210,6 +222,8 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 		response["result"] = map[string]any{"tools": []any{
 			map[string]any{"name": "poll_assignments", "description": "List unblocked work assigned to this Agent.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 			map[string]any{"name": "claim_assignment", "description": "Claim one assigned work item and create a lease.", "inputSchema": map[string]any{"type": "object", "required": []string{"workItemId", "expectedVersion"}, "properties": map[string]any{"workItemId": map[string]any{"type": "string"}, "expectedVersion": map[string]any{"type": "integer"}}}},
+			map[string]any{"name": "create_subtask", "description": "Create a child task when the active project's subtask policy allows it.", "inputSchema": map[string]any{"type": "object", "required": []string{"parentWorkItemId", "title"}, "properties": map[string]any{"parentWorkItemId": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "descriptionMarkdown": map[string]any{"type": "string"}, "acceptanceCriteriaMarkdown": map[string]any{"type": "string"}, "priority": map[string]any{"type": "string"}, "targetBranch": map[string]any{"type": "string"}}}},
+			map[string]any{"name": "move_task_stage", "description": "Move an actively leased task through discussion, execution, acceptance, or completion.", "inputSchema": map[string]any{"type": "object", "required": []string{"workItemId", "expectedVersion", "targetStage"}, "properties": map[string]any{"workItemId": map[string]any{"type": "string"}, "expectedVersion": map[string]any{"type": "integer"}, "targetStage": map[string]any{"type": "string"}, "noteMarkdown": map[string]any{"type": "string"}}}},
 		}}
 	case "tools/call":
 		if request.Params.Name == "poll_assignments" {
@@ -243,6 +257,53 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.Unmarshal(recorder.Body.Bytes(), &value)
 			content, _ := json.MarshalIndent(value, "", "  ")
 			response["result"] = map[string]any{"content": []any{map[string]any{"type": "text", "text": string(content)}}}
+		} else if request.Params.Name == "create_subtask" {
+			parentID, _ := request.Params.Arguments["parentWorkItemId"].(string)
+			title, _ := request.Params.Arguments["title"].(string)
+			if parentID == "" || strings.TrimSpace(title) == "" {
+				response["error"] = map[string]any{"code": -32602, "message": "parentWorkItemId and title are required"}
+				break
+			}
+			body, _ := json.Marshal(request.Params.Arguments)
+			subrequest := httptest.NewRequest(http.MethodPost, "/api/agent/work-items/"+parentID+"/subtasks", strings.NewReader(string(body)))
+			subrequest.Header.Set("Authorization", r.Header.Get("Authorization"))
+			subrequest.Header.Set("Content-Type", "application/json")
+			subrequest.SetPathValue("id", parentID)
+			recorder := httptest.NewRecorder()
+			s.createAgentSubtask(recorder, subrequest)
+			if recorder.Code >= 300 {
+				var failure any
+				_ = json.Unmarshal(recorder.Body.Bytes(), &failure)
+				response["error"] = map[string]any{"code": -32000, "message": fmt.Sprint(failure)}
+				break
+			}
+			var value any
+			_ = json.Unmarshal(recorder.Body.Bytes(), &value)
+			content, _ := json.MarshalIndent(value, "", "  ")
+			response["result"] = map[string]any{"content": []any{map[string]any{"type": "text", "text": string(content)}}}
+		} else if request.Params.Name == "move_task_stage" {
+			itemID, _ := request.Params.Arguments["workItemId"].(string)
+			if itemID == "" {
+				response["error"] = map[string]any{"code": -32602, "message": "workItemId is required"}
+				break
+			}
+			body, _ := json.Marshal(request.Params.Arguments)
+			subrequest := httptest.NewRequest(http.MethodPost, "/api/agent/work-items/"+itemID+"/stage", strings.NewReader(string(body)))
+			subrequest.Header.Set("Authorization", r.Header.Get("Authorization"))
+			subrequest.Header.Set("Content-Type", "application/json")
+			subrequest.SetPathValue("id", itemID)
+			recorder := httptest.NewRecorder()
+			s.moveAgentWorkItemStage(recorder, subrequest)
+			if recorder.Code >= 300 {
+				var failure any
+				_ = json.Unmarshal(recorder.Body.Bytes(), &failure)
+				response["error"] = map[string]any{"code": -32000, "message": fmt.Sprint(failure)}
+				break
+			}
+			var value any
+			_ = json.Unmarshal(recorder.Body.Bytes(), &value)
+			content, _ := json.MarshalIndent(value, "", "  ")
+			response["result"] = map[string]any{"content": []any{map[string]any{"type": "text", "text": string(content)}}}
 		} else {
 			response["error"] = map[string]any{"code": -32601, "message": "unknown tool"}
 		}
@@ -253,19 +314,22 @@ func (s *Server) mcpHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pollAssignments(agentID string) ([]map[string]any, error) {
-	rows, err := s.store.DB.Query(`SELECT w.id,w.project_id,w.number,w.title,w.priority,w.stage,w.target_branch,w.version FROM work_items w JOIN agent_project_grants g ON g.project_id=w.project_id WHERE g.agent_id=? AND w.assignee_kind='agent' AND w.assignee_id=? AND w.assignment_state='reserved' AND w.blocked_at IS NULL AND w.stage NOT IN('completed','abandoned') AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d JOIN work_items x ON x.id=d.depends_on_id WHERE d.work_item_id=w.id AND x.stage<>'completed') ORDER BY CASE w.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,w.created_at`, agentID, agentID)
+	rows, err := s.store.DB.Query(`SELECT w.id,w.project_id,w.number,w.title,w.priority,w.stage,w.target_branch,w.version,p.allow_subtasks,p.allow_agent_auto_close,p.allow_agent_auto_close_subtasks,p.agent_prompts_json FROM work_items w JOIN agent_project_grants g ON g.project_id=w.project_id JOIN projects p ON p.id=w.project_id WHERE g.agent_id=? AND p.allow_agent_execution=1 AND w.assignee_kind='agent' AND w.assignee_id=? AND w.assignment_state='reserved' AND w.blocked_at IS NULL AND w.stage NOT IN('completed','order_closed','abandoned') AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d JOIN work_items x ON x.id=d.depends_on_id WHERE d.work_item_id=w.id AND x.stage NOT IN('completed','order_closed')) ORDER BY CASE w.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,w.created_at`, agentID, agentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, projectID, title, priority, stage, branch string
+		var id, projectID, title, priority, stage, branch, promptsRaw string
 		var number, version int64
-		if err = rows.Scan(&id, &projectID, &number, &title, &priority, &stage, &branch, &version); err != nil {
+		var allowSubtasks, allowAutoClose, allowAutoCloseSubtasks int
+		if err = rows.Scan(&id, &projectID, &number, &title, &priority, &stage, &branch, &version, &allowSubtasks, &allowAutoClose, &allowAutoCloseSubtasks, &promptsRaw); err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]any{"id": id, "project_id": projectID, "number": number, "title": title, "priority": priority, "stage": stage, "target_branch": branch, "version": version})
+		prompts := []string{}
+		_ = json.Unmarshal([]byte(promptsRaw), &prompts)
+		items = append(items, map[string]any{"id": id, "project_id": projectID, "number": number, "title": title, "priority": priority, "stage": stage, "target_branch": branch, "version": version, "projectPolicy": map[string]any{"allowSubtasks": allowSubtasks != 0, "allowAgentAutoClose": allowAutoClose != 0, "allowAgentAutoCloseSubtasks": allowAutoCloseSubtasks != 0, "agentPrompts": prompts}})
 	}
 	return items, rows.Err()
 }
@@ -507,7 +571,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.repository_url,p.remote_name,p.default_target_branch,p.allowed_target_branches_json,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.discussion_mode,p.execution_mode,p.acceptance_mode,p.config_version FROM projects p`
+	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.repository_url,p.remote_name,p.default_target_branch,p.allowed_target_branches_json,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.discussion_mode,p.execution_mode,p.acceptance_mode,p.allow_agent_execution,p.allow_agent_auto_close,p.allow_subtasks,p.allow_agent_auto_close_subtasks,p.agent_prompts_json,p.config_version FROM projects p`
 	args := []any{}
 	if a.Role != "administrator" {
 		query += " JOIN project_memberships m ON m.project_id=p.id WHERE m.user_id=?"
@@ -575,8 +639,34 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	repo := stringValue(in, "repositoryUrl", current["repositoryUrl"])
 	branch := stringValue(in, "defaultTargetBranch", current["defaultTargetBranch"])
 	allowed := valueOr(in, "allowedTargetBranches", current["allowedTargetBranches"])
-	raw, _ := json.Marshal(allowed)
-	_, err := s.store.DB.Exec("UPDATE projects SET name=?,repository_url=?,default_target_branch=?,allowed_target_branches_json=?,config_version=config_version+1,updated_at=? WHERE id=?", name, repo, branch, string(raw), now(), id)
+	allowedRaw, _ := json.Marshal(allowed)
+	prompts := valueOr(in, "agentPrompts", current["agentPrompts"])
+	promptList, validPrompts := prompts.([]any)
+	if !validPrompts {
+		if strings, ok := prompts.([]string); ok {
+			promptList = make([]any, len(strings))
+			for index, prompt := range strings {
+				promptList[index] = prompt
+			}
+			validPrompts = true
+		}
+	}
+	if !validPrompts {
+		writeError(w, &domainError{422, "INVALID_AGENT_PROMPTS", "Agent prompts must be a list of text entries", nil})
+		return
+	}
+	cleanPrompts := make([]string, 0, len(promptList))
+	for _, value := range promptList {
+		prompt, ok := value.(string)
+		prompt = strings.TrimSpace(prompt)
+		if !ok || prompt == "" || len(prompt) > 2000 {
+			writeError(w, &domainError{422, "INVALID_AGENT_PROMPT", "Each Agent prompt must contain 1-2000 characters", nil})
+			return
+		}
+		cleanPrompts = append(cleanPrompts, prompt)
+	}
+	promptsRaw, _ := json.Marshal(cleanPrompts)
+	_, err := s.store.DB.Exec("UPDATE projects SET name=?,repository_url=?,default_target_branch=?,allowed_target_branches_json=?,allow_agent_execution=?,allow_agent_auto_close=?,allow_subtasks=?,allow_agent_auto_close_subtasks=?,agent_prompts_json=?,config_version=config_version+1,updated_at=? WHERE id=?", name, repo, branch, string(allowedRaw), boolInt(boolValue(in, "allowAgentExecution", current["allowAgentExecution"])), boolInt(boolValue(in, "allowAgentAutoClose", current["allowAgentAutoClose"])), boolInt(boolValue(in, "allowSubtasks", current["allowSubtasks"])), boolInt(boolValue(in, "allowAgentAutoCloseSubtasks", current["allowAgentAutoCloseSubtasks"])), string(promptsRaw), now(), id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -585,7 +675,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, project)
 }
 func (s *Server) project(id string) (map[string]any, error) {
-	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,repository_url,remote_name,default_target_branch,allowed_target_branches_json,validation_commands_json,forbidden_paths_json,agent_rules_markdown,discussion_mode,execution_mode,acceptance_mode,config_version FROM projects WHERE id=?`, id)
+	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,repository_url,remote_name,default_target_branch,allowed_target_branches_json,validation_commands_json,forbidden_paths_json,agent_rules_markdown,discussion_mode,execution_mode,acceptance_mode,allow_agent_execution,allow_agent_auto_close,allow_subtasks,allow_agent_auto_close_subtasks,agent_prompts_json,config_version FROM projects WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +987,34 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	s.audit(a, "agent.created", "agent", id, "", map[string]any{"name": in.Name})
 	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "enabled": true})
 }
+func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,COALESCE(k.expiry_policy,'permanent'),(SELECT COUNT(*) FROM agent_tokens t WHERE t.agent_id=a.id AND t.revoked_at IS NULL),(SELECT MAX(created_at) FROM runner_pairing_codes c WHERE c.agent_id=a.id) FROM agents a LEFT JOIN agent_key_settings k ON k.agent_id=a.id ORDER BY a.name`)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, name, purpose, status, policy string
+		var tokens int
+		var lastKey *string
+		if err = rows.Scan(&id, &name, &purpose, &status, &policy, &tokens, &lastKey); err != nil {
+			writeError(w, err)
+			return
+		}
+		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "keyPolicy": policy, "activeTokenCount": tokens, "lastKeyCreatedAt": lastKey})
+	}
+	writeJSON(w, 200, out)
+}
 func (s *Server) createPairingCode(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -907,16 +1025,58 @@ func (s *Server) createPairingCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentID := r.PathValue("id")
-	code := "PB-" + strings.ToUpper(security.Token(6))
-	code = strings.ReplaceAll(code, "_", "A")
-	code = strings.ReplaceAll(code, "-", "-")
-	expires := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339Nano)
-	_, err := s.store.DB.Exec("INSERT INTO runner_pairing_codes(id,agent_id,code_hash,expires_at,created_at) VALUES(?,?,?,?,?)", security.Token(18), agentID, security.HashOpaque(code), expires, now())
+	var in struct {
+		ExpiryPolicy string `json:"expiryPolicy"`
+	}
+	decode(r, &in)
+	if in.ExpiryPolicy == "" {
+		in.ExpiryPolicy = "permanent"
+	}
+	allowed := map[string]bool{"disabled": true, "1h": true, "1d": true, "1mo": true, "permanent": true}
+	if !allowed[in.ExpiryPolicy] {
+		writeError(w, &domainError{422, "INVALID_EXPIRY_POLICY", "Unsupported Agent Key expiry policy", nil})
+		return
+	}
+	stamp := now()
+	err := s.store.Write(r.Context(), func(tx *sql.Tx) error {
+		if _, err := tx.Exec("INSERT INTO agent_key_settings(agent_id,expiry_policy,updated_at) VALUES(?,?,?) ON CONFLICT(agent_id) DO UPDATE SET expiry_policy=excluded.expiry_policy,updated_at=excluded.updated_at", agentID, in.ExpiryPolicy, stamp); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE runner_pairing_codes SET invalidated_at=? WHERE agent_id=? AND consumed_at IS NULL AND invalidated_at IS NULL", stamp, agentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec("UPDATE agent_tokens SET revoked_at=? WHERE agent_id=? AND revoked_at IS NULL", stamp, agentID)
+		return err
+	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, 201, map[string]any{"code": code, "expiresAt": expires, "command": "projectboard-runner connect " + code})
+	if in.ExpiryPolicy == "disabled" {
+		s.audit(a, "agent.key_disabled", "agent", agentID, "", map[string]any{})
+		writeJSON(w, 200, map[string]any{"disabled": true, "expiryPolicy": in.ExpiryPolicy})
+		return
+	}
+	code := "PB-" + strings.ToUpper(security.Token(6))
+	code = strings.ReplaceAll(code, "_", "A")
+	code = strings.ReplaceAll(code, "-", "-")
+	expiresAt := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	switch in.ExpiryPolicy {
+	case "1h":
+		expiresAt = time.Now().UTC().Add(time.Hour)
+	case "1d":
+		expiresAt = time.Now().UTC().Add(24 * time.Hour)
+	case "1mo":
+		expiresAt = time.Now().UTC().AddDate(0, 1, 0)
+	}
+	expires := expiresAt.Format(time.RFC3339Nano)
+	_, err = s.store.DB.Exec("INSERT INTO runner_pairing_codes(id,agent_id,code_hash,expires_at,created_at) VALUES(?,?,?,?,?)", security.Token(18), agentID, security.HashOpaque(code), expires, stamp)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(a, "agent.key_reset", "agent", agentID, "", map[string]any{"expiryPolicy": in.ExpiryPolicy})
+	writeJSON(w, 201, map[string]any{"code": code, "expiresAt": expires, "expiryPolicy": in.ExpiryPolicy, "command": "projectboard-runner connect " + code})
 }
 func (s *Server) pairAgent(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -930,7 +1090,7 @@ func (s *Server) pairAgent(w http.ResponseWriter, r *http.Request) {
 	var codeID, agentID, expires string
 	err := s.store.DB.QueryRow("SELECT id,agent_id,expires_at FROM runner_pairing_codes WHERE code_hash=? AND consumed_at IS NULL AND invalidated_at IS NULL", security.HashOpaque(in.Code)).Scan(&codeID, &agentID, &expires)
 	if err != nil || expires <= now() {
-		writeError(w, &domainError{401, "PAIRING_CODE_INVALID", "Pairing code is invalid or expired", nil})
+		writeError(w, &domainError{401, "PAIRING_CODE_INVALID", "Agent Key is invalid or expired", nil})
 		return
 	}
 	token, deviceID := security.Token(32), security.Token(18)
@@ -942,7 +1102,7 @@ func (s *Server) pairAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		n, _ := result.RowsAffected()
 		if n != 1 {
-			return &domainError{409, "PAIRING_CODE_USED", "Pairing code already used", nil}
+			return &domainError{409, "PAIRING_CODE_USED", "Agent Key has already been used", nil}
 		}
 		if _, err = tx.Exec("INSERT INTO agent_tokens(id,agent_id,token_hash,created_at) VALUES(?,?,?,?)", security.Token(18), agentID, security.HashOpaque(token), stamp); err != nil {
 			return err
@@ -1004,7 +1164,8 @@ func (s *Server) claimAssignment(w http.ResponseWriter, r *http.Request) {
 		ExpectedVersion int64 `json:"expectedVersion"`
 	}
 	decode(r, &in)
-	var leaseID, runID, expires string
+	var leaseID, runID, expires, promptsRaw string
+	var allowSubtasks, allowAutoClose, allowAutoCloseSubtasks int
 	err := s.store.Write(r.Context(), func(tx *sql.Tx) error {
 		stamp := now()
 		_, _ = tx.Exec("UPDATE leases SET released_at=?,release_reason='expired' WHERE released_at IS NULL AND expires_at<=?", stamp, stamp)
@@ -1021,7 +1182,14 @@ func (s *Server) claimAssignment(w http.ResponseWriter, r *http.Request) {
 		if kind != "agent" || assignee != a.ID {
 			return &domainError{409, "NOT_ASSIGNED", "Work item is not assigned to this agent", nil}
 		}
-		if blockedPtr != nil || stage == "completed" || stage == "abandoned" {
+		var allowExecution int
+		if err := tx.QueryRow("SELECT allow_agent_execution,allow_subtasks,allow_agent_auto_close,allow_agent_auto_close_subtasks,agent_prompts_json FROM projects WHERE id=?", projectID).Scan(&allowExecution, &allowSubtasks, &allowAutoClose, &allowAutoCloseSubtasks, &promptsRaw); err != nil {
+			return err
+		}
+		if allowExecution == 0 {
+			return &domainError{409, "AGENT_EXECUTION_DISABLED", "Agent execution is disabled for this project", nil}
+		}
+		if blockedPtr != nil || stage == "completed" || stage == "order_closed" || stage == "abandoned" {
 			return &domainError{409, "NOT_CLAIMABLE", "Work item cannot be claimed", nil}
 		}
 		var active int
@@ -1051,7 +1219,128 @@ func (s *Server) claimAssignment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, _ := s.queue.Get(r.Context(), itemID)
-	writeJSON(w, 201, map[string]any{"id": leaseID, "leaseId": leaseID, "expiresAt": expires, "runId": runID, "workItem": item})
+	prompts := []string{}
+	_ = json.Unmarshal([]byte(promptsRaw), &prompts)
+	writeJSON(w, 201, map[string]any{"id": leaseID, "leaseId": leaseID, "expiresAt": expires, "runId": runID, "workItem": item, "projectPolicy": map[string]any{"allowSubtasks": allowSubtasks != 0, "allowAgentAutoClose": allowAutoClose != 0, "allowAgentAutoCloseSubtasks": allowAutoCloseSubtasks != 0, "agentPrompts": prompts}})
+}
+
+func (s *Server) createAgentSubtask(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.agent(w, r)
+	if !ok {
+		return
+	}
+	parentID := r.PathValue("id")
+	var in struct {
+		Title                      string `json:"title"`
+		DescriptionMarkdown        string `json:"descriptionMarkdown"`
+		AcceptanceCriteriaMarkdown string `json:"acceptanceCriteriaMarkdown"`
+		Priority                   string `json:"priority"`
+		TargetBranch               string `json:"targetBranch"`
+	}
+	decode(r, &in)
+	if strings.TrimSpace(in.Title) == "" {
+		writeError(w, &domainError{422, "TITLE_REQUIRED", "Subtask title is required", nil})
+		return
+	}
+	if in.Priority == "" {
+		in.Priority = "medium"
+	}
+	if !map[string]bool{"urgent": true, "high": true, "medium": true, "low": true}[in.Priority] {
+		writeError(w, &domainError{422, "INVALID_PRIORITY", "Unsupported subtask priority", nil})
+		return
+	}
+	var projectID, stage string
+	var allowExecution, allowSubtasks, childCount int
+	err := s.store.DB.QueryRow(`SELECT w.project_id,w.stage,p.allow_agent_execution,p.allow_subtasks,
+		(SELECT COUNT(*) FROM work_items c WHERE c.parent_id=w.id AND c.stage NOT IN('completed','order_closed','abandoned'))
+		FROM work_items w JOIN projects p ON p.id=w.project_id
+		WHERE w.id=? AND w.assignee_kind='agent' AND w.assignee_id=?
+		AND EXISTS(SELECT 1 FROM leases l WHERE l.work_item_id=w.id AND l.agent_id=? AND l.released_at IS NULL AND l.expires_at>?)`, parentID, a.ID, a.ID, now()).Scan(&projectID, &stage, &allowExecution, &allowSubtasks, &childCount)
+	if err == sql.ErrNoRows {
+		writeError(w, &domainError{409, "ACTIVE_PARENT_REQUIRED", "An active lease on the assigned parent task is required", nil})
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if allowExecution == 0 || allowSubtasks == 0 {
+		writeError(w, &domainError{409, "SUBTASKS_DISABLED", "Agent-created subtasks are disabled for this project", nil})
+		return
+	}
+	if stage == "completed" || stage == "order_closed" || stage == "abandoned" {
+		writeError(w, &domainError{409, "TERMINAL", "A terminal task cannot create subtasks", nil})
+		return
+	}
+	if childCount >= 20 {
+		writeError(w, &domainError{409, "SUBTASK_LIMIT", "The active child task limit has been reached", nil})
+		return
+	}
+	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: "agent", ID: a.ID}, workqueue.CreateInput{
+		ProjectID:                  projectID,
+		ParentID:                   parentID,
+		Title:                      strings.TrimSpace(in.Title),
+		DescriptionMarkdown:        in.DescriptionMarkdown,
+		AcceptanceCriteriaMarkdown: in.AcceptanceCriteriaMarkdown,
+		Priority:                   in.Priority,
+		TargetBranch:               in.TargetBranch,
+		AssigneeKind:               "agent",
+		AssigneeID:                 a.ID,
+		Stage:                      "todo",
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(a, "work_item.subtask_created", "work_item", item.ID, projectID, map[string]any{"parentId": parentID})
+	writeJSON(w, 201, item)
+}
+
+func (s *Server) moveAgentWorkItemStage(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.agent(w, r)
+	if !ok {
+		return
+	}
+	itemID := r.PathValue("id")
+	var in struct {
+		ExpectedVersion int64  `json:"expectedVersion"`
+		TargetStage     string `json:"targetStage"`
+		NoteMarkdown    string `json:"noteMarkdown"`
+	}
+	decode(r, &in)
+	if !map[string]bool{"discussion": true, "execution": true, "acceptance": true, "completed": true}[in.TargetStage] {
+		writeError(w, &domainError{422, "INVALID_AGENT_STAGE", "Agent stage must be discussion, execution, acceptance, or completed", nil})
+		return
+	}
+	var allowExecution, allowTaskClose, allowSubtaskClose int
+	var parentID *string
+	err := s.store.DB.QueryRow(`SELECT p.allow_agent_execution,p.allow_agent_auto_close,p.allow_agent_auto_close_subtasks,w.parent_id
+		FROM work_items w JOIN projects p ON p.id=w.project_id
+		WHERE w.id=? AND w.assignee_kind='agent' AND w.assignee_id=?
+		AND EXISTS(SELECT 1 FROM leases l WHERE l.work_item_id=w.id AND l.agent_id=? AND l.released_at IS NULL AND l.expires_at>?)`, itemID, a.ID, a.ID, now()).Scan(&allowExecution, &allowTaskClose, &allowSubtaskClose, &parentID)
+	if err == sql.ErrNoRows {
+		writeError(w, &domainError{409, "ACTIVE_LEASE_REQUIRED", "An active lease on the assigned task is required", nil})
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if allowExecution == 0 {
+		writeError(w, &domainError{409, "AGENT_EXECUTION_DISABLED", "Agent execution is disabled for this project", nil})
+		return
+	}
+	target := in.TargetStage
+	if target == "completed" && ((parentID == nil && allowTaskClose != 0) || (parentID != nil && allowSubtaskClose != 0)) {
+		target = "order_closed"
+	}
+	item, err := s.queue.MoveStage(r.Context(), workqueue.Actor{Type: "agent", ID: a.ID}, itemID, in.ExpectedVersion, target, in.NoteMarkdown)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(a, "work_item.stage_moved", "work_item", item.ID, item.ProjectID, map[string]any{"targetStage": target})
+	writeJSON(w, 200, item)
 }
 func (s *Server) heartbeatRun(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.agent(w, r)
@@ -1123,6 +1412,7 @@ func (s *Server) runnerEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "comment", "任务有新的 Agent 消息", in.Markdown, mentionedUserIDs(s.store.DB, in.Markdown))
 	writeJSON(w, 201, item)
 }
 func (s *Server) runnerSubmit(w http.ResponseWriter, r *http.Request) {
@@ -1157,6 +1447,7 @@ func (s *Server) runnerSubmit(w http.ResponseWriter, r *http.Request) {
 	stamp := now()
 	_, _ = s.store.DB.Exec("UPDATE leases SET released_at=?,release_reason='submitted' WHERE id=?", stamp, in.LeaseID)
 	_, _ = s.store.DB.Exec("UPDATE runner_runs SET ended_at=?,end_reason='submitted' WHERE id=?", stamp, r.PathValue("id"))
+	s.notifyRelated(item, a, "stage_changed", "Agent 已提交执行结果，任务进入验收", item.Title, nil)
 	writeJSON(w, 200, item)
 }
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
@@ -1169,7 +1460,8 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,CASE WHEN g.agent_id IS NULL THEN 0 ELSE 1 END FROM agents a LEFT JOIN agent_project_grants g ON g.agent_id=a.id AND g.project_id=? ORDER BY a.name`, projectID)
+	heartbeatCutoff := time.Now().UTC().Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,CASE WHEN g.agent_id IS NULL THEN 0 ELSE 1 END,CASE WHEN COALESCE(k.expiry_policy,'permanent')<>'disabled' AND EXISTS(SELECT 1 FROM agent_tokens t WHERE t.agent_id=a.id AND t.revoked_at IS NULL) THEN 1 ELSE 0 END,CASE WHEN EXISTS(SELECT 1 FROM runner_devices d WHERE d.agent_id=a.id AND d.last_heartbeat_at>=?) THEN 1 ELSE 0 END FROM agents a LEFT JOIN agent_project_grants g ON g.agent_id=a.id AND g.project_id=? LEFT JOIN agent_key_settings k ON k.agent_id=a.id ORDER BY a.name`, heartbeatCutoff, projectID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1178,9 +1470,9 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var id, name, purpose, status string
-		var enabled int
-		_ = rows.Scan(&id, &name, &purpose, &status, &enabled)
-		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": enabled != 0})
+		var enabled, keyActive, runnerConnected int
+		_ = rows.Scan(&id, &name, &purpose, &status, &enabled, &keyActive, &runnerConnected)
+		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": enabled != 0, "keyActive": keyActive != 0, "runnerConnected": runnerConnected != 0})
 	}
 	writeJSON(w, 200, out)
 }
@@ -1419,7 +1711,12 @@ func (s *Server) repositoryGrant(projectID string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"id": id, "projectId": projectID, "authorizationId": authorizationID, "authorizationName": authorizationName, "provider": provider, "repositoryId": repositoryID, "repositoryName": name, "cloneUrl": cloneURL, "defaultBranch": branch, "accessLevel": access, "approvedBy": approvedBy, "approvedAt": approvedAt}, nil
+	grant := map[string]any{"id": id, "projectId": projectID, "authorizationId": authorizationID, "authorizationName": authorizationName, "provider": provider, "repositoryId": repositoryID, "repositoryName": name, "cloneUrl": cloneURL, "defaultBranch": branch, "accessLevel": access, "approvedBy": approvedBy, "approvedAt": approvedAt}
+	var lastSync string
+	if s.store.DB.QueryRow("SELECT last_synced_at FROM project_commit_sync_state WHERE project_id=?", projectID).Scan(&lastSync) == nil {
+		grant["lastSyncAt"] = lastSync
+	}
+	return grant, nil
 }
 
 func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -1428,26 +1725,42 @@ func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		RequestID    string `json:"requestId"`
-		ProjectID    string `json:"projectId"`
-		Title        string `json:"title"`
-		Description  string `json:"descriptionMarkdown"`
-		Criteria     string `json:"acceptanceCriteriaMarkdown"`
-		Priority     string `json:"priority"`
-		TargetBranch string `json:"targetBranch"`
-		AssigneeKind string `json:"assigneeKind"`
-		AssigneeID   string `json:"assigneeId"`
-		ParentID     string `json:"parentId"`
+		RequestID      string   `json:"requestId"`
+		ProjectID      string   `json:"projectId"`
+		Title          string   `json:"title"`
+		Description    string   `json:"descriptionMarkdown"`
+		Criteria       string   `json:"acceptanceCriteriaMarkdown"`
+		Priority       string   `json:"priority"`
+		TargetBranch   string   `json:"targetBranch"`
+		AssigneeKind   string   `json:"assigneeKind"`
+		AssigneeID     string   `json:"assigneeId"`
+		ParentID       string   `json:"parentId"`
+		FollowerIDs    []string `json:"followerIds"`
+		Stage          string   `json:"stage"`
+		DiscussionMode string   `json:"discussionMode"`
+		ExecutionMode  string   `json:"executionMode"`
+		AcceptanceMode string   `json:"acceptanceMode"`
 	}
 	decode(r, &in)
 	if err := s.requireDeveloper(in.ProjectID, a); err != nil {
 		writeError(w, err)
 		return
 	}
-	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID})
+	if err := s.validateFollowers(in.ProjectID, in.FollowerIDs); err != nil {
+		writeError(w, err)
+		return
+	}
+	if !validTaskConfiguration(in.Stage, in.DiscussionMode, in.ExecutionMode, in.AcceptanceMode) {
+		writeError(w, &domainError{422, "INVALID_TASK_CONFIGURATION", "Invalid task stage or automatic progression mode", nil})
+		return
+	}
+	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID, CreatedByUserID: a.ID, FollowerIDs: in.FollowerIDs, Stage: in.Stage, DiscussionMode: in.DiscussionMode, ExecutionMode: in.ExecutionMode, AcceptanceMode: in.AcceptanceMode})
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if in.AssigneeKind == "human" && in.AssigneeID != "" {
+		s.notifyUsers(item, a, "assigned", "你被指派了任务", item.Title, []string{in.AssigneeID})
 	}
 	writeJSON(w, 201, item)
 }
@@ -1466,19 +1779,88 @@ func (s *Server) updateWorkItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ExpectedVersion int64  `json:"expectedVersion"`
-		Title           string `json:"title"`
-		Description     string `json:"descriptionMarkdown"`
-		Criteria        string `json:"acceptanceCriteriaMarkdown"`
-		Priority        string `json:"priority"`
-		TargetBranch    string `json:"targetBranch"`
+		ExpectedVersion int64    `json:"expectedVersion"`
+		Title           string   `json:"title"`
+		Description     string   `json:"descriptionMarkdown"`
+		Criteria        string   `json:"acceptanceCriteriaMarkdown"`
+		Priority        string   `json:"priority"`
+		TargetBranch    string   `json:"targetBranch"`
+		Stage           string   `json:"stage"`
+		DiscussionMode  string   `json:"discussionMode"`
+		ExecutionMode   string   `json:"executionMode"`
+		AcceptanceMode  string   `json:"acceptanceMode"`
+		AssigneeKind    string   `json:"assigneeKind"`
+		AssigneeID      string   `json:"assigneeId"`
+		FollowerIDs     []string `json:"followerIds"`
+		Configure       bool     `json:"configure"`
 	}
 	decode(r, &in)
-	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch})
+	if in.Configure {
+		if !validTaskConfiguration(in.Stage, in.DiscussionMode, in.ExecutionMode, in.AcceptanceMode) {
+			writeError(w, &domainError{422, "INVALID_TASK_CONFIGURATION", "Invalid task stage or automatic progression mode", nil})
+			return
+		}
+		if err = s.validateFollowers(item.ProjectID, in.FollowerIDs); err != nil {
+			writeError(w, err)
+			return
+		}
+		if in.AssigneeID != "" {
+			var exists int
+			if in.AssigneeKind == "human" {
+				err = s.store.DB.QueryRow("SELECT 1 FROM project_memberships WHERE project_id=? AND user_id=?", item.ProjectID, in.AssigneeID).Scan(&exists)
+			} else if in.AssigneeKind == "agent" {
+				err = s.store.DB.QueryRow("SELECT 1 FROM agent_project_grants WHERE project_id=? AND agent_id=?", item.ProjectID, in.AssigneeID).Scan(&exists)
+			} else {
+				err = sql.ErrNoRows
+			}
+			if err != nil {
+				writeError(w, &domainError{422, "INVALID_ASSIGNEE", "Assignee is not enabled for this project", nil})
+				return
+			}
+		}
+	}
+	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, Stage: in.Stage, DiscussionMode: in.DiscussionMode, ExecutionMode: in.ExecutionMode, AcceptanceMode: in.AcceptanceMode, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, FollowerIDs: in.FollowerIDs, Configure: in.Configure})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "work_item_updated", "任务已更新", item.Title, nil)
+	writeJSON(w, 200, item)
+}
+
+func validTaskConfiguration(stage, discussion, execution, acceptance string) bool {
+	allowedStage := map[string]bool{"": true, "todo": true, "discussion": true, "execution": true, "acceptance": true, "completed": true, "order_closed": true}
+	allowedDiscussion := map[string]bool{"": true, "manual": true, "auto": true}
+	allowedExecution := map[string]bool{"": true, "manual": true, "auto": true}
+	allowedAcceptance := map[string]bool{"": true, "human": true, "agent": true, "auto": true}
+	return allowedStage[stage] && allowedDiscussion[discussion] && allowedExecution[execution] && allowedAcceptance[acceptance]
+}
+func (s *Server) moveWorkItemStage(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(item.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		ExpectedVersion int64  `json:"expectedVersion"`
+		TargetStage     string `json:"targetStage"`
+		Note            string `json:"noteMarkdown"`
+	}
+	decode(r, &in)
+	item, err = s.queue.MoveStage(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, in.ExpectedVersion, in.TargetStage, in.Note)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.notifyRelated(item, a, "stage_changed", "任务阶段已更新", item.Title, nil)
 	writeJSON(w, 200, item)
 }
 func (s *Server) assignWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -1517,6 +1899,7 @@ func (s *Server) assignWorkItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "assigned", "任务负责人已更新", item.Title, []string{in.AssigneeID})
 	writeJSON(w, 201, item)
 }
 func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
@@ -1534,16 +1917,232 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Markdown        string `json:"markdown"`
-		ExpectedVersion int64  `json:"expectedVersion"`
+		Markdown        string   `json:"markdown"`
+		ExpectedVersion int64    `json:"expectedVersion"`
+		AttachmentIDs   []string `json:"attachmentIds"`
 	}
 	decode(r, &in)
+	if strings.TrimSpace(in.Markdown) == "" && len(in.AttachmentIDs) == 0 {
+		writeError(w, &domainError{422, "VALIDATION_ERROR", "Message or attachment is required", nil})
+		return
+	}
+	if len(in.AttachmentIDs) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(in.AttachmentIDs)), ",")
+		args := []any{item.ID}
+		for _, attachmentID := range in.AttachmentIDs {
+			args = append(args, attachmentID)
+		}
+		var count int
+		if err = s.store.DB.QueryRow("SELECT COUNT(*) FROM attachments WHERE work_item_id=? AND entry_id IS NULL AND id IN ("+placeholders+")", args...).Scan(&count); err != nil || count != len(in.AttachmentIDs) {
+			writeError(w, &domainError{422, "INVALID_ATTACHMENT", "Every attachment must belong to this task and be unattached", nil})
+			return
+		}
+	}
+	if strings.TrimSpace(in.Markdown) == "" {
+		in.Markdown = "附件"
+	}
 	item, err = s.queue.AddMessage(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, in.Markdown, in.ExpectedVersion)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	if len(in.AttachmentIDs) > 0 && len(item.Conversation) > 0 {
+		entryID, _ := item.Conversation[len(item.Conversation)-1]["id"].(string)
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(in.AttachmentIDs)), ",")
+		args := []any{entryID, item.ID}
+		for _, attachmentID := range in.AttachmentIDs {
+			args = append(args, attachmentID)
+		}
+		if _, err = s.store.DB.Exec("UPDATE attachments SET entry_id=? WHERE work_item_id=? AND entry_id IS NULL AND id IN ("+placeholders+")", args...); err != nil {
+			writeError(w, err)
+			return
+		}
+		item, _ = s.queue.Get(r.Context(), item.ID)
+	}
+	s.notifyRelated(item, a, "comment", "任务有新评论", in.Markdown, mentionedUserIDs(s.store.DB, in.Markdown))
 	writeJSON(w, 201, item)
+}
+
+func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(item.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
+	if err = r.ParseMultipartForm(25 << 20); err != nil {
+		writeError(w, &domainError{413, "ATTACHMENT_TOO_LARGE", "Attachment must be 25 MB or smaller", nil})
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, &domainError{422, "ATTACHMENT_REQUIRED", "Choose a file to attach", nil})
+		return
+	}
+	defer file.Close()
+	content, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(content) == 0 {
+		writeError(w, &domainError{422, "EMPTY_ATTACHMENT", "Empty attachments are not supported", nil})
+		return
+	}
+	name := filepath.Base(strings.TrimSpace(header.Filename))
+	if name == "." || name == "" {
+		name = "attachment"
+	}
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = http.DetectContentType(content)
+	}
+	digest := sha256.Sum256(content)
+	digestText := hex.EncodeToString(digest[:])
+	var existing map[string]any
+	var existingID, existingEntry, existingName, existingMime, createdAt string
+	var existingSize int64
+	if scanErr := s.store.DB.QueryRow("SELECT id,COALESCE(entry_id,''),original_name,mime,size,created_at FROM attachments WHERE work_item_id=? AND sha256=?", item.ID, digestText).Scan(&existingID, &existingEntry, &existingName, &existingMime, &existingSize, &createdAt); scanErr == nil {
+		existing = map[string]any{"id": existingID, "entry_id": existingEntry, "original_name": existingName, "mime": existingMime, "size": existingSize, "created_at": createdAt}
+		writeJSON(w, 200, existing)
+		return
+	}
+	attachmentID := security.Token(18)
+	storageKey := attachmentID + filepath.Ext(name)
+	attachmentDir := filepath.Join(s.config.DataDir, "attachments")
+	if err = os.MkdirAll(attachmentDir, 0o700); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = os.WriteFile(filepath.Join(attachmentDir, storageKey), content, 0o600); err != nil {
+		writeError(w, err)
+		return
+	}
+	stamp := now()
+	_, err = s.store.DB.Exec("INSERT INTO attachments(id,work_item_id,original_name,mime,size,sha256,storage_key,uploader_type,uploader_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", attachmentID, item.ID, name, mimeType, len(content), digestText, storageKey, a.Type, a.ID, stamp)
+	if err != nil {
+		_ = os.Remove(filepath.Join(attachmentDir, storageKey))
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 201, map[string]any{"id": attachmentID, "entry_id": nil, "original_name": name, "mime": mimeType, "size": len(content), "created_at": stamp})
+}
+
+func (s *Server) downloadAttachment(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	var attachmentID, itemID, projectID, name, mimeType, storageKey string
+	var size int64
+	err := s.store.DB.QueryRow(`SELECT a.id,a.work_item_id,w.project_id,a.original_name,a.mime,a.storage_key,a.size FROM attachments a JOIN work_items w ON w.id=a.work_item_id WHERE a.id=?`, r.PathValue("attachmentId")).Scan(&attachmentID, &itemID, &projectID, &name, &mimeType, &storageKey, &size)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !s.canView(projectID, a) {
+		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
+		return
+	}
+	filePath := filepath.Join(s.config.DataDir, "attachments", filepath.Base(storageKey))
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Content-Length", fmt.Sprint(size))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox")
+	disposition := "attachment"
+	if strings.HasPrefix(mimeType, "image/") || mimeType == "text/markdown" || strings.EqualFold(filepath.Ext(name), ".md") {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, name))
+	http.ServeFile(w, r, filePath)
+}
+
+func (s *Server) validateFollowers(projectID string, followerIDs []string) error {
+	seen := map[string]bool{}
+	for _, userID := range followerIDs {
+		if userID == "" || seen[userID] {
+			continue
+		}
+		seen[userID] = true
+		var exists int
+		if err := s.store.DB.QueryRow("SELECT 1 FROM project_memberships m JOIN users u ON u.id=m.user_id WHERE m.project_id=? AND m.user_id=? AND u.status='active'", projectID, userID).Scan(&exists); err != nil {
+			return &domainError{422, "INVALID_FOLLOWER", "Follower must be an active project member", nil}
+		}
+	}
+	return nil
+}
+
+func (s *Server) updateWorkItemFollowers(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(item.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		ExpectedVersion int64    `json:"expectedVersion"`
+		FollowerIDs     []string `json:"followerIds"`
+	}
+	decode(r, &in)
+	if err = s.validateFollowers(item.ProjectID, in.FollowerIDs); err != nil {
+		writeError(w, err)
+		return
+	}
+	err = s.store.Write(r.Context(), func(tx *sql.Tx) error {
+		var version int64
+		if err := tx.QueryRowContext(r.Context(), "SELECT version FROM work_items WHERE id=?", item.ID).Scan(&version); err != nil {
+			return err
+		}
+		if version != in.ExpectedVersion {
+			return &workqueue.Error{Status: 409, Code: "VERSION_CONFLICT", Message: "Work item version changed"}
+		}
+		if _, err := tx.ExecContext(r.Context(), "DELETE FROM work_item_followers WHERE work_item_id=?", item.ID); err != nil {
+			return err
+		}
+		stamp := now()
+		seen := map[string]bool{}
+		for _, userID := range in.FollowerIDs {
+			if userID == "" || seen[userID] {
+				continue
+			}
+			seen[userID] = true
+			if _, err := tx.ExecContext(r.Context(), "INSERT INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", item.ID, userID, stamp); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(r.Context(), "UPDATE work_items SET version=version+1,updated_at=? WHERE id=?", stamp, item.ID); err != nil {
+			return err
+		}
+		payload, _ := json.Marshal(map[string]any{"followerIds": in.FollowerIDs})
+		_, err := tx.ExecContext(r.Context(), "INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) VALUES(?,?,?,?,?,?,?,?,?)", security.Token(18), item.ID, "followers_changed", item.Stage, a.Type, a.ID, string(payload), version+1, stamp)
+		return err
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	item, err = s.queue.Get(r.Context(), item.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.notifyRelated(item, a, "followers_changed", "任务关注者已更新", item.Title, in.FollowerIDs)
+	writeJSON(w, 200, item)
 }
 func (s *Server) blockWorkItem(w http.ResponseWriter, r *http.Request)   { s.setBlocked(w, r, true) }
 func (s *Server) unblockWorkItem(w http.ResponseWriter, r *http.Request) { s.setBlocked(w, r, false) }
@@ -1571,6 +2170,7 @@ func (s *Server) setBlocked(w http.ResponseWriter, r *http.Request, blocked bool
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "blocked_changed", "任务阻塞状态已更新", item.Title, nil)
 	writeJSON(w, 201, item)
 }
 func (s *Server) abandonWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -1597,6 +2197,7 @@ func (s *Server) abandonWorkItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "abandoned", "任务已放弃", item.Title, nil)
 	writeJSON(w, 201, item)
 }
 func (s *Server) getWorkItem(w http.ResponseWriter, r *http.Request) {
@@ -1625,7 +2226,7 @@ func (s *Server) listWorkItems(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
 		return
 	}
-	query := `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,blocked_at,blocked_reason,version,created_at,updated_at,completed_at FROM work_items WHERE project_id=?`
+	query := `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,blocked_at,blocked_reason,version,created_at,updated_at,completed_at,created_by_user_id FROM work_items WHERE project_id=?`
 	args := []any{projectID}
 	if stage := r.URL.Query().Get("stage"); stage != "" {
 		query += " AND stage=?"
@@ -1645,9 +2246,24 @@ func (s *Server) listWorkItems(w http.ResponseWriter, r *http.Request) {
 	out := []workqueue.WorkItem{}
 	for rows.Next() {
 		var item workqueue.WorkItem
-		if err = rows.Scan(&item.ID, &item.ProjectID, &item.Number, &item.ParentID, &item.Title, &item.Description, &item.AcceptanceCriteria, &item.Priority, &item.Stage, &item.DiscussionMode, &item.ExecutionMode, &item.AcceptanceMode, &item.TargetBranch, &item.AssigneeKind, &item.AssigneeID, &item.AssignmentState, &item.BlockedAt, &item.BlockedReason, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt); err == nil {
+		if err = rows.Scan(&item.ID, &item.ProjectID, &item.Number, &item.ParentID, &item.Title, &item.Description, &item.AcceptanceCriteria, &item.Priority, &item.Stage, &item.DiscussionMode, &item.ExecutionMode, &item.AcceptanceMode, &item.TargetBranch, &item.AssigneeKind, &item.AssigneeID, &item.AssignmentState, &item.BlockedAt, &item.BlockedReason, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt, &item.CreatedByUserID); err == nil {
 			out = append(out, item)
 		}
+	}
+	_ = rows.Close()
+	for index := range out {
+		out[index].FollowerIDs = []string{}
+		followerRows, followerErr := s.store.DB.Query("SELECT user_id FROM work_item_followers WHERE work_item_id=? ORDER BY created_at,user_id", out[index].ID)
+		if followerErr != nil {
+			continue
+		}
+		for followerRows.Next() {
+			var followerID string
+			if followerRows.Scan(&followerID) == nil {
+				out[index].FollowerIDs = append(out[index].FollowerIDs, followerID)
+			}
+		}
+		_ = followerRows.Close()
 	}
 	writeJSON(w, 200, out)
 }
@@ -1680,6 +2296,7 @@ func (s *Server) freezeConclusion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "stage_changed", "任务已进入执行阶段", item.Title, nil)
 	writeJSON(w, 201, item)
 }
 func (s *Server) submitExecution(w http.ResponseWriter, r *http.Request) {
@@ -1713,6 +2330,7 @@ func (s *Server) submitExecution(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "stage_changed", "任务已进入验收阶段", item.Title, nil)
 	writeJSON(w, 201, item)
 }
 func (s *Server) submitAcceptance(w http.ResponseWriter, r *http.Request) {
@@ -1741,6 +2359,7 @@ func (s *Server) submitAcceptance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyRelated(item, a, "acceptance_result", "任务验收结果已更新", item.Title, nil)
 	writeJSON(w, 201, item)
 }
 
@@ -1762,6 +2381,117 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	}
 	query += " ORDER BY created_at DESC LIMIT 500"
 	writeRows(w, s.store.DB, query, args...)
+}
+
+func mentionedUserIDs(db *sql.DB, markdown string) []string {
+	matches := regexp.MustCompile(`@([A-Za-z0-9._-]{2,64})`).FindAllStringSubmatch(markdown, -1)
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, match := range matches {
+		var userID string
+		if len(match) > 1 && db.QueryRow("SELECT id FROM users WHERE username=? COLLATE NOCASE AND status='active'", match[1]).Scan(&userID) == nil && !seen[userID] {
+			seen[userID] = true
+			ids = append(ids, userID)
+		}
+	}
+	return ids
+}
+
+func (s *Server) notifyRelated(item *workqueue.WorkItem, a actor, kind, title, body string, extra []string) {
+	recipients := append([]string{}, extra...)
+	if item.CreatedByUserID != nil {
+		recipients = append(recipients, *item.CreatedByUserID)
+	}
+	if item.AssigneeKind != nil && item.AssigneeID != nil && *item.AssigneeKind == "human" {
+		recipients = append(recipients, *item.AssigneeID)
+	}
+	recipients = append(recipients, item.FollowerIDs...)
+	s.notifyUsers(item, a, kind, title, body, recipients)
+}
+
+func (s *Server) notifyUsers(item *workqueue.WorkItem, a actor, kind, title, body string, recipients []string) {
+	seen := map[string]bool{}
+	if runes := []rune(body); len(runes) > 240 {
+		body = string(runes[:240])
+	}
+	for _, userID := range recipients {
+		if userID == "" || userID == a.ID || seen[userID] {
+			continue
+		}
+		seen[userID] = true
+		_, _ = s.store.DB.Exec("INSERT INTO notifications(id,user_id,project_id,work_item_id,kind,title,body,actor_type,actor_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", security.Token(18), userID, item.ProjectID, item.ID, kind, title, body, a.Type, nullableString(a.ID), now())
+	}
+}
+
+func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	query := `SELECT n.id,n.project_id,n.work_item_id,n.kind,n.title,n.body,n.actor_type,n.actor_id,n.read_at,n.created_at,w.title AS work_item_title FROM notifications n LEFT JOIN work_items w ON w.id=n.work_item_id WHERE n.user_id=?`
+	args := []any{a.ID}
+	if projectID := r.URL.Query().Get("projectId"); projectID != "" {
+		query += " AND n.project_id=?"
+		args = append(args, projectID)
+	}
+	query += " ORDER BY n.created_at DESC LIMIT 200"
+	writeJSON(w, 200, readRows(s.store.DB, query, args...))
+}
+
+func readRows(db *sql.DB, query string, args ...any) []map[string]any {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer rows.Close()
+	columns, _ := rows.Columns()
+	out := []map[string]any{}
+	for rows.Next() {
+		values := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for index := range values {
+			pointers[index] = &values[index]
+		}
+		if rows.Scan(pointers...) != nil {
+			continue
+		}
+		entry := map[string]any{}
+		for index, column := range columns {
+			if raw, ok := values[index].([]byte); ok {
+				entry[column] = string(raw)
+			} else {
+				entry[column] = values[index]
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func (s *Server) readNotification(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	_, err := s.store.DB.Exec("UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE id=? AND user_id=?", now(), r.PathValue("id"), a.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (s *Server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	_, err := s.store.DB.Exec("UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE user_id=?", now(), a.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) exportActivity(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
@@ -1861,17 +2591,20 @@ func securityHeaders(next http.Handler) http.Handler {
 type rowScanner interface{ Scan(...any) error }
 
 func scanProject(row rowScanner) map[string]any {
-	var id, key, name, description, repo, remote, branch, allowed, validations, forbidden, rules, discussion, execution, acceptance string
+	var id, key, name, description, repo, remote, branch, allowed, validations, forbidden, rules, discussion, execution, acceptance, prompts string
 	var archived *string
+	var allowAgentExecution, allowAgentAutoClose, allowSubtasks, allowAgentAutoCloseSubtasks int
 	var version int64
-	if row.Scan(&id, &key, &name, &description, &archived, &repo, &remote, &branch, &allowed, &validations, &forbidden, &rules, &discussion, &execution, &acceptance, &version) != nil {
+	if row.Scan(&id, &key, &name, &description, &archived, &repo, &remote, &branch, &allowed, &validations, &forbidden, &rules, &discussion, &execution, &acceptance, &allowAgentExecution, &allowAgentAutoClose, &allowSubtasks, &allowAgentAutoCloseSubtasks, &prompts, &version) != nil {
 		return map[string]any{}
 	}
 	var allowedV, validationsV, forbiddenV any
+	promptValues := []string{}
 	_ = json.Unmarshal([]byte(allowed), &allowedV)
 	_ = json.Unmarshal([]byte(validations), &validationsV)
 	_ = json.Unmarshal([]byte(forbidden), &forbiddenV)
-	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "repositoryUrl": repo, "remoteName": remote, "defaultTargetBranch": branch, "allowedTargetBranches": allowedV, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "discussionMode": discussion, "executionMode": execution, "acceptanceMode": acceptance, "configVersion": version}
+	_ = json.Unmarshal([]byte(prompts), &promptValues)
+	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "repositoryUrl": repo, "remoteName": remote, "defaultTargetBranch": branch, "allowedTargetBranches": allowedV, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "discussionMode": discussion, "executionMode": execution, "acceptanceMode": acceptance, "allowAgentExecution": allowAgentExecution != 0, "allowAgentAutoClose": allowAgentAutoClose != 0, "allowSubtasks": allowSubtasks != 0, "allowAgentAutoCloseSubtasks": allowAgentAutoCloseSubtasks != 0, "agentPrompts": promptValues, "configVersion": version}
 }
 func stringValue(m map[string]any, key string, fallback any) string {
 	if value, ok := m[key].(string); ok {
@@ -1885,6 +2618,19 @@ func valueOr(m map[string]any, key string, fallback any) any {
 		return value
 	}
 	return fallback
+}
+func boolValue(m map[string]any, key string, fallback any) bool {
+	if value, ok := m[key].(bool); ok {
+		return value
+	}
+	value, _ := fallback.(bool)
+	return value
+}
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 func nullableString(value string) any {
 	if value == "" {

@@ -1,10 +1,10 @@
 # ProjectBoard
 
-ProjectBoard 是一个供人类与 Agent 协作的项目工单台。服务端、Runner、MCP、迁移和备份均由 Go 实现；浏览器端是嵌入二进制的静态 HTML、CSS 与原生 JavaScript，不需要 Node.js、pnpm 或独立前端服务。
+ProjectBoard 是一个供人类与 Agent 协作的项目任务台。服务端、Runner、MCP、迁移和备份均由 Go 实现；浏览器端是嵌入二进制的静态 HTML、CSS 与原生 JavaScript，不需要 Node.js、pnpm 或独立前端服务。
 
 ## 安装与启动
 
-需要 Go 1.26 或下载已编译的 `projectboard` 与 `projectboard-runner`。
+需要 Go 1.26 或下载已编译的 `projectboard` 与 Runner。Runner 的核心是平台无关 CLI；Windows 发行版在核心外提供可直接双击运行的系统托盘壳。
 
 ```bash
 go build -o projectboard ./cmd/projectboard
@@ -56,24 +56,44 @@ GitLab 流程使用 authorization code、PKCE、一次性 state/nonce 和 15 分
 
 ### 按需同步最近提交
 
-ProjectBoard 不监听 Webhook，也不在后台定时轮询。项目开发者可在“项目设置”点击“Sync recent commits”；持有当前项目有效 Run 与租约的 Runner 可执行 `projectboard-runner sync <project-id>`。ProjectBoard 随后签发受限的只读凭据，查询默认分支最近 30 个提交，把提交信息中包含完整工单 ID 的记录去重写入工单证据和连续对话，并记录同步审计事件。
+ProjectBoard 不监听 Webhook，也不在后台定时轮询。项目开发者可在“项目设置”点击“同步提交”；持有当前项目有效 Run 与租约的 Runner 可执行 `projectboard-runner sync <project-id>`。首次同步分析最近一个月，之后严格按“上次同步时间—本次点击时间”的窗口查询默认分支提交，把提交信息中包含完整任务 ID 的记录去重写入任务证据和连续对话，并记录同步审计事件。项目暂无任务或时间窗内没有提交时不会执行关联检测，但仍会保存本次时间戳，供下次同步继续使用。
 
 ## Runner
 
-登录网页后可从“Runner 下载”页面直接下载与 ProjectBoard 服务端同目录中的平台二进制。部署时将 `projectboard-runner.exe` 或带平台后缀的 Runner 文件与 `projectboard` 放在同一目录，页面会自动识别，无需额外配置。
+登录网页后可从“Runner 下载”页面直接下载与 ProjectBoard 服务端同目录中的平台二进制。Windows 用户可直接通过托盘完成登录；平台无关的 `projectboard-runner` CLI 保留仓库注册和诊断命令。
 
-在网页中创建 Agent、为项目启用它并生成一次性配对码：
+在网页中创建 Agent、为项目启用它并生成一次性 Agent Key。Windows 双击启动 `projectboard-runner.exe`，在托盘菜单点击“登录”，输入 ProjectBoard 主页地址和 Agent Key；验证成功后 Runner 会保存设备凭据并自动开始轮询，不需要浏览器回调或终端。
+
+非 Windows 环境可通过 CLI 使用同一个一次性 Agent Key：
 
 ```bash
 set PROJECTBOARD_URL=http://localhost:3333
 projectboard-runner connect PB-XXXX-XXXX
 projectboard-runner register <project-id> <本地仓库路径>
+projectboard-runner agent list
+projectboard-runner agent use codex
 projectboard-runner poll --watch
 projectboard-runner claim <work-item-id> <version>
 projectboard-runner sync <project-id>
 ```
 
+Runner 默认使用本机已登录的 Codex CLI。可通过 `agent list` 查看 Codex CLI、OpenCode CLI 的安装与选中状态，通过 `agent use codex|opencode` 切换；Windows 托盘也可在“本地 Agent”子菜单中直接选择。Runner 会拒绝选择未安装或不在 `PATH` 中的 CLI。Codex 以非交互、仓库可写沙箱运行，OpenCode 以非交互自动授权模式运行；两者都从传入的本地仓库目录启动。可用 `projectboard-runner run-agent <本地仓库路径> <任务提示>` 单独验证当前适配器。
+
 Agent Token 只存入当前用户的系统配置目录，文件权限为仅当前用户可读写；它不会进入项目仓库。Runner 不保存 Git 提供商长期密钥。
+
+### Windows 托盘
+
+Windows 发行包包含两个入口：
+
+- `projectboard-runner-cli.exe`：平台无关核心的命令行入口，用于仓库 `register`、手动 `connect` 和诊断命令。
+- `projectboard-runner.exe`：Windows 托盘壳。可直接双击启动，无需预先配置或打开终端；在“登录”中填写 ProjectBoard 主页地址与 Agent Key 后会自动连接并开始轮询。托盘同时提供切换登录、打开 ProjectBoard、启动、停止、重启、暂停/恢复领取、查看日志、打开配置目录和退出。
+
+托盘程序只允许当前用户启动一个实例。配置与日志位于当前用户的系统配置目录 `ProjectBoard` 下；活动日志超过 2 MiB 后会在下次启动时归档保留。退出托盘程序时会先停止其持有的 Runner 轮询。Windows 发布构建命令为：
+
+```powershell
+go build -o projectboard-runner-cli.exe ./cmd/projectboard-runner
+go build -ldflags="-H=windowsgui" -o projectboard-runner.exe ./cmd/projectboard-runner-windows
+```
 
 ## MCP
 
@@ -99,6 +119,7 @@ go test ./...
 go vet ./...
 go build ./cmd/projectboard
 go build ./cmd/projectboard-runner
+go build -ldflags="-H=windowsgui" ./cmd/projectboard-runner-windows
 ```
 
 正式发布前按仓库流程先在 `dev` 完成测试和 README 检查，再合并到 `release`。

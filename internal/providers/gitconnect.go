@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,10 +44,11 @@ type Repository struct {
 }
 
 type RecentCommit struct {
-	SHA     string `json:"sha"`
-	Message string `json:"message"`
-	Author  string `json:"author"`
-	WebURL  string `json:"webUrl"`
+	SHA         string `json:"sha"`
+	Message     string `json:"message"`
+	Author      string `json:"author"`
+	WebURL      string `json:"webUrl"`
+	CommittedAt string `json:"committedAt"`
 }
 
 type ConnectionResult struct {
@@ -294,7 +296,7 @@ func (c *GitConnector) CompleteGitLab(ctx context.Context, code, verifier string
 	return &ConnectionResult{Provider: "gitlab", Name: "GitLab / " + user.Username, BaseURL: c.config.GitLabBaseURL, Credential: string(credential), ExternalAccount: user.Username, Permissions: map[string]any{"scope": token.Scope}, WebhookStatus: "on_demand", Repositories: repos, GitLabAccessToken: token.AccessToken}, nil
 }
 
-func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, repositoryID, branch string) ([]RecentCommit, error) {
+func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, repositoryID, branch, since, until string) ([]RecentCommit, error) {
 	jwt, err := c.githubJWT()
 	if err != nil {
 		return nil, err
@@ -310,9 +312,15 @@ func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, 
 	if err = c.githubJSON(ctx, http.MethodPost, "/app/installations/"+url.PathEscape(installationID)+"/access_tokens", jwt, body, &tokenResult); err != nil {
 		return nil, fmt.Errorf("create read-only installation token: %w", err)
 	}
-	query := url.Values{"per_page": {"30"}}
+	query := url.Values{"per_page": {"100"}}
 	if branch != "" {
 		query.Set("sha", branch)
+	}
+	if since != "" {
+		query.Set("since", since)
+	}
+	if until != "" {
+		query.Set("until", until)
 	}
 	var response []struct {
 		SHA     string `json:"sha"`
@@ -321,36 +329,47 @@ func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, 
 			Message string `json:"message"`
 			Author  struct {
 				Name string `json:"name"`
+				Date string `json:"date"`
 			} `json:"author"`
 		} `json:"commit"`
 	}
 	if err = c.githubJSON(ctx, http.MethodGet, "/repositories/"+url.PathEscape(repositoryID)+"/commits?"+query.Encode(), tokenResult.Token, nil, &response); err != nil {
+		if isGitHubEmptyRepositoryError(err) {
+			return []RecentCommit{}, nil
+		}
 		return nil, fmt.Errorf("query recent GitHub commits: %w", err)
 	}
 	commits := make([]RecentCommit, 0, len(response))
 	for _, item := range response {
-		commits = append(commits, RecentCommit{SHA: item.SHA, Message: item.Commit.Message, Author: item.Commit.Author.Name, WebURL: item.HTMLURL})
+		commits = append(commits, RecentCommit{SHA: item.SHA, Message: item.Commit.Message, Author: item.Commit.Author.Name, WebURL: item.HTMLURL, CommittedAt: item.Commit.Author.Date})
 	}
 	return commits, nil
 }
 
-func (c *GitConnector) RecentGitLabCommits(ctx context.Context, accessToken, repositoryID, branch string) ([]RecentCommit, error) {
-	query := url.Values{"per_page": {"30"}}
+func (c *GitConnector) RecentGitLabCommits(ctx context.Context, accessToken, repositoryID, branch, since, until string) ([]RecentCommit, error) {
+	query := url.Values{"per_page": {"100"}}
 	if branch != "" {
 		query.Set("ref_name", branch)
 	}
+	if since != "" {
+		query.Set("since", since)
+	}
+	if until != "" {
+		query.Set("until", until)
+	}
 	var response []struct {
-		ID         string `json:"id"`
-		Message    string `json:"message"`
-		AuthorName string `json:"author_name"`
-		WebURL     string `json:"web_url"`
+		ID            string `json:"id"`
+		Message       string `json:"message"`
+		AuthorName    string `json:"author_name"`
+		WebURL        string `json:"web_url"`
+		CommittedDate string `json:"committed_date"`
 	}
 	if err := c.gitlabJSON(ctx, http.MethodGet, "/api/v4/projects/"+url.PathEscape(repositoryID)+"/repository/commits?"+query.Encode(), accessToken, nil, &response); err != nil {
 		return nil, fmt.Errorf("query recent GitLab commits: %w", err)
 	}
 	commits := make([]RecentCommit, 0, len(response))
 	for _, item := range response {
-		commits = append(commits, RecentCommit{SHA: item.ID, Message: item.Message, Author: item.AuthorName, WebURL: item.WebURL})
+		commits = append(commits, RecentCommit{SHA: item.ID, Message: item.Message, Author: item.AuthorName, WebURL: item.WebURL, CommittedAt: item.CommittedDate})
 	}
 	return commits, nil
 }
@@ -417,12 +436,32 @@ func (c *GitConnector) doJSON(request *http.Request, out any) error {
 		return err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("provider returned %d: %s", response.StatusCode, strings.TrimSpace(string(data)))
+		return &providerHTTPError{StatusCode: response.StatusCode, Body: strings.TrimSpace(string(data))}
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+type providerHTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *providerHTTPError) Error() string {
+	return fmt.Sprintf("provider returned %d: %s", e.StatusCode, e.Body)
+}
+
+func isGitHubEmptyRepositoryError(err error) bool {
+	var providerError *providerHTTPError
+	if !errors.As(err, &providerError) || providerError.StatusCode != http.StatusConflict {
+		return false
+	}
+	var payload struct {
+		Message string `json:"message"`
+	}
+	return json.Unmarshal([]byte(providerError.Body), &payload) == nil && strings.EqualFold(strings.TrimSpace(payload.Message), "Git Repository is empty.")
 }
 
 func jsonRequest(ctx context.Context, method, target string, body any) (*http.Request, error) {

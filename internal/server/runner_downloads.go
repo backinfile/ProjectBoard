@@ -23,6 +23,8 @@ var runnerDownloadCandidates = []struct {
 }{
 	{[]string{"projectboard-runner-windows-amd64.exe", "projectboard-runner.exe"}, "Windows", "x64"},
 	{[]string{"projectboard-runner-windows-arm64.exe"}, "Windows", "ARM64"},
+	{[]string{"projectboard-runner-cli-windows-amd64.exe", "projectboard-runner-cli.exe"}, "Windows CLI", "x64"},
+	{[]string{"projectboard-runner-cli-windows-arm64.exe"}, "Windows CLI", "ARM64"},
 	{[]string{"projectboard-runner-linux-amd64"}, "Linux", "x64"},
 	{[]string{"projectboard-runner-linux-arm64"}, "Linux", "ARM64"},
 	{[]string{"projectboard-runner-darwin-amd64"}, "macOS", "Intel"},

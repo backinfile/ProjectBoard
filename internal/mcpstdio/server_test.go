@@ -13,7 +13,7 @@ func TestInitializeAndToolDiscovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := output.String()
-	if !strings.Contains(text, "poll_assignments") || !strings.Contains(text, "projectboard") {
+	if !strings.Contains(text, "poll_assignments") || !strings.Contains(text, "create_subtask") || !strings.Contains(text, "move_task_stage") || !strings.Contains(text, "projectboard") {
 		t.Fatalf("unexpected MCP output: %s", text)
 	}
 }

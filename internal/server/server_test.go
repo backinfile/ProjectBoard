@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -83,6 +84,97 @@ func TestRunnerDownloadsAreDiscoveredAndServedToSignedInUsers(t *testing.T) {
 	}
 }
 
+func TestTaskMessageAttachmentsCanBeUploadedBoundAndPreviewed(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "files", "name": "Files", "repositoryUrl": "https://example.com/files.git"})
+	item := requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{"requestId": "attachment-task", "projectId": project["id"], "title": "Attachment task", "descriptionMarkdown": "Check attachments", "acceptanceCriteriaMarkdown": "Markdown previews", "priority": "medium"})
+
+	var upload bytes.Buffer
+	writer := multipart.NewWriter(&upload)
+	part, err := writer.CreateFormFile("file", "review.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("# Review\n\n- safe preview"))
+	_ = writer.Close()
+	request, _ := http.NewRequest(http.MethodPost, host.URL+"/api/work-items/FILES-1/attachments", &upload)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var attachment map[string]any
+	_ = json.NewDecoder(response.Body).Decode(&attachment)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("upload=%d %#v", response.StatusCode, attachment)
+	}
+
+	item = requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/FILES-1/messages", csrf, map[string]any{"markdown": "Please review", "expectedVersion": item["version"], "attachmentIds": []string{attachment["id"].(string)}})
+	attachments := item["attachments"].([]any)
+	if len(attachments) != 1 || attachments[0].(map[string]any)["entry_id"] == nil {
+		t.Fatalf("attachments=%#v", attachments)
+	}
+	preview, err := client.Get(host.URL + "/api/attachments/" + attachment["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer preview.Body.Close()
+	content, _ := io.ReadAll(preview.Body)
+	if preview.StatusCode != http.StatusOK || !strings.Contains(preview.Header.Get("Content-Disposition"), "inline") || string(content) != "# Review\n\n- safe preview" {
+		t.Fatalf("preview=%d disposition=%q body=%q", preview.StatusCode, preview.Header.Get("Content-Disposition"), content)
+	}
+}
+
+func TestRunnerDownloadsListWindowsTrayAndCLISeparately(t *testing.T) {
+	downloadDir := t.TempDir()
+	for name, content := range map[string]string{
+		"projectboard-runner.exe":     "tray-binary",
+		"projectboard-runner-cli.exe": "cli-binary",
+	} {
+		if err := os.WriteFile(filepath.Join(downloadDir, name), []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := server.New(server.Config{DataDir: t.TempDir(), RunnerDownloadDir: downloadDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	listed := requestJSON(t, client, http.MethodGet, host.URL+"/api/runner/downloads", "", nil)
+	downloads, ok := listed["downloads"].([]any)
+	if !ok || len(downloads) != 2 {
+		t.Fatalf("downloads=%#v, want tray and CLI", listed["downloads"])
+	}
+	wantPlatforms := map[string]bool{"Windows": false, "Windows CLI": false}
+	for _, item := range downloads {
+		artifact := item.(map[string]any)
+		platform := artifact["platform"].(string)
+		if _, exists := wantPlatforms[platform]; !exists {
+			t.Fatalf("unexpected artifact=%#v", artifact)
+		}
+		wantPlatforms[platform] = true
+	}
+	for platform, found := range wantPlatforms {
+		if !found {
+			t.Fatalf("missing %s download", platform)
+		}
+	}
+}
+
 func TestHumanCanCompleteTheRequiredWorkItemFlow(t *testing.T) {
 	handler, err := server.New(server.Config{
 		DataDir:           t.TempDir(),
@@ -143,6 +235,49 @@ func TestHumanCanCompleteTheRequiredWorkItemFlow(t *testing.T) {
 	}
 	if conversation, ok := item["conversation"].([]any); !ok || len(conversation) < 4 {
 		t.Fatalf("conversation = %#v, want recorded lifecycle", item["conversation"])
+	}
+}
+
+func TestWorkItemFollowersCriteriaAndNotifications(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	adminJar, _ := cookiejar.New(nil)
+	adminClient := &http.Client{Jar: adminJar}
+	login := requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	admin := login["user"].(map[string]any)
+	member := requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/users", csrf, map[string]any{"username": "follower", "displayName": "Follower", "systemRole": "user"})
+	project := requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "people", "name": "People", "repositoryUrl": "https://github.com/acme/people.git"})
+	requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/members", csrf, map[string]any{"userId": member["id"], "role": "developer"})
+	item := requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{
+		"projectId": project["id"], "title": "Keep everyone informed", "acceptanceCriteriaMarkdown": "Initial criterion",
+		"assigneeKind": "human", "assigneeId": member["id"], "followerIds": []string{member["id"].(string)},
+	})
+	if item["created_by_user_id"] != admin["id"] {
+		t.Fatalf("creator=%v, want %v", item["created_by_user_id"], admin["id"])
+	}
+	followers := item["follower_ids"].([]any)
+	if len(followers) != 1 || followers[0] != member["id"] {
+		t.Fatalf("followers=%#v", followers)
+	}
+	item = requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/work-items/PEOPLE-1/discussion-conclusions", csrf, map[string]any{
+		"expectedVersion": item["version"], "goalMarkdown": "Ship", "scopeMarkdown": "Feature", "implementationPlanMarkdown": "Implement", "acceptanceCriteriaMarkdown": "Initial criterion",
+	})
+	if item["stage"] != "execution" {
+		t.Fatalf("stage=%v, want execution", item["stage"])
+	}
+	item = requestJSON(t, adminClient, http.MethodPatch, host.URL+"/api/work-items/PEOPLE-1", csrf, map[string]any{"expectedVersion": item["version"], "acceptanceCriteriaMarkdown": "Initial criterion\nAdded during execution"})
+	if item["stage"] != "execution" || !strings.Contains(item["acceptance_criteria_markdown"].(string), "Added during execution") {
+		t.Fatalf("criteria update during execution failed: %#v", item)
+	}
+	memberJar, _ := cookiejar.New(nil)
+	memberClient := &http.Client{Jar: memberJar}
+	requestJSON(t, memberClient, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "follower", "password": member["temporaryPassword"]})
+	notifications := requestJSONArray(t, memberClient, http.MethodGet, host.URL+"/api/notifications", "", nil)
+	if len(notifications) < 2 {
+		t.Fatalf("notifications=%#v, want assignment and update", notifications)
 	}
 }
 
@@ -556,6 +691,27 @@ func requestJSON(t *testing.T, client *http.Client, method, endpoint, csrf strin
 	_ = json.NewDecoder(response.Body).Decode(&value)
 	if response.StatusCode >= 300 {
 		t.Fatalf("%s %s = %d %#v", method, endpoint, response.StatusCode, value)
+	}
+	return value
+}
+
+func requestJSONArray(t *testing.T, client *http.Client, method, endpoint, csrf string, body any) []map[string]any {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	request, _ := http.NewRequest(method, endpoint, bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	if csrf != "" {
+		request.Header.Set("X-CSRF-Token", csrf)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var value []map[string]any
+	_ = json.NewDecoder(response.Body).Decode(&value)
+	if response.StatusCode >= 300 {
+		t.Fatalf("%s %s = %d", method, endpoint, response.StatusCode)
 	}
 	return value
 }

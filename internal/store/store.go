@@ -34,9 +34,17 @@ func Open(file string) (*Store, error) {
 	}
 	if existing {
 		var version int
-		if err = db.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil || version != SchemaVersion {
+		if err = db.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("unsupported database schema: remove the data directory and start fresh")
+			return nil, fmt.Errorf("read database schema version: %w", err)
+		}
+		if version > SchemaVersion {
+			db.Close()
+			return nil, fmt.Errorf("unsupported database schema version %d", version)
+		}
+		if err = migrate(db, version); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate database schema: %w", err)
 		}
 	}
 	if _, err = db.Exec(schema); err != nil {
@@ -46,7 +54,77 @@ func Open(file string) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
-const SchemaVersion = 1
+const SchemaVersion = 4
+
+func migrate(db *sql.DB, version int) error {
+	if version < 2 {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		statements := []string{
+			"ALTER TABLE work_items ADD COLUMN created_by_user_id TEXT REFERENCES users(id)",
+			"CREATE TABLE work_item_followers(work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(work_item_id,user_id))",
+			"CREATE INDEX work_item_followers_user ON work_item_followers(user_id,work_item_id)",
+			"CREATE TABLE notifications(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),project_id TEXT REFERENCES projects(id),work_item_id TEXT REFERENCES work_items(id),kind TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,actor_type TEXT,actor_id TEXT,read_at TEXT,created_at TEXT NOT NULL)",
+			"CREATE INDEX notifications_user_time ON notifications(user_id,created_at DESC)",
+			"UPDATE schema_metadata SET version=2 WHERE id=1",
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		version = 2
+	}
+	if version < 3 {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		statements := []string{
+			"CREATE TABLE agent_key_settings(agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,expiry_policy TEXT NOT NULL DEFAULT 'permanent',updated_at TEXT NOT NULL)",
+			"CREATE TABLE project_commit_sync_state(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,last_synced_at TEXT NOT NULL,updated_by_type TEXT NOT NULL,updated_by_id TEXT)",
+			"UPDATE schema_metadata SET version=3 WHERE id=1",
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		version = 3
+	}
+	if version < 4 {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		statements := []string{
+			"ALTER TABLE projects ADD COLUMN allow_agent_execution INTEGER NOT NULL DEFAULT 1",
+			"ALTER TABLE projects ADD COLUMN allow_agent_auto_close INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE projects ADD COLUMN allow_subtasks INTEGER NOT NULL DEFAULT 1",
+			"ALTER TABLE projects ADD COLUMN allow_agent_auto_close_subtasks INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE projects ADD COLUMN agent_prompts_json TEXT NOT NULL DEFAULT '[]'",
+			"UPDATE schema_metadata SET version=4 WHERE id=1",
+		}
+		for _, statement := range statements {
+			if _, err = tx.Exec(statement); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+	return nil
+}
 
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -64,18 +142,19 @@ func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, created_at TEXT NOT NULL);
-INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,1,CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,4,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, system_role TEXT NOT NULL CHECK(system_role IN('administrator','user')), status TEXT NOT NULL DEFAULT 'active', must_change_password INTEGER NOT NULL DEFAULT 0, disabled_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_active_at TEXT);
 CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, user_agent TEXT, ip TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_attempts(id TEXT PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS login_attempt_window ON login_attempts(username,ip,created_at);
-CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project_key TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL, description_markdown TEXT NOT NULL DEFAULT '', archived_at TEXT, repository_url TEXT NOT NULL, remote_name TEXT NOT NULL DEFAULT 'origin', default_target_branch TEXT NOT NULL DEFAULT 'main', allowed_target_branches_json TEXT NOT NULL DEFAULT '["main"]', validation_commands_json TEXT NOT NULL DEFAULT '[]', forbidden_paths_json TEXT NOT NULL DEFAULT '[]', agent_rules_markdown TEXT NOT NULL DEFAULT '', discussion_mode TEXT NOT NULL DEFAULT 'manual', execution_mode TEXT NOT NULL DEFAULT 'manual', acceptance_mode TEXT NOT NULL DEFAULT 'human', config_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project_key TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL, description_markdown TEXT NOT NULL DEFAULT '', archived_at TEXT, repository_url TEXT NOT NULL, remote_name TEXT NOT NULL DEFAULT 'origin', default_target_branch TEXT NOT NULL DEFAULT 'main', allowed_target_branches_json TEXT NOT NULL DEFAULT '["main"]', validation_commands_json TEXT NOT NULL DEFAULT '[]', forbidden_paths_json TEXT NOT NULL DEFAULT '[]', agent_rules_markdown TEXT NOT NULL DEFAULT '', discussion_mode TEXT NOT NULL DEFAULT 'manual', execution_mode TEXT NOT NULL DEFAULT 'manual', acceptance_mode TEXT NOT NULL DEFAULT 'human', allow_agent_execution INTEGER NOT NULL DEFAULT 1, allow_agent_auto_close INTEGER NOT NULL DEFAULT 0, allow_subtasks INTEGER NOT NULL DEFAULT 1, allow_agent_auto_close_subtasks INTEGER NOT NULL DEFAULT 0, agent_prompts_json TEXT NOT NULL DEFAULT '[]', config_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS project_memberships(project_id TEXT NOT NULL REFERENCES projects(id), user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL CHECK(role IN('developer','viewer')), created_at TEXT NOT NULL, PRIMARY KEY(project_id,user_id));
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, purpose TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS agent_tokens(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS agent_project_grants(agent_id TEXT NOT NULL REFERENCES agents(id), project_id TEXT NOT NULL REFERENCES projects(id), created_at TEXT NOT NULL, PRIMARY KEY(agent_id,project_id));
 CREATE TABLE IF NOT EXISTS runner_pairing_codes(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), code_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, consumed_at TEXT, invalidated_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_key_settings(agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,expiry_policy TEXT NOT NULL DEFAULT 'permanent',updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runner_devices(id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES agents(id), device_name TEXT NOT NULL, os TEXT NOT NULL, version TEXT NOT NULL, public_key_digest TEXT NOT NULL, paired_at TEXT NOT NULL, last_heartbeat_at TEXT, status TEXT NOT NULL DEFAULT 'idle');
 CREATE TABLE IF NOT EXISTS provider_authorizations(id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, app_id TEXT, installation_id TEXT, encrypted_secret TEXT NOT NULL, webhook_secret TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS git_provider_settings(provider TEXT PRIMARY KEY CHECK(provider IN('github','gitlab')), encrypted_config TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
@@ -84,7 +163,12 @@ CREATE TABLE IF NOT EXISTS provider_authorization_metadata(authorization_id TEXT
 CREATE TABLE IF NOT EXISTS provider_authorization_repositories(authorization_id TEXT NOT NULL REFERENCES provider_authorizations(id), repository_id TEXT NOT NULL, repository_name TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, web_url TEXT, can_write INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(authorization_id,repository_id));
 CREATE TABLE IF NOT EXISTS git_connection_flows(id TEXT PRIMARY KEY, provider TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), user_id TEXT NOT NULL REFERENCES users(id), state_hash TEXT NOT NULL, nonce_hash TEXT NOT NULL, sealed_verifier TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT, error_message TEXT, authorization_id TEXT REFERENCES provider_authorizations(id), repositories_json TEXT, matched_repository_id TEXT, permissions_json TEXT, webhook_status TEXT, webhook_url TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS project_repository_grants(id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE REFERENCES projects(id), authorization_id TEXT NOT NULL REFERENCES provider_authorizations(id), repository_id TEXT NOT NULL, repository_name TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, access_level TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, revoked_at TEXT);
-CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, description_markdown TEXT NOT NULL, acceptance_criteria_markdown TEXT NOT NULL, priority TEXT NOT NULL, stage TEXT NOT NULL, discussion_mode TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_mode TEXT NOT NULL, target_branch TEXT NOT NULL, assignee_kind TEXT, assignee_id TEXT, assignment_state TEXT, blocked_at TEXT, blocked_reason TEXT, abandoned_at TEXT, abandoned_reason TEXT, abandoned_from_stage TEXT, version INTEGER NOT NULL DEFAULT 1, lease_generation INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(project_id,number));
+CREATE TABLE IF NOT EXISTS project_commit_sync_state(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,last_synced_at TEXT NOT NULL,updated_by_type TEXT NOT NULL,updated_by_id TEXT);
+CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, description_markdown TEXT NOT NULL, acceptance_criteria_markdown TEXT NOT NULL, priority TEXT NOT NULL, stage TEXT NOT NULL, discussion_mode TEXT NOT NULL, execution_mode TEXT NOT NULL, acceptance_mode TEXT NOT NULL, target_branch TEXT NOT NULL, assignee_kind TEXT, assignee_id TEXT, assignment_state TEXT, blocked_at TEXT, blocked_reason TEXT, abandoned_at TEXT, abandoned_reason TEXT, abandoned_from_stage TEXT, version INTEGER NOT NULL DEFAULT 1, lease_generation INTEGER NOT NULL DEFAULT 0, created_by_user_id TEXT REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(project_id,number));
+CREATE TABLE IF NOT EXISTS work_item_followers(work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(work_item_id,user_id));
+CREATE INDEX IF NOT EXISTS work_item_followers_user ON work_item_followers(user_id,work_item_id);
+CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),project_id TEXT REFERENCES projects(id),work_item_id TEXT REFERENCES work_items(id),kind TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,actor_type TEXT,actor_id TEXT,read_at TEXT,created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS notifications_user_time ON notifications(user_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS work_item_dependencies(work_item_id TEXT NOT NULL REFERENCES work_items(id), depends_on_id TEXT NOT NULL REFERENCES work_items(id), created_at TEXT NOT NULL, PRIMARY KEY(work_item_id,depends_on_id), CHECK(work_item_id<>depends_on_id));
 CREATE TABLE IF NOT EXISTS assignments(id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id), assignee_kind TEXT NOT NULL, assignee_id TEXT NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, created_at TEXT NOT NULL, ended_at TEXT, ended_reason TEXT);
 CREATE TABLE IF NOT EXISTS leases(id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id), assignment_id TEXT NOT NULL REFERENCES assignments(id), agent_id TEXT NOT NULL REFERENCES agents(id), generation INTEGER NOT NULL, expires_at TEXT NOT NULL, released_at TEXT, release_reason TEXT, created_at TEXT NOT NULL);

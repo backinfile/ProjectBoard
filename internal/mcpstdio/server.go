@@ -61,6 +61,8 @@ func dispatch(req request, serverURL, token string) (any, error) {
 		return map[string]any{"tools": []any{
 			map[string]any{"name": "poll_assignments", "description": "List unblocked work assigned to this Agent.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}},
 			map[string]any{"name": "claim_assignment", "description": "Claim one assigned work item and create a lease.", "inputSchema": map[string]any{"type": "object", "required": []string{"workItemId", "expectedVersion"}, "properties": map[string]any{"workItemId": map[string]any{"type": "string"}, "expectedVersion": map[string]any{"type": "integer"}}}},
+			map[string]any{"name": "create_subtask", "description": "Create a child task when the active project's subtask policy allows it.", "inputSchema": map[string]any{"type": "object", "required": []string{"parentWorkItemId", "title"}, "properties": map[string]any{"parentWorkItemId": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "descriptionMarkdown": map[string]any{"type": "string"}, "acceptanceCriteriaMarkdown": map[string]any{"type": "string"}, "priority": map[string]any{"type": "string"}, "targetBranch": map[string]any{"type": "string"}}}},
+			map[string]any{"name": "move_task_stage", "description": "Move an actively leased task through discussion, execution, acceptance, or completion.", "inputSchema": map[string]any{"type": "object", "required": []string{"workItemId", "expectedVersion", "targetStage"}, "properties": map[string]any{"workItemId": map[string]any{"type": "string"}, "expectedVersion": map[string]any{"type": "integer"}, "targetStage": map[string]any{"type": "string"}, "noteMarkdown": map[string]any{"type": "string"}}}},
 		}}, nil
 	case "tools/call":
 		var call toolCall
@@ -79,6 +81,21 @@ func dispatch(req request, serverURL, token string) (any, error) {
 			}
 			endpoint = "/api/agent/assignments/" + id + "/accept"
 			input = map[string]any{"expectedVersion": call.Arguments["expectedVersion"]}
+		case "create_subtask":
+			id, _ := call.Arguments["parentWorkItemId"].(string)
+			title, _ := call.Arguments["title"].(string)
+			if id == "" || title == "" {
+				return nil, fmt.Errorf("parentWorkItemId and title are required")
+			}
+			endpoint = "/api/agent/work-items/" + id + "/subtasks"
+			input = call.Arguments
+		case "move_task_stage":
+			id, _ := call.Arguments["workItemId"].(string)
+			if id == "" {
+				return nil, fmt.Errorf("workItemId is required")
+			}
+			endpoint = "/api/agent/work-items/" + id + "/stage"
+			input = call.Arguments
 		default:
 			return nil, fmt.Errorf("unknown tool %q", call.Name)
 		}

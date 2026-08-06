@@ -44,10 +44,13 @@ type WorkItem struct {
 	CreatedAt          string           `json:"created_at"`
 	UpdatedAt          string           `json:"updated_at"`
 	CompletedAt        *string          `json:"completed_at"`
+	CreatedByUserID    *string          `json:"created_by_user_id"`
+	FollowerIDs        []string         `json:"follower_ids"`
 	Conversation       []map[string]any `json:"conversation"`
 	Conclusions        []map[string]any `json:"conclusions"`
 	Executions         []map[string]any `json:"executions"`
 	Acceptances        []map[string]any `json:"acceptances"`
+	Attachments        []map[string]any `json:"attachments"`
 	Dependencies       []string         `json:"dependencies"`
 }
 
@@ -60,7 +63,12 @@ func New(s *store.Store) *Module   { return &Module{store: s, now: time.Now} }
 func timestamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 func id() string                   { return security.Token(18) }
 
-type CreateInput struct{ RequestID, ProjectID, Title, DescriptionMarkdown, AcceptanceCriteriaMarkdown, Priority, TargetBranch, AssigneeKind, AssigneeID, ParentID string }
+type CreateInput struct {
+	RequestID, ProjectID, Title, DescriptionMarkdown, AcceptanceCriteriaMarkdown string
+	Priority, TargetBranch, AssigneeKind, AssigneeID, ParentID, CreatedByUserID  string
+	Stage, DiscussionMode, ExecutionMode, AcceptanceMode                         string
+	FollowerIDs                                                                  []string
+}
 
 func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*WorkItem, error) {
 	if strings.TrimSpace(input.Title) == "" || input.ProjectID == "" {
@@ -78,16 +86,30 @@ func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*W
 		if input.TargetBranch != "" {
 			branch = input.TargetBranch
 		}
+		if input.DiscussionMode != "" {
+			discussion = input.DiscussionMode
+		}
+		if input.ExecutionMode != "" {
+			execution = input.ExecutionMode
+		}
+		if input.AcceptanceMode != "" {
+			acceptance = input.AcceptanceMode
+		}
 		var number int64
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM work_items WHERE project_id=?", input.ProjectID).Scan(&number); err != nil {
 			return err
 		}
 		itemID = fmt.Sprintf("%s-%d", strings.ToUpper(key), number)
 		now := timestamp(m.now())
-		stage := "todo"
+		stage := input.Stage
+		if stage == "" {
+			stage = "todo"
+		}
 		var kind, idValue, state any
 		if input.AssigneeID != "" {
-			stage = "discussion"
+			if input.Stage == "" {
+				stage = "discussion"
+			}
 			kind = input.AssigneeKind
 			idValue = input.AssigneeID
 			state = "reserved"
@@ -96,13 +118,21 @@ func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*W
 		if input.ParentID != "" {
 			parent = input.ParentID
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO work_items(id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, input.ProjectID, number, parent, input.Title, input.DescriptionMarkdown, input.AcceptanceCriteriaMarkdown, input.Priority, stage, discussion, execution, acceptance, branch, kind, idValue, state, now, now)
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_items(id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, input.ProjectID, number, parent, input.Title, input.DescriptionMarkdown, input.AcceptanceCriteriaMarkdown, input.Priority, stage, discussion, execution, acceptance, branch, kind, idValue, state, nullable(input.CreatedByUserID), now, now)
 		if err != nil {
 			return err
 		}
 		if input.AssigneeID != "" {
 			_, err = tx.ExecContext(ctx, "INSERT INTO assignments(id,work_item_id,assignee_kind,assignee_id,state,generation,created_at) VALUES(?,?,?,?,?,?,?)", id(), itemID, input.AssigneeKind, input.AssigneeID, "reserved", 1, now)
 			if err != nil {
+				return err
+			}
+		}
+		for _, followerID := range input.FollowerIDs {
+			if followerID == "" {
+				continue
+			}
+			if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, followerID, now); err != nil {
 				return err
 			}
 		}
@@ -115,9 +145,9 @@ func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*W
 }
 
 func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
-	row := m.store.DB.QueryRowContext(ctx, `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,blocked_at,blocked_reason,version,created_at,updated_at,completed_at FROM work_items WHERE id=?`, itemID)
+	row := m.store.DB.QueryRowContext(ctx, `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,blocked_at,blocked_reason,version,created_at,updated_at,completed_at,created_by_user_id FROM work_items WHERE id=?`, itemID)
 	var w WorkItem
-	if err := row.Scan(&w.ID, &w.ProjectID, &w.Number, &w.ParentID, &w.Title, &w.Description, &w.AcceptanceCriteria, &w.Priority, &w.Stage, &w.DiscussionMode, &w.ExecutionMode, &w.AcceptanceMode, &w.TargetBranch, &w.AssigneeKind, &w.AssigneeID, &w.AssignmentState, &w.BlockedAt, &w.BlockedReason, &w.Version, &w.CreatedAt, &w.UpdatedAt, &w.CompletedAt); err != nil {
+	if err := row.Scan(&w.ID, &w.ProjectID, &w.Number, &w.ParentID, &w.Title, &w.Description, &w.AcceptanceCriteria, &w.Priority, &w.Stage, &w.DiscussionMode, &w.ExecutionMode, &w.AcceptanceMode, &w.TargetBranch, &w.AssigneeKind, &w.AssigneeID, &w.AssignmentState, &w.BlockedAt, &w.BlockedReason, &w.Version, &w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.CreatedByUserID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, &Error{404, "NOT_FOUND", "Work item not found"}
 		}
@@ -127,7 +157,19 @@ func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
 	w.Conclusions = readMaps(ctx, m.store.DB, "SELECT id,version,goal_markdown,scope_markdown,out_of_scope_markdown,implementation_plan_markdown,acceptance_criteria_markdown,risks_markdown,created_at FROM discussion_conclusions WHERE work_item_id=? ORDER BY version", itemID)
 	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,number,summary_markdown,commits_json,changed_files_json,remaining_risks_markdown,started_at,ended_at FROM execution_attempts WHERE work_item_id=? ORDER BY number", itemID)
 	w.Acceptances = readMaps(ctx, m.store.DB, "SELECT id,number,outcome,note_markdown,criteria_results_json,started_at,completed_at FROM acceptance_attempts WHERE work_item_id=? ORDER BY number", itemID)
+	w.Attachments = readMaps(ctx, m.store.DB, "SELECT id,entry_id,original_name,mime,size,created_at FROM attachments WHERE work_item_id=? ORDER BY created_at,id", itemID)
 	w.Dependencies = []string{}
+	w.FollowerIDs = []string{}
+	followers, _ := m.store.DB.QueryContext(ctx, "SELECT user_id FROM work_item_followers WHERE work_item_id=? ORDER BY created_at,user_id", itemID)
+	if followers != nil {
+		for followers.Next() {
+			var followerID string
+			if followers.Scan(&followerID) == nil {
+				w.FollowerIDs = append(w.FollowerIDs, followerID)
+			}
+		}
+		_ = followers.Close()
+	}
 	rows, _ := m.store.DB.QueryContext(ctx, "SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id=?", itemID)
 	if rows != nil {
 		defer rows.Close()
@@ -225,6 +267,18 @@ func (m *Module) Accept(ctx context.Context, actor Actor, itemID string, input A
 	next := "execution"
 	if input.Outcome == "pass" {
 		next = "completed"
+		if actor.Type == "agent" {
+			var allowTaskClose, allowSubtaskClose int
+			var parentID sql.NullString
+			err := m.store.DB.QueryRowContext(ctx, `SELECT p.allow_agent_auto_close,p.allow_agent_auto_close_subtasks,w.parent_id
+				FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?`, itemID).Scan(&allowTaskClose, &allowSubtaskClose, &parentID)
+			if err != nil {
+				return nil, err
+			}
+			if (!parentID.Valid && allowTaskClose != 0) || (parentID.Valid && allowSubtaskClose != 0) {
+				next = "order_closed"
+			}
+		}
 	} else if input.Outcome == "scope_unclear" {
 		next = "discussion"
 	} else if input.Outcome == "abandon" {
@@ -278,7 +332,7 @@ func (m *Module) SetBlocked(ctx context.Context, actor Actor, itemID string, exp
 		if current.Version != expectedVersion {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage == "completed" || current.Stage == "abandoned" {
+		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
 			return &Error{409, "TERMINAL", "Terminal work items cannot change"}
 		}
 		stamp := timestamp(m.now())
@@ -320,7 +374,7 @@ func (m *Module) Abandon(ctx context.Context, actor Actor, itemID string, expect
 		if current.Version != expectedVersion {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage == "completed" || current.Stage == "abandoned" {
+		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
 			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
 		}
 		stamp := timestamp(m.now())
@@ -348,7 +402,7 @@ func (m *Module) Assign(ctx context.Context, actor Actor, itemID string, expecte
 		if current.Version != expectedVersion {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage == "completed" || current.Stage == "abandoned" {
+		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
 			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
 		}
 		stamp := timestamp(m.now())
@@ -377,6 +431,10 @@ func (m *Module) Assign(ctx context.Context, actor Actor, itemID string, expecte
 type UpdateInput struct {
 	ExpectedVersion                                      int64
 	Title, Description, Criteria, Priority, TargetBranch string
+	Stage, DiscussionMode, ExecutionMode, AcceptanceMode string
+	AssigneeKind, AssigneeID                             string
+	FollowerIDs                                          []string
+	Configure                                            bool
 }
 
 func (m *Module) Update(ctx context.Context, actor Actor, itemID string, input UpdateInput) (*WorkItem, error) {
@@ -388,12 +446,11 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, input U
 		if current.Version != input.ExpectedVersion {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage == "completed" || current.Stage == "abandoned" {
+		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
 			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
 		}
-		var title, description, criteria, priority string
-		var branch string
-		err = tx.QueryRowContext(ctx, "SELECT title,description_markdown,acceptance_criteria_markdown,priority,target_branch FROM work_items WHERE id=?", itemID).Scan(&title, &description, &criteria, &priority, &branch)
+		var title, description, criteria, priority, branch, discussion, execution, acceptance string
+		err = tx.QueryRowContext(ctx, "SELECT title,description_markdown,acceptance_criteria_markdown,priority,target_branch,discussion_mode,execution_mode,acceptance_mode FROM work_items WHERE id=?", itemID).Scan(&title, &description, &criteria, &priority, &branch, &discussion, &execution, &acceptance)
 		if err != nil {
 			return err
 		}
@@ -409,24 +466,113 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, input U
 		if input.Priority != "" {
 			priority = input.Priority
 		}
+		if input.DiscussionMode != "" {
+			discussion = input.DiscussionMode
+		}
+		if input.ExecutionMode != "" {
+			execution = input.ExecutionMode
+		}
+		if input.AcceptanceMode != "" {
+			acceptance = input.AcceptanceMode
+		}
 		stage := current.Stage
+		if input.Stage != "" {
+			stage = input.Stage
+		}
 		if input.TargetBranch != "" && input.TargetBranch != branch {
 			branch = input.TargetBranch
-			if stage != "todo" {
+			if !input.Configure && stage != "todo" {
 				stage = "discussion"
 			}
 		}
 		stamp := timestamp(m.now())
-		_, err = tx.ExecContext(ctx, "UPDATE work_items SET title=?,description_markdown=?,acceptance_criteria_markdown=?,priority=?,target_branch=?,stage=?,version=version+1,updated_at=? WHERE id=?", title, description, criteria, priority, branch, stage, stamp, itemID)
+		assigneeKind, assigneeID, assignmentState := nullable(pointerValue(current.AssigneeKind)), nullable(pointerValue(current.AssigneeID)), any("reserved")
+		if input.Configure {
+			assigneeKind, assigneeID = nullable(input.AssigneeKind), nullable(input.AssigneeID)
+			if input.AssigneeID == "" {
+				assignmentState = nil
+			}
+			_, _ = tx.ExecContext(ctx, "UPDATE assignments SET ended_at=?,ended_reason='configuration_changed' WHERE work_item_id=? AND ended_at IS NULL", stamp, itemID)
+			_, _ = tx.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='configuration_changed' WHERE work_item_id=? AND released_at IS NULL", stamp, itemID)
+			if input.AssigneeID != "" {
+				_, err = tx.ExecContext(ctx, "INSERT INTO assignments(id,work_item_id,assignee_kind,assignee_id,state,generation,created_at) VALUES(?,?,?,?,?,?,?)", id(), itemID, input.AssigneeKind, input.AssigneeID, "reserved", current.Version+1, stamp)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE work_items SET title=?,description_markdown=?,acceptance_criteria_markdown=?,priority=?,target_branch=?,stage=?,discussion_mode=?,execution_mode=?,acceptance_mode=?,assignee_kind=?,assignee_id=?,assignment_state=?,version=version+1,lease_generation=lease_generation+1,updated_at=? WHERE id=?", title, description, criteria, priority, branch, stage, discussion, execution, acceptance, assigneeKind, assigneeID, assignmentState, stamp, itemID)
 		if err != nil {
 			return err
 		}
-		return timeline(ctx, tx, itemID, "work_item_updated", stage, actor, map[string]any{"scopeChanged": stage != current.Stage}, input.ExpectedVersion+1)
+		if input.Configure {
+			if _, err = tx.ExecContext(ctx, "DELETE FROM work_item_followers WHERE work_item_id=?", itemID); err != nil {
+				return err
+			}
+			for _, followerID := range input.FollowerIDs {
+				if followerID == "" {
+					continue
+				}
+				if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, followerID, stamp); err != nil {
+					return err
+				}
+			}
+		}
+		return timeline(ctx, tx, itemID, "work_item_configured", stage, actor, map[string]any{"stageChanged": stage != current.Stage, "assigneeChanged": input.Configure && (input.AssigneeKind != pointerValue(current.AssigneeKind) || input.AssigneeID != pointerValue(current.AssigneeID)), "followers": len(input.FollowerIDs)}, input.ExpectedVersion+1)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return m.Get(ctx, itemID)
+}
+
+func (m *Module) MoveStage(ctx context.Context, actor Actor, itemID string, expectedVersion int64, targetStage, note string) (*WorkItem, error) {
+	allowed := map[string]bool{"todo": true, "discussion": true, "execution": true, "acceptance": true, "completed": true, "order_closed": true}
+	if !allowed[targetStage] {
+		return nil, &Error{422, "INVALID_STAGE", "Target stage is not supported"}
+	}
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		current, err := getTx(ctx, tx, itemID)
+		if err != nil {
+			return err
+		}
+		if current.Version != expectedVersion {
+			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
+		}
+		if current.Stage == "abandoned" {
+			return &Error{409, "TERMINAL", "Abandoned work item cannot change stage"}
+		}
+		if current.Stage == targetStage {
+			return &Error{422, "UNCHANGED_STAGE", "Choose a different target stage"}
+		}
+		stamp := timestamp(m.now())
+		var completed any
+		if targetStage == "completed" || targetStage == "order_closed" {
+			completed = stamp
+		}
+		result, err := tx.ExecContext(ctx, "UPDATE work_items SET stage=?,completed_at=?,version=version+1,lease_generation=lease_generation+1,updated_at=? WHERE id=? AND version=?", targetStage, completed, stamp, itemID, expectedVersion)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
+		}
+		if targetStage == "completed" || targetStage == "order_closed" {
+			_, _ = tx.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='stage_changed' WHERE work_item_id=? AND released_at IS NULL", stamp, itemID)
+		}
+		return timeline(ctx, tx, itemID, "stage_transition", targetStage, actor, map[string]any{"from": current.Stage, "to": targetStage, "noteMarkdown": note}, expectedVersion+1)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, itemID)
+}
+
+func pointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func (m *Module) transition(ctx context.Context, actor Actor, itemID string, version int64, from, to string, inside func(*sql.Tx, *WorkItem, string) error) error {
