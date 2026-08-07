@@ -11,13 +11,10 @@ import (
 )
 
 type storedGitProviderSettings struct {
-	PublicURL          string `json:"publicUrl"`
-	GitHubAppID        string `json:"githubAppId,omitempty"`
-	GitHubAppSlug      string `json:"githubAppSlug,omitempty"`
-	GitHubPrivateKey   string `json:"githubPrivateKey,omitempty"`
-	GitLabClientID     string `json:"gitlabClientId,omitempty"`
-	GitLabClientSecret string `json:"gitlabClientSecret,omitempty"`
-	GitLabBaseURL      string `json:"gitlabBaseUrl,omitempty"`
+	PublicURL        string `json:"publicUrl"`
+	GitHubAppID      string `json:"githubAppId,omitempty"`
+	GitHubAppSlug    string `json:"githubAppSlug,omitempty"`
+	GitHubPrivateKey string `json:"githubPrivateKey,omitempty"`
 }
 
 func (s *Server) gitClient() *providers.GitConnector {
@@ -65,12 +62,6 @@ func applyStoredGitSettings(config *providers.GitConnectConfig, provider string,
 		config.GitHubAppSlug = stored.GitHubAppSlug
 		config.GitHubPrivateKey = stored.GitHubPrivateKey
 	}
-	if provider == "gitlab" {
-		config.PublicURL = stored.PublicURL
-		config.GitLabClientID = stored.GitLabClientID
-		config.GitLabClientSecret = stored.GitLabClientSecret
-		config.GitLabBaseURL = stored.GitLabBaseURL
-	}
 }
 
 func (s *Server) readStoredGitSettings(provider string) (storedGitProviderSettings, string, error) {
@@ -91,19 +82,11 @@ func (s *Server) readStoredGitSettings(provider string) (storedGitProviderSettin
 }
 
 func gitSettingsSummary(provider string, stored storedGitProviderSettings, updatedAt string) map[string]any {
-	if provider == "github" {
-		configured := stored.PublicURL != "" && stored.GitHubAppID != "" && stored.GitHubAppSlug != "" && stored.GitHubPrivateKey != ""
-		return map[string]any{
-			"provider": provider, "configured": configured, "publicUrl": stored.PublicURL,
-			"appId": stored.GitHubAppID, "appSlug": stored.GitHubAppSlug,
-			"privateKeyConfigured": stored.GitHubPrivateKey != "", "syncMode": "on_demand", "updatedAt": updatedAt,
-		}
-	}
-	configured := stored.PublicURL != "" && stored.GitLabClientID != "" && stored.GitLabClientSecret != "" && stored.GitLabBaseURL != ""
+	configured := stored.PublicURL != "" && stored.GitHubAppID != "" && stored.GitHubAppSlug != "" && stored.GitHubPrivateKey != ""
 	return map[string]any{
 		"provider": provider, "configured": configured, "publicUrl": stored.PublicURL,
-		"clientId": stored.GitLabClientID, "baseUrl": stored.GitLabBaseURL,
-		"clientSecretConfigured": stored.GitLabClientSecret != "", "syncMode": "on_demand", "updatedAt": updatedAt,
+		"appId": stored.GitHubAppID, "appSlug": stored.GitHubAppSlug,
+		"privateKeyConfigured": stored.GitHubPrivateKey != "", "syncMode": "on_demand", "updatedAt": updatedAt,
 	}
 }
 
@@ -116,20 +99,16 @@ func (s *Server) getGitProviderSettings(w http.ResponseWriter, r *http.Request) 
 		writeError(w, err)
 		return
 	}
-	result := map[string]any{}
-	for _, provider := range []string{"github", "gitlab"} {
-		stored, updatedAt, err := s.readStoredGitSettings(provider)
-		if err == sql.ErrNoRows {
-			result[provider] = gitSettingsSummary(provider, storedGitProviderSettings{}, "")
-			continue
-		}
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		result[provider] = gitSettingsSummary(provider, stored, updatedAt)
+	stored, updatedAt, err := s.readStoredGitSettings("github")
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusOK, map[string]any{"github": gitSettingsSummary("github", storedGitProviderSettings{}, "")})
+		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"github": gitSettingsSummary("github", stored, updatedAt)})
 }
 
 func (s *Server) updateGitProviderSettings(w http.ResponseWriter, r *http.Request) {
@@ -142,7 +121,7 @@ func (s *Server) updateGitProviderSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	provider := r.PathValue("provider")
-	if provider != "github" && provider != "gitlab" {
+	if provider != "github" {
 		writeError(w, &domainError{404, "PROVIDER_NOT_FOUND", "Unknown Git provider", nil})
 		return
 	}
@@ -152,13 +131,10 @@ func (s *Server) updateGitProviderSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var in struct {
-		PublicURL    string `json:"publicUrl"`
-		AppID        string `json:"appId"`
-		AppSlug      string `json:"appSlug"`
-		PrivateKey   string `json:"privateKey"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		BaseURL      string `json:"baseUrl"`
+		PublicURL  string `json:"publicUrl"`
+		AppID      string `json:"appId"`
+		AppSlug    string `json:"appSlug"`
+		PrivateKey string `json:"privateKey"`
 	}
 	decode(r, &in)
 	publicURL, err := s.systemPublicURL()
@@ -171,23 +147,11 @@ func (s *Server) updateGitProviderSettings(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	stored := storedGitProviderSettings{PublicURL: publicURL}
-	if provider == "github" {
-		stored.GitHubAppID = strings.TrimSpace(in.AppID)
-		stored.GitHubAppSlug = strings.TrimSpace(in.AppSlug)
-		stored.GitHubPrivateKey = strings.TrimSpace(in.PrivateKey)
-		if stored.GitHubPrivateKey == "" {
-			stored.GitHubPrivateKey = previous.GitHubPrivateKey
-		}
-	} else {
-		stored.GitLabClientID = strings.TrimSpace(in.ClientID)
-		stored.GitLabClientSecret = strings.TrimSpace(in.ClientSecret)
-		if stored.GitLabClientSecret == "" {
-			stored.GitLabClientSecret = previous.GitLabClientSecret
-		}
-		stored.GitLabBaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
-		if stored.GitLabBaseURL == "" {
-			stored.GitLabBaseURL = "https://gitlab.com"
-		}
+	stored.GitHubAppID = strings.TrimSpace(in.AppID)
+	stored.GitHubAppSlug = strings.TrimSpace(in.AppSlug)
+	stored.GitHubPrivateKey = strings.TrimSpace(in.PrivateKey)
+	if stored.GitHubPrivateKey == "" {
+		stored.GitHubPrivateKey = previous.GitHubPrivateKey
 	}
 	if err = validateStoredGitProviderSettings(provider, stored); err != nil {
 		writeError(w, &domainError{422, "INVALID_PROVIDER_CONFIGURATION", err.Error(), nil})

@@ -1,58 +1,26 @@
-# Product
+# ProjectBoard 产品说明
 
-<!-- impeccable:product-schema 1 -->
+ProjectBoard 是成员与 Codex Agent 共用的安全任务队列。人类定义任务、讨论和验收边界；Agent 通过 SSH MCP 领取一个任务、实现、记录证据并回写结果，然后继续等待下一项。
 
-## Platform
+## 产品边界
 
-web
+- 服务端不运行模型，不接收 Agent 私钥，不保存长期 GitHub Token。
+- Agent 是组织级身份，每个项目单独授权，默认不能认领未指派任务。
+- Agent 可登记多把 Ed25519 公钥；每个 Agent 只允许一个在线 MCP 会话。
+- ProjectBoard 只支持 GitHub，并以有效 execution 和租约签发单仓库短期凭据。
+- 任务的讨论结论、环境步骤、执行结果、验证、提交和验收记录保持可审计。
 
-## Users
+## 主流程
 
-主要用户是需要在真实代码仓库中协调人类开发者与 Agent 的工程团队。管理员配置组织、项目、仓库与执行身份；开发者创建、讨论、执行和验收任务；查看者读取项目状态。
+1. 管理员创建 Agent、登记公钥并将 Agent 授权给项目。
+2. Codex 使用固定的 SSH host key 连接 `projectboard-mcp`。
+3. Codex 优先领取明确指派的任务；项目授权允许时，再领取未指派任务。
+4. Codex取得任务租约和 `projectboard/<project-key>/<task-number>` 分支，使用 SSH Git credential helper 获取当前仓库短期凭据。
+5. Codex自主准备环境并记录实际操作，持续心跳，回写进度、附件和交付证据。
+6. 成功时提交执行结果；无法完成时记录阻塞与已完成工作、释放租约并继续等待。
 
-## Product Purpose
+## 安全语义
 
-ProjectBoard 是面向人类与 Agent 协作的安全任务队列。它让任务沿待办、讨论、执行、验收、完成的确定流程推进，并把对话、执行证据、验证结果、权限与审计保留在同一上下文中。成功意味着协作过程可操作、可追溯，并且自动化不能绕过边界。
+删除会话使用的公钥会断开连接、撤销 Git 凭据并释放租约。普通断网只撤销 Git 凭据，Agent 可在租约期内重连恢复。每次 MCP 动作都会重新验证 Agent、密钥、项目授权和租约。
 
-## Positioning
-
-ProjectBoard 不在服务端运行模型，也不把 Git 长期凭据交给 Agent。服务端负责状态、权限与审计，受信 Runner 在本地主机依据短期租约执行 Codex、Git 与验证，并把结构化结果写回连续对话。
-
-## Operating Context
-
-产品围绕项目、任务、成员、Agent、Runner、Git 仓库、目标分支、任务分支、租约、连续对话、讨论结论、执行尝试、验收尝试与追加式活动记录工作。默认界面语言为中文，可在不中断当前上下文的情况下切换英文。
-
-## Capabilities and Constraints
-
-- 任务使用 `todo -> discussion -> execution -> acceptance -> completed` 主流程，并支持终态 `abandoned`；阻塞是附加标记而非阶段。
-- 任务详情使用贯穿阶段的连续对话，保留不可覆盖的系统事件、讨论结论、执行与验收历史。
-- 每个项目绑定一个仓库和分支策略；Runner 只在项目授权、有效指派与租约范围内取得短期凭据。
-- 支持管理员、项目开发者、查看者与独立 Agent 身份，权限来源必须清晰区分。
-- 界面需响应式支持窄屏、200% 缩放、中英文长度变化、键盘操作与辅助技术。
-- 不自动合并 PR、发布、部署、强推目标分支、创建标签，或把秘密交给 Codex 子进程。
-
-## Brand Commitments
-
-产品名称固定为 ProjectBoard。界面图标统一使用 Lucide，不使用表情符号。文案以工程协作语言为主，优先准确表达阶段、责任、证据与风险，不使用营销式口号。
-
-## Evidence on Hand
-
-- `README.md`：已实现能力、运行与部署事实。
-- `PLAN.md`：完整产品定义、领域规则、信息架构与验收标准。
-- `CONTEXT.md`：固定领域语言。
-- `web/src/App.tsx`、`web/src/styles.css`：当前可运行界面与交互。
-- `tests/e2e/`：界面关键流程与空状态的自动化验证。
-
-没有客户案例、使用指标、商业定价或品牌图片素材；未来设计不得虚构这些内容。
-
-## Product Principles
-
-- 主阶段始终清晰，阻塞与其他附加状态不能冒充阶段。
-- 人类与 Agent 的身份、权限、责任和历史必须可辨认。
-- 重要动作保留证据、版本与恢复路径，自动化不能跳过验收。
-- 操作界面先帮助用户判断当前状态，再提供下一步动作。
-- 中英文切换、响应式变化和抽屉操作不应丢失上下文。
-
-## Accessibility & Inclusion
-
-关键状态不能只依赖颜色表达；交互需具备可见键盘焦点、可读标签和足够对比度。五阶段轨道在窄屏和放大场景下必须保持全部语义可达，抽屉需作为模态上下文呈现。
+Runner 和 GitLab 不属于当前产品，未来条件见 `docs/FUTURE_RUNNER.md` 与 `docs/FUTURE_GITLAB.md`。

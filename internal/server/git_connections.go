@@ -31,7 +31,6 @@ func (s *Server) gitConnectionConfiguration(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, 200, map[string]any{
 		"github": map[string]any{"configured": s.gitClient().Configured("github"), "label": "Connect GitHub"},
-		"gitlab": map[string]any{"configured": s.gitClient().Configured("gitlab"), "label": "Connect GitLab", "manualFallback": true},
 	})
 }
 
@@ -45,6 +44,10 @@ func (s *Server) startGitConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := r.PathValue("provider")
+	if provider != "github" {
+		writeError(w, &domainError{404, "PROVIDER_NOT_FOUND", "Only GitHub is supported", nil})
+		return
+	}
 	git := s.gitClient()
 	if !git.Configured(provider) {
 		writeError(w, &domainError{503, "PROVIDER_NOT_CONFIGURED", "The deployment has not configured this provider", map[string]any{"provider": provider}})
@@ -91,6 +94,10 @@ func (s *Server) startGitConnection(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) gitConnectionCallback(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
+	if provider != "github" {
+		s.writeGitCallback(w, "Provider not supported", "ProjectBoard Agent execution currently supports GitHub only.", false)
+		return
+	}
 	flowID, err := s.validateGitState(provider, r.URL.Query().Get("state"))
 	if err != nil {
 		s.writeGitCallback(w, "Authorization rejected", "The callback state is invalid or expired. Return to ProjectBoard and start again.", false)
@@ -103,28 +110,13 @@ func (s *Server) gitConnectionCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	var result *providers.ConnectionResult
 	git := s.gitClient()
-	if provider == "github" {
-		installationID := r.URL.Query().Get("installation_id")
-		if installationID == "" {
-			s.failGitFlow(flowID, "canceled", "AUTHORIZATION_CANCELED", "GitHub installation was not completed")
-			s.writeGitCallback(w, "Installation not completed", "No repository access was changed. You can close this window and retry.", false)
-			return
-		}
-		result, err = git.CompleteGitHub(r.Context(), installationID)
-	} else if provider == "gitlab" {
-		var sealedVerifier string
-		if scanErr := s.store.DB.QueryRow("SELECT sealed_verifier FROM git_connection_flows WHERE id=?", flowID).Scan(&sealedVerifier); scanErr != nil {
-			err = scanErr
-		} else {
-			var verifier string
-			verifier, err = s.vault.Open(sealedVerifier)
-			if err == nil {
-				result, err = git.CompleteGitLab(r.Context(), r.URL.Query().Get("code"), verifier)
-			}
-		}
-	} else {
-		err = fmt.Errorf("unsupported provider")
+	installationID := r.URL.Query().Get("installation_id")
+	if installationID == "" {
+		s.failGitFlow(flowID, "canceled", "AUTHORIZATION_CANCELED", "GitHub installation was not completed")
+		s.writeGitCallback(w, "Installation not completed", "No repository access was changed. You can close this window and retry.", false)
+		return
 	}
+	result, err = git.CompleteGitHub(r.Context(), installationID)
 	if err != nil {
 		s.failGitFlow(flowID, "failed", providerErrorCode(err), err.Error())
 		s.writeGitCallback(w, "Authorization needs attention", "ProjectBoard could not verify the provider response. Close this window to review the recovery details.", false)
@@ -171,10 +163,7 @@ func (s *Server) saveConnectedAuthorization(ctx context.Context, flowID string, 
 		if _, err = tx.Exec("INSERT INTO provider_authorizations(id,provider,name,base_url,app_id,installation_id,encrypted_secret,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'active',?,?)", authorizationID, result.Provider, result.Name, result.BaseURL, nullableString(result.AppID), nullableString(result.InstallationID), credential, stamp, stamp); err != nil {
 			return err
 		}
-		credentialKind := result.Provider + "-oauth"
-		if result.Provider == "github" {
-			credentialKind = "github-app"
-		}
+		credentialKind := "github-app"
 		if _, err = tx.Exec("INSERT INTO provider_authorization_metadata(authorization_id,credential_kind,external_account,permissions_json,webhook_status,webhook_url,updated_at) VALUES(?,?,?,?,?,?,?)", authorizationID, credentialKind, nullableString(result.ExternalAccount), string(permissions), result.WebhookStatus, nullableString(result.WebhookURL), stamp); err != nil {
 			return err
 		}

@@ -22,16 +22,13 @@ import (
 )
 
 type GitConnectConfig struct {
-	PublicURL          string
-	GitHubAppID        string
-	GitHubAppSlug      string
-	GitHubPrivateKey   string
-	GitHubAPIURL       string
-	GitHubWebURL       string
-	GitLabClientID     string
-	GitLabClientSecret string
-	GitLabBaseURL      string
-	HTTPClient         *http.Client
+	PublicURL        string
+	GitHubAppID      string
+	GitHubAppSlug    string
+	GitHubPrivateKey string
+	GitHubAPIURL     string
+	GitHubWebURL     string
+	HTTPClient       *http.Client
 }
 
 type Repository struct {
@@ -51,19 +48,23 @@ type RecentCommit struct {
 	CommittedAt string `json:"committedAt"`
 }
 
+type ExecutionCredential struct {
+	Token     string
+	ExpiresAt string
+}
+
 type ConnectionResult struct {
-	Provider          string
-	Name              string
-	BaseURL           string
-	AppID             string
-	InstallationID    string
-	Credential        string
-	ExternalAccount   string
-	Permissions       map[string]any
-	WebhookStatus     string
-	WebhookURL        string
-	Repositories      []Repository
-	GitLabAccessToken string
+	Provider        string
+	Name            string
+	BaseURL         string
+	AppID           string
+	InstallationID  string
+	Credential      string
+	ExternalAccount string
+	Permissions     map[string]any
+	WebhookStatus   string
+	WebhookURL      string
+	Repositories    []Repository
 }
 
 type GitHubManifestConversion struct {
@@ -85,9 +86,6 @@ func NewGitConnector(config GitConnectConfig) *GitConnector {
 	if config.GitHubWebURL == "" {
 		config.GitHubWebURL = "https://github.com"
 	}
-	if config.GitLabBaseURL == "" {
-		config.GitLabBaseURL = "https://gitlab.com"
-	}
 	if config.HTTPClient == nil {
 		config.HTTPClient = &http.Client{Timeout: 20 * time.Second}
 	}
@@ -95,14 +93,7 @@ func NewGitConnector(config GitConnectConfig) *GitConnector {
 }
 
 func (c *GitConnector) Configured(provider string) bool {
-	switch provider {
-	case "github":
-		return c.config.PublicURL != "" && c.config.GitHubAppID != "" && c.config.GitHubAppSlug != "" && c.config.GitHubPrivateKey != ""
-	case "gitlab":
-		return c.config.PublicURL != "" && c.config.GitLabClientID != "" && c.config.GitLabClientSecret != ""
-	default:
-		return false
-	}
+	return provider == "github" && c.config.PublicURL != "" && c.config.GitHubAppID != "" && c.config.GitHubAppSlug != "" && c.config.GitHubPrivateKey != ""
 }
 
 func (c *GitConnector) ValidateConfiguration(provider string) error {
@@ -115,40 +106,17 @@ func (c *GitConnector) ValidateConfiguration(provider string) error {
 			return fmt.Errorf("%s must be an absolute HTTP or HTTPS URL", label)
 		}
 	}
-	if provider == "github" {
-		if _, err := c.githubJWT(); err != nil {
-			return err
-		}
-	}
-	if provider == "gitlab" {
-		parsed, err := url.Parse(c.config.GitLabBaseURL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return fmt.Errorf("GitLab base URL must be an absolute HTTP or HTTPS URL")
-		}
+	if _, err := c.githubJWT(); err != nil {
+		return err
 	}
 	return nil
 }
 
-func (c *GitConnector) AuthorizationURL(provider, state, challenge string) (string, error) {
+func (c *GitConnector) AuthorizationURL(provider, state, _ string) (string, error) {
 	if !c.Configured(provider) {
 		return "", fmt.Errorf("%s provider is not configured", provider)
 	}
-	switch provider {
-	case "github":
-		return strings.TrimRight(c.config.GitHubWebURL, "/") + "/apps/" + url.PathEscape(c.config.GitHubAppSlug) + "/installations/new?state=" + url.QueryEscape(state), nil
-	case "gitlab":
-		query := url.Values{
-			"client_id":             {c.config.GitLabClientID},
-			"redirect_uri":          {c.callbackURL("gitlab")},
-			"response_type":         {"code"},
-			"scope":                 {"api"},
-			"state":                 {state},
-			"code_challenge":        {challenge},
-			"code_challenge_method": {"S256"},
-		}
-		return strings.TrimRight(c.config.GitLabBaseURL, "/") + "/oauth/authorize?" + query.Encode(), nil
-	}
-	return "", fmt.Errorf("unsupported provider")
+	return strings.TrimRight(c.config.GitHubWebURL, "/") + "/apps/" + url.PathEscape(c.config.GitHubAppSlug) + "/installations/new?state=" + url.QueryEscape(state), nil
 }
 
 func (c *GitConnector) GitHubManifestRegistrationURL(organization, state string) string {
@@ -232,68 +200,37 @@ func (c *GitConnector) CompleteGitHub(ctx context.Context, installationID string
 	return &ConnectionResult{Provider: "github", Name: "GitHub / " + installation.Account.Login, BaseURL: c.config.GitHubAPIURL, AppID: c.config.GitHubAppID, InstallationID: strconv.FormatInt(installation.ID, 10), Credential: "deployment-managed", ExternalAccount: installation.Account.Login, Permissions: installation.Permissions, WebhookStatus: "on_demand", Repositories: repos}, nil
 }
 
-func (c *GitConnector) CompleteGitLab(ctx context.Context, code, verifier string) (*ConnectionResult, error) {
-	form := url.Values{
-		"client_id":     {c.config.GitLabClientID},
-		"client_secret": {c.config.GitLabClientSecret},
-		"code":          {code},
-		"grant_type":    {"authorization_code"},
-		"redirect_uri":  {c.callbackURL("gitlab")},
-		"code_verifier": {verifier},
+// IssueExecutionCredential creates a single-repository installation token for
+// an already-authorized Agent execution. Repository and permission selection
+// are intentionally fixed by this interface.
+func (c *GitConnector) IssueExecutionCredential(ctx context.Context, installationID, repositoryID string) (*ExecutionCredential, error) {
+	jwt, err := c.githubJWT()
+	if err != nil {
+		return nil, err
 	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.config.GitLabBaseURL, "/")+"/oauth/token", strings.NewReader(form.Encode()))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	var token struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		TokenType    string `json:"token_type"`
-		Scope        string `json:"scope"`
-		ExpiresIn    int    `json:"expires_in"`
+	repositoryNumber, err := strconv.ParseInt(repositoryID, 10, 64)
+	if err != nil || repositoryNumber <= 0 {
+		return nil, fmt.Errorf("GitHub repository ID is invalid")
 	}
-	if err := c.doJSON(request, &token); err != nil {
-		return nil, fmt.Errorf("exchange OAuth code: %w", err)
+	var result struct {
+		Token     string `json:"token"`
+		ExpiresAt string `json:"expires_at"`
 	}
-	if token.AccessToken == "" || !strings.Contains(" "+token.Scope+" ", " api ") {
-		return nil, fmt.Errorf("GitLab OAuth grant is missing the api scope")
+	body := map[string]any{"repository_ids": []int64{repositoryNumber}, "permissions": map[string]string{"contents": "write"}}
+	if err := c.githubJSON(ctx, http.MethodPost, "/app/installations/"+url.PathEscape(installationID)+"/access_tokens", jwt, body, &result); err != nil {
+		return nil, fmt.Errorf("create execution credential: %w", err)
 	}
-	var user struct {
-		Username string `json:"username"`
-		Name     string `json:"name"`
+	if result.Token == "" {
+		return nil, fmt.Errorf("GitHub returned an empty execution credential")
 	}
-	if err := c.gitlabJSON(ctx, http.MethodGet, "/api/v4/user", token.AccessToken, nil, &user); err != nil {
-		return nil, fmt.Errorf("verify GitLab identity: %w", err)
+	return &ExecutionCredential{Token: result.Token, ExpiresAt: result.ExpiresAt}, nil
+}
+
+func (c *GitConnector) RevokeExecutionCredential(ctx context.Context, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return nil
 	}
-	var projects []struct {
-		ID                int64  `json:"id"`
-		PathWithNamespace string `json:"path_with_namespace"`
-		HTTPURLToRepo     string `json:"http_url_to_repo"`
-		WebURL            string `json:"web_url"`
-		DefaultBranch     string `json:"default_branch"`
-		Permissions       struct {
-			ProjectAccess *struct {
-				AccessLevel int `json:"access_level"`
-			} `json:"project_access"`
-			GroupAccess *struct {
-				AccessLevel int `json:"access_level"`
-			} `json:"group_access"`
-		} `json:"permissions"`
-	}
-	if err := c.gitlabJSON(ctx, http.MethodGet, "/api/v4/projects?membership=true&per_page=100", token.AccessToken, nil, &projects); err != nil {
-		return nil, fmt.Errorf("list GitLab projects: %w", err)
-	}
-	repos := make([]Repository, 0, len(projects))
-	for _, project := range projects {
-		level := 0
-		if project.Permissions.ProjectAccess != nil {
-			level = project.Permissions.ProjectAccess.AccessLevel
-		}
-		if project.Permissions.GroupAccess != nil && project.Permissions.GroupAccess.AccessLevel > level {
-			level = project.Permissions.GroupAccess.AccessLevel
-		}
-		repos = append(repos, Repository{ID: strconv.FormatInt(project.ID, 10), Name: project.PathWithNamespace, CloneURL: project.HTTPURLToRepo, DefaultBranch: project.DefaultBranch, WebURL: project.WebURL, CanWrite: level >= 30})
-	}
-	credential, _ := json.Marshal(map[string]any{"accessToken": token.AccessToken, "refreshToken": token.RefreshToken, "tokenType": token.TokenType, "scope": token.Scope, "expiresAt": time.Now().UTC().Add(time.Duration(token.ExpiresIn) * time.Second).Format(time.RFC3339Nano)})
-	return &ConnectionResult{Provider: "gitlab", Name: "GitLab / " + user.Username, BaseURL: c.config.GitLabBaseURL, Credential: string(credential), ExternalAccount: user.Username, Permissions: map[string]any{"scope": token.Scope}, WebhookStatus: "on_demand", Repositories: repos, GitLabAccessToken: token.AccessToken}, nil
+	return c.githubJSON(ctx, http.MethodDelete, "/installation/token", token, nil, nil)
 }
 
 func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, repositoryID, branch, since, until string) ([]RecentCommit, error) {
@@ -346,38 +283,6 @@ func (c *GitConnector) RecentGitHubCommits(ctx context.Context, installationID, 
 	return commits, nil
 }
 
-func (c *GitConnector) RecentGitLabCommits(ctx context.Context, accessToken, repositoryID, branch, since, until string) ([]RecentCommit, error) {
-	query := url.Values{"per_page": {"100"}}
-	if branch != "" {
-		query.Set("ref_name", branch)
-	}
-	if since != "" {
-		query.Set("since", since)
-	}
-	if until != "" {
-		query.Set("until", until)
-	}
-	var response []struct {
-		ID            string `json:"id"`
-		Message       string `json:"message"`
-		AuthorName    string `json:"author_name"`
-		WebURL        string `json:"web_url"`
-		CommittedDate string `json:"committed_date"`
-	}
-	if err := c.gitlabJSON(ctx, http.MethodGet, "/api/v4/projects/"+url.PathEscape(repositoryID)+"/repository/commits?"+query.Encode(), accessToken, nil, &response); err != nil {
-		return nil, fmt.Errorf("query recent GitLab commits: %w", err)
-	}
-	commits := make([]RecentCommit, 0, len(response))
-	for _, item := range response {
-		commits = append(commits, RecentCommit{SHA: item.ID, Message: item.Message, Author: item.AuthorName, WebURL: item.WebURL, CommittedAt: item.CommittedDate})
-	}
-	return commits, nil
-}
-
-func (c *GitConnector) callbackURL(provider string) string {
-	return strings.TrimRight(c.config.PublicURL, "/") + "/api/git/connections/" + provider + "/callback"
-}
-
 func (c *GitConnector) githubJWT() (string, error) {
 	block, _ := pem.Decode([]byte(c.config.GitHubPrivateKey))
 	if block == nil {
@@ -413,15 +318,6 @@ func (c *GitConnector) githubJSON(ctx context.Context, method, apiPath, token st
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	return c.doJSON(request, out)
-}
-
-func (c *GitConnector) gitlabJSON(ctx context.Context, method, apiPath, token string, body any, out any) error {
-	request, err := jsonRequest(ctx, method, strings.TrimRight(c.config.GitLabBaseURL, "/")+apiPath, body)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
 	return c.doJSON(request, out)
 }
 

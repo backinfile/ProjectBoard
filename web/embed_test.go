@@ -24,6 +24,7 @@ func TestVisibleCopyUsesTranslationCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(data)
+	source = strings.ReplaceAll(source, "\r\n", "\n")
 	for _, marker := range []string{"const messages=", "function t("} {
 		if !strings.Contains(source, marker) {
 			t.Fatalf("missing centralized translation marker %q", marker)
@@ -56,6 +57,7 @@ func TestTranslationCatalogsStayInSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(data)
+	source = strings.ReplaceAll(source, "\r\n", "\n")
 	zhStart := strings.Index(source, "zh:{")
 	enStart := strings.Index(source, "\nen:{")
 	catalogEnd := strings.Index(source, "}}\nconst state=")
@@ -72,14 +74,11 @@ func TestTranslationCatalogsStayInSync(t *testing.T) {
 	}
 	zhKeys := keys(source[zhStart+len("zh:{") : enStart])
 	enKeys := keys(source[enStart+len("\nen:{") : catalogEnd])
-	for locale, catalog := range map[string]map[string]bool{"zh": zhKeys, "en": enKeys} {
-		prefix := "Object.assign(messages." + locale + ",{"
-		if start := strings.Index(source, prefix); start >= 0 {
-			if end := strings.Index(source[start:], "\n});"); end >= 0 {
-				for key := range keys(source[start+len(prefix) : start+end]) {
-					catalog[key] = true
-				}
-			}
+	assignments := regexp.MustCompile(`(?s)Object\.assign\(messages\.(zh|en),\{(.*?)\}\);`)
+	for _, match := range assignments.FindAllStringSubmatch(source, -1) {
+		catalog := map[string]map[string]bool{"zh": zhKeys, "en": enKeys}[match[1]]
+		for key := range keys(match[2]) {
+			catalog[key] = true
 		}
 	}
 	for key := range zhKeys {
@@ -119,5 +118,51 @@ func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
 	}
 	if !strings.Contains(string(app), "data-queue-stage") {
 		t.Error("task queue is missing per-stage tabs")
+	}
+}
+
+func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
+	app, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := Files.ReadFile("assets/reference-theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(app)
+	for _, marker := range []string{
+		"accountProfileDrawer",
+		"projectPromptSegmentDrawer",
+		"projectBranchPolicyDrawer",
+		"systemAddressDrawer",
+		"projects-basic-list",
+		"settings-reference-topbar",
+		"settings-reference-tabs",
+		"promptSegmentTitle",
+		"currentRouteHash",
+		"applyRouteFromURL",
+	} {
+		if !strings.Contains(source, marker) {
+			t.Errorf("settings UI is missing drawer-based structure %q", marker)
+		}
+	}
+	for _, marker := range []string{".settings-page-shell", ".project-settings-layout", ".project-prompt-segment", ".settings-reference-content", ".settings-card-icon"} {
+		if !strings.Contains(string(css), marker) {
+			t.Errorf("settings UI is missing styling for %q", marker)
+		}
+	}
+	projectNav := regexp.MustCompile(`(?m)const projectNav=([^\r\n]+)`)
+	matches := projectNav.FindAllStringSubmatch(source, -1)
+	if len(matches) == 0 {
+		t.Fatal("project navigation definition is missing")
+	}
+	for _, match := range matches {
+		if !strings.Contains(match[1], "'projectSettings'") {
+			t.Error("project navigation is missing project settings")
+		}
+		if strings.Contains(match[1], "'members'") || strings.Contains(match[1], "'agents'") {
+			t.Error("members and Agents must live inside project settings, not the project sidebar")
+		}
 	}
 }

@@ -1,61 +1,8 @@
-# ProjectBoard
+# Engineering context
 
-ProjectBoard 是面向 Agent 的安全任务队列。这里记录在任务、阶段和 Git 协作中必须保持一致的领域语言。
-
-## Language
-
-**目标分支（Target Branch）**:
-任务最终准备合入的长期分支，例如 `develop`、`main` 或 `release/1.8`。一个任务在同一时刻只有一个目标分支。
-_Avoid_: 开发分支、默认分支（指代任务目标时）
-
-**基线提交（Baseline Commit）**:
-一次阶段尝试开始时，目标分支被解析到的精确提交。它固定该次尝试所依据的代码状态。
-_Avoid_: 最新代码、分支版本
-
-**任务分支（Task Branch）**:
-Runner 为单个任务产生并允许推送的受控分支。它不是目标分支，也不会由 ProjectBoard 自动合并。
-_Avoid_: 开发分支、工作分支
-
-**分支策略（Branch Policy）**:
-项目对默认目标分支和允许作为目标的分支名称或模式所作的管理员约束。
-_Avoid_: Git 配置
-
-**任务阶段（Work Item Stage）**:
-任务在待办、讨论、执行、验收、完成或放弃中的唯一主状态。阻塞不是阶段。
-_Avoid_: 状态门禁、规划阶段、审查阶段
-
-**阻塞标记（Blocked Marker）**:
-附着在未完成任务上的暂停工作标记，记录发生时间和原因，但不改变任务阶段。
-_Avoid_: 阻塞阶段、blocked 状态
-
-**连续对话（Continuous Conversation）**:
-贯穿讨论、执行和验收的单一时间线，包含人类或 Agent 消息、附件以及不可编辑的系统事件。
-_Avoid_: 阶段评论区、活动页签
-
-**讨论结论（Discussion Conclusion）**:
-进入执行前冻结的可版本化工作约定，明确目标、范围、不做事项、实施方案、验收条件和风险。
-_Avoid_: 规划结果、聊天摘要
-
-**执行尝试（Execution Attempt）**:
-某个执行者基于特定讨论结论版本进行的一次有边界、不可覆盖的实现记录。
-_Avoid_: 执行历史版本
-
-**验收尝试（Acceptance Attempt）**:
-针对一次执行结果作出的不可覆盖结构化判断，其结论决定完成、返工、退回讨论或放弃。
-_Avoid_: 审查阶段、批准门禁
-
-**提交证据（Commit Evidence）**:
-经仓库、分支和完整任务 ID 校验后关联到连续对话的 Git 提交记录。它证明发生过代码变化，但不代表任务完成。
-_Avoid_: 完成信号、自动关闭提交
-
-**人类成员（Human Member）**:
-通过项目成员关系进入某个项目的用户，并在该项目内拥有开发者或查看者角色。用户账户存在于系统中，成员身份存在于项目中。
-_Avoid_: Agent 成员、项目用户
-
-**Agent 身份（Agent Identity）**:
-代表一个 Runner 的组织级执行身份。它对所有项目可见，但只有获得项目授权后才能在该项目读取或执行任务。
-_Avoid_: 机器人用户、人类成员
-
-**项目参与者（Project Participant）**:
-当前项目中可见的人类成员与 Agent 身份的统称；两者的授权来源和可执行操作不同。
-_Avoid_: 成员（需要区分授权模型时）
+- Agent authentication: registered, non-revoked OpenSSH Ed25519 public keys.
+- Transport: built-in SSH server; MCP runs as stdio inside `projectboard-mcp`.
+- Execution: `internal/agentexec`, one active lease per Agent.
+- Git: GitHub App installation tokens scoped to the execution's single repository.
+- Human surface: embedded web UI and session/CSRF-protected HTTPS API.
+- Removed surfaces: Agent Bearer tokens, pairing/devices, HTTP MCP, local MCP forwarding, Runner and GitLab.

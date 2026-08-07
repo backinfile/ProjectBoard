@@ -31,26 +31,6 @@ func (s *Server) syncProjectCommitsHuman(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) syncProjectCommitsAgent(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.agent(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	var active int
-	err := s.store.DB.QueryRow(`SELECT 1 FROM runner_runs rr JOIN work_items wi ON wi.id=rr.work_item_id JOIN leases l ON l.id=rr.lease_id WHERE rr.agent_id=? AND wi.project_id=? AND rr.ended_at IS NULL AND l.released_at IS NULL AND l.expires_at>? LIMIT 1`, a.ID, projectID, now()).Scan(&active)
-	if err != nil {
-		writeError(w, &domainError{403, "ACTIVE_PROJECT_RUN_REQUIRED", "Runner commit sync requires an active project run and lease", nil})
-		return
-	}
-	result, err := s.syncProjectCommits(r.Context(), projectID, a)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
 func (s *Server) syncProjectCommits(ctx context.Context, projectID string, a actor) (map[string]any, error) {
 	windowEnd := time.Now().UTC()
 	var previous sql.NullString
@@ -62,8 +42,8 @@ func (s *Server) syncProjectCommits(ctx context.Context, projectID string, a act
 		}
 	}
 	var provider, authorizationID, repositoryID, branch string
-	var installationID, encryptedSecret sql.NullString
-	err := s.store.DB.QueryRow(`SELECT p.provider,p.id,g.repository_id,g.default_branch,p.installation_id,p.encrypted_secret FROM project_repository_grants g JOIN provider_authorizations p ON p.id=g.authorization_id WHERE g.project_id=? AND g.revoked_at IS NULL AND p.status='active'`, projectID).Scan(&provider, &authorizationID, &repositoryID, &branch, &installationID, &encryptedSecret)
+	var installationID sql.NullString
+	err := s.store.DB.QueryRow(`SELECT p.provider,p.id,g.repository_id,g.default_branch,p.installation_id FROM project_repository_grants g JOIN provider_authorizations p ON p.id=g.authorization_id WHERE g.project_id=? AND g.revoked_at IS NULL AND p.status='active' AND p.provider='github'`, projectID).Scan(&provider, &authorizationID, &repositoryID, &branch, &installationID)
 	if err == sql.ErrNoRows {
 		return nil, &domainError{409, "REPOSITORY_GRANT_REQUIRED", "Connect and approve a repository before syncing commits", nil}
 	}
@@ -81,26 +61,10 @@ func (s *Server) syncProjectCommits(ctx context.Context, projectID string, a act
 		return map[string]any{"provider": provider, "repositoryId": repositoryID, "fetched": 0, "inserted": 0, "matchedWorkItems": 0, "commits": []providers.RecentCommit{}, "syncMode": "on_demand", "windowStart": windowStart.Format(time.RFC3339Nano), "windowEnd": windowEnd.Format(time.RFC3339Nano), "skipped": "no_work_items"}, nil
 	}
 	var commits []providers.RecentCommit
-	if provider == "github" {
-		if !installationID.Valid {
-			return nil, fmt.Errorf("GitHub authorization has no installation ID")
-		}
-		commits, err = s.gitClient().RecentGitHubCommits(ctx, installationID.String, repositoryID, branch, windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339))
-	} else if provider == "gitlab" {
-		plain, openErr := s.vault.Open(encryptedSecret.String)
-		if openErr != nil {
-			return nil, openErr
-		}
-		var credential struct {
-			AccessToken string `json:"accessToken"`
-		}
-		if json.Unmarshal([]byte(plain), &credential) != nil {
-			credential.AccessToken = plain
-		}
-		commits, err = s.gitClient().RecentGitLabCommits(ctx, credential.AccessToken, repositoryID, branch, windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339))
-	} else {
-		err = fmt.Errorf("unsupported Git provider %q", provider)
+	if !installationID.Valid {
+		return nil, fmt.Errorf("GitHub authorization has no installation ID")
 	}
+	commits, err = s.gitClient().RecentGitHubCommits(ctx, installationID.String, repositoryID, branch, windowStart.Format(time.RFC3339), windowEnd.Format(time.RFC3339))
 	if err != nil {
 		return nil, &domainError{502, "COMMIT_SYNC_FAILED", err.Error(), nil}
 	}

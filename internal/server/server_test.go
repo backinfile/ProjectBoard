@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -14,13 +15,13 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/projectboard/projectboard/internal/providers"
 	"github.com/projectboard/projectboard/internal/server"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
@@ -48,39 +49,54 @@ func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
 	}
 }
 
-func TestRunnerDownloadsAreDiscoveredAndServedToSignedInUsers(t *testing.T) {
-	downloadDir := t.TempDir()
-	runnerPath := filepath.Join(downloadDir, "projectboard-runner-linux-amd64")
-	if err := os.WriteFile(runnerPath, []byte("runner-binary"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), RunnerDownloadDir: downloadDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestAgentSSHKeyManagementAndLegacyAgentRoutes(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
 	defer handler.Close()
 	host := httptest.NewServer(handler)
 	defer host.Close()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
-	requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
-	listed := requestJSON(t, client, http.MethodGet, host.URL+"/api/runner/downloads", "", nil)
-	downloads, ok := listed["downloads"].([]any)
-	if !ok || len(downloads) != 1 {
-		t.Fatalf("downloads=%#v, want one", listed["downloads"])
-	}
-	artifact := downloads[0].(map[string]any)
-	if artifact["platform"] != "Linux" || artifact["arch"] != "x64" {
-		t.Fatalf("artifact=%#v", artifact)
-	}
-	response, err := client.Get(host.URL + artifact["url"].(string))
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "ssh-admin-test", "purpose": "test"})
+	agentID := agent["id"].(string)
+
+	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(response.Body)
-	if response.StatusCode != http.StatusOK || string(body) != "runner-binary" {
-		t.Fatalf("download=%d %q", response.StatusCode, body)
+	sshKey, _ := ssh.NewPublicKey(publicKey)
+	created := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agentID+"/ssh-keys", csrf, map[string]any{"label": "workstation", "publicKey": string(ssh.MarshalAuthorizedKey(sshKey))})
+	if !strings.HasPrefix(created["fingerprint"].(string), "SHA256:") {
+		t.Fatalf("unexpected fingerprint: %#v", created)
+	}
+	keys := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents/"+agentID+"/ssh-keys", csrf, nil)
+	if len(keys) != 1 || keys[0]["label"] != "workstation" {
+		t.Fatalf("unexpected SSH keys: %#v", keys)
+	}
+
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	rsaPublic, _ := ssh.NewPublicKey(&rsaKey.PublicKey)
+	payload, _ := json.Marshal(map[string]any{"label": "unsupported", "publicKey": string(ssh.MarshalAuthorizedKey(rsaPublic))})
+	request, _ := http.NewRequest(http.MethodPost, host.URL+"/api/agents/"+agentID+"/ssh-keys", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("RSA Agent key status=%d", response.StatusCode)
+	}
+
+	legacy, err := client.Post(host.URL+"/api/agent/poll", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Body.Close()
+	if legacy.StatusCode != http.StatusNotFound && legacy.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("legacy Agent route status=%d", legacy.StatusCode)
 	}
 }
 
@@ -131,47 +147,6 @@ func TestTaskMessageAttachmentsCanBeUploadedBoundAndPreviewed(t *testing.T) {
 	content, _ := io.ReadAll(preview.Body)
 	if preview.StatusCode != http.StatusOK || !strings.Contains(preview.Header.Get("Content-Disposition"), "inline") || string(content) != "# Review\n\n- safe preview" {
 		t.Fatalf("preview=%d disposition=%q body=%q", preview.StatusCode, preview.Header.Get("Content-Disposition"), content)
-	}
-}
-
-func TestRunnerDownloadsListWindowsTrayAndCLISeparately(t *testing.T) {
-	downloadDir := t.TempDir()
-	for name, content := range map[string]string{
-		"projectboard-runner.exe":     "tray-binary",
-		"projectboard-runner-cli.exe": "cli-binary",
-	} {
-		if err := os.WriteFile(filepath.Join(downloadDir, name), []byte(content), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), RunnerDownloadDir: downloadDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer handler.Close()
-	host := httptest.NewServer(handler)
-	defer host.Close()
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
-	requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
-	listed := requestJSON(t, client, http.MethodGet, host.URL+"/api/runner/downloads", "", nil)
-	downloads, ok := listed["downloads"].([]any)
-	if !ok || len(downloads) != 2 {
-		t.Fatalf("downloads=%#v, want tray and CLI", listed["downloads"])
-	}
-	wantPlatforms := map[string]bool{"Windows": false, "Windows CLI": false}
-	for _, item := range downloads {
-		artifact := item.(map[string]any)
-		platform := artifact["platform"].(string)
-		if _, exists := wantPlatforms[platform]; !exists {
-			t.Fatalf("unexpected artifact=%#v", artifact)
-		}
-		wantPlatforms[platform] = true
-	}
-	for platform, found := range wantPlatforms {
-		if !found {
-			t.Fatalf("missing %s download", platform)
-		}
 	}
 }
 
@@ -278,72 +253,6 @@ func TestWorkItemFollowersCriteriaAndNotifications(t *testing.T) {
 	notifications := requestJSONArray(t, memberClient, http.MethodGet, host.URL+"/api/notifications", "", nil)
 	if len(notifications) < 2 {
 		t.Fatalf("notifications=%#v, want assignment and update", notifications)
-	}
-}
-
-func TestRunnerPairsPollsAndClaimsAnAssignedWorkItem(t *testing.T) {
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer handler.Close()
-	host := httptest.NewServer(handler)
-	defer host.Close()
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
-	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
-	csrf := login["csrfToken"].(string)
-	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "run", "name": "Runner", "repositoryUrl": "https://github.com/acme/run.git"})
-	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "runner-one", "purpose": "Go execution"})
-	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+project["id"].(string)+"/agents/"+agent["id"].(string), csrf, map[string]any{})
-	pairing := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agent["id"].(string)+"/pairing-codes", csrf, map[string]any{})
-	paired := requestJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/pair", "", map[string]any{"code": pairing["code"], "deviceName": "test-runner", "os": "windows", "version": "1.0.0", "publicKeyDigest": "digest"})
-	status, code := requestAgentError(t, http.MethodPost, host.URL+"/api/agent/projects/"+project["id"].(string)+"/sync-commits", paired["agentToken"].(string))
-	if status != http.StatusForbidden || code != "ACTIVE_PROJECT_RUN_REQUIRED" {
-		t.Fatalf("sync without run = %d %s", status, code)
-	}
-	item := requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{"requestId": "runner-item-001", "projectId": project["id"], "title": "Run me", "descriptionMarkdown": "", "acceptanceCriteriaMarkdown": "done", "assigneeKind": "agent", "assigneeId": agent["id"]})
-	poll := requestAgentJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/poll", paired["agentToken"].(string), map[string]any{})
-	assignments := poll["assignments"].([]any)
-	if len(assignments) != 1 {
-		t.Fatalf("assignments=%#v, want one", assignments)
-	}
-	mcp := requestAgentJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/mcp", paired["agentToken"].(string), map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "poll_assignments", "arguments": map[string]any{}}})
-	if mcp["result"] == nil {
-		t.Fatalf("http MCP result=%#v", mcp)
-	}
-	claimed := requestAgentJSON(t, http.DefaultClient, http.MethodPost, host.URL+"/api/agent/assignments/"+item["id"].(string)+"/accept", paired["agentToken"].(string), map[string]any{"requestId": "claim-item-001", "expectedVersion": item["version"]})
-	if claimed["leaseId"] == "" || claimed["runId"] == "" {
-		t.Fatalf("claim=%#v, want lease and run", claimed)
-	}
-	status, code = requestAgentError(t, http.MethodPost, host.URL+"/api/agent/projects/"+project["id"].(string)+"/sync-commits", paired["agentToken"].(string))
-	if status != http.StatusConflict || code != "REPOSITORY_GRANT_REQUIRED" {
-		t.Fatalf("sync with active run = %d %s", status, code)
-	}
-}
-
-func TestProjectsReuseAuthorizationThroughIndependentGrants(t *testing.T) {
-	handler := server.NewTestHandler(t.TempDir())
-	defer handler.Close()
-	host := httptest.NewServer(handler)
-	defer host.Close()
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
-	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
-	csrf := login["csrfToken"].(string)
-	authorization := requestJSON(t, client, http.MethodPost, host.URL+"/api/provider-authorizations", csrf, map[string]any{"provider": "gitlab", "name": "Shared GitLab token", "secret": "access-token"})
-	first := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "one", "name": "One", "repositoryUrl": "https://github.com/acme/shared.git"})
-	second := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "two", "name": "Two", "repositoryUrl": "https://github.com/acme/shared.git"})
-	for _, project := range []map[string]any{first, second} {
-		grant := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/repository-grant", csrf, map[string]any{"authorizationId": authorization["id"], "repositoryId": "acme/shared", "repositoryName": "acme/shared", "cloneUrl": "https://github.com/acme/shared.git", "defaultBranch": "main", "accessLevel": "write"})
-		if grant["authorizationId"] != authorization["id"] {
-			t.Fatalf("grant=%#v", grant)
-		}
-	}
-	requestJSON(t, client, http.MethodDelete, host.URL+"/api/projects/"+first["id"].(string)+"/repository-grant", csrf, map[string]any{})
-	remaining := requestJSON(t, client, http.MethodGet, host.URL+"/api/projects/"+second["id"].(string)+"/repository-grant", csrf, nil)
-	if remaining["authorizationId"] != authorization["id"] {
-		t.Fatalf("second grant was not independent: %#v", remaining)
 	}
 }
 
@@ -622,58 +531,6 @@ func TestGitHubManifestFlowAutomaticallyCreatesProviderSettings(t *testing.T) {
 	}
 }
 
-func TestAutomaticGitLabOAuthUsesPKCEAndOnDemandSync(t *testing.T) {
-	providerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/oauth/token":
-			_ = r.ParseForm()
-			if r.Form.Get("code_verifier") == "" || r.Form.Get("code") != "oauth-code" {
-				http.Error(w, "missing PKCE verifier", http.StatusBadRequest)
-				return
-			}
-			_, _ = io.WriteString(w, `{"access_token":"gitlab-token","refresh_token":"refresh-token","token_type":"Bearer","scope":"api","expires_in":7200}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/user":
-			_, _ = io.WriteString(w, `{"username":"operator","name":"Operator"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects":
-			_, _ = io.WriteString(w, `[{"id":202,"path_with_namespace":"acme/service","http_url_to_repo":"https://gitlab.example/acme/service.git","web_url":"https://gitlab.example/acme/service","default_branch":"main","permissions":{"project_access":{"access_level":40}}}]`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer providerAPI.Close()
-	handler, err := server.New(server.Config{DataDir: t.TempDir(), BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123", GitConnect: providers.GitConnectConfig{PublicURL: "https://projectboard.example", GitLabClientID: "client-id", GitLabClientSecret: "client-secret", GitLabBaseURL: providerAPI.URL}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer handler.Close()
-	host := httptest.NewServer(handler)
-	defer host.Close()
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
-	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
-	csrf := login["csrfToken"].(string)
-	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "service", "name": "Service", "repositoryUrl": "https://gitlab.example/acme/service.git"})
-	flow := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/connections/gitlab/start", csrf, map[string]any{"projectId": project["id"]})
-	authorizationURL, _ := url.Parse(flow["authorizationUrl"].(string))
-	if authorizationURL.Query().Get("code_challenge") == "" || authorizationURL.Query().Get("code_challenge_method") != "S256" {
-		t.Fatalf("authorization URL missing PKCE: %s", authorizationURL)
-	}
-	callback, err := client.Get(host.URL + "/api/git/connections/gitlab/callback?code=oauth-code&state=" + url.QueryEscape(authorizationURL.Query().Get("state")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	callback.Body.Close()
-	status := requestJSON(t, client, http.MethodGet, host.URL+"/api/git/connection-flows/"+flow["id"].(string), csrf, nil)
-	if status["status"] != "ready" || status["matchedRepositoryId"] != "202" {
-		t.Fatalf("flow status=%#v", status)
-	}
-	grant := requestJSON(t, client, http.MethodPost, host.URL+"/api/git/connection-flows/"+flow["id"].(string)+"/complete", csrf, map[string]any{"repositoryId": "202", "accessLevel": "write"})
-	if grant["provider"] != "gitlab" || grant["repositoryName"] != "acme/service" {
-		t.Fatalf("grant=%#v", grant)
-	}
-}
-
 func requestJSON(t *testing.T, client *http.Client, method, endpoint, csrf string, body any) map[string]any {
 	t.Helper()
 	payload, _ := json.Marshal(body)
@@ -714,40 +571,4 @@ func requestJSONArray(t *testing.T, client *http.Client, method, endpoint, csrf 
 		t.Fatalf("%s %s = %d", method, endpoint, response.StatusCode)
 	}
 	return value
-}
-
-func requestAgentJSON(t *testing.T, client *http.Client, method, endpoint, token string, body any) map[string]any {
-	t.Helper()
-	payload, _ := json.Marshal(body)
-	request, _ := http.NewRequest(method, endpoint, bytes.NewReader(payload))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+token)
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var value map[string]any
-	_ = json.NewDecoder(response.Body).Decode(&value)
-	if response.StatusCode >= 300 {
-		t.Fatalf("%s %s = %d %#v", method, endpoint, response.StatusCode, value)
-	}
-	return value
-}
-
-func requestAgentError(t *testing.T, method, endpoint, token string) (int, string) {
-	t.Helper()
-	request, _ := http.NewRequest(method, endpoint, bytes.NewReader([]byte("{}")))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+token)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var value map[string]any
-	_ = json.NewDecoder(response.Body).Decode(&value)
-	errorValue, _ := value["error"].(map[string]any)
-	code, _ := errorValue["code"].(string)
-	return response.StatusCode, code
 }
