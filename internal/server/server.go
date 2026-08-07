@@ -156,11 +156,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users", s.handle(s.createUser))
 	mux.HandleFunc("GET /api/users/{id}", s.handle(s.getUser))
 	mux.HandleFunc("PATCH /api/users/{id}", s.handle(s.updateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", s.handle(s.deleteUser))
 	mux.HandleFunc("POST /api/users/{id}/disable", s.handle(s.disableUser))
 	mux.HandleFunc("POST /api/users/{id}/enable", s.handle(s.enableUser))
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.handle(s.resetPassword))
 	mux.HandleFunc("POST /api/agents", s.handle(s.createAgent))
 	mux.HandleFunc("GET /api/agents", s.handle(s.listAgents))
+	mux.HandleFunc("DELETE /api/agents/{id}", s.handle(s.deleteAgent))
 	mux.HandleFunc("GET /api/agents/{id}/ssh-keys", s.handle(s.listAgentSSHKeys))
 	mux.HandleFunc("POST /api/agents/{id}/ssh-keys", s.handle(s.addAgentSSHKey))
 	mux.HandleFunc("DELETE /api/agents/{id}/ssh-keys/{keyId}", s.handle(s.deleteAgentSSHKey))
@@ -571,7 +573,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT u.id,u.username,u.display_name,u.system_role,u.status,u.last_active_at,(SELECT COUNT(*) FROM project_memberships m WHERE m.user_id=u.id) FROM users u ORDER BY u.display_name`)
+	rows, err := s.store.DB.Query(`SELECT u.id,u.username,u.display_name,u.system_role,u.status,u.last_active_at,(SELECT COUNT(*) FROM project_memberships m WHERE m.user_id=u.id) FROM users u WHERE u.status<>'deleted' ORDER BY u.display_name`)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -661,6 +663,51 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	s.audit(a, "account.updated", "user", id, "", map[string]any{})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
+func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	if id == a.ID {
+		writeError(w, &domainError{422, "SELF_DELETE_FORBIDDEN", "Cannot delete yourself", nil})
+		return
+	}
+	var role, status string
+	if err := s.store.DB.QueryRow("SELECT system_role,status FROM users WHERE id=?", id).Scan(&role, &status); err != nil {
+		writeError(w, err)
+		return
+	}
+	if status == "deleted" {
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	if role == "administrator" && status == "active" {
+		var count int
+		_ = s.store.DB.QueryRow("SELECT COUNT(*) FROM users WHERE system_role='administrator' AND status='active'").Scan(&count)
+		if count <= 1 {
+			writeError(w, &domainError{422, "LAST_ADMIN", "Cannot delete final administrator", nil})
+			return
+		}
+	}
+	stamp := now()
+	if err := s.store.Write(r.Context(), func(tx *sql.Tx) error {
+		if _, err := tx.Exec("UPDATE users SET status='deleted',disabled_reason='deleted',updated_at=? WHERE id=?", stamp, id); err != nil {
+			return err
+		}
+		_, err := tx.Exec("UPDATE sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL", stamp, id)
+		return err
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(a, "account.deleted", "user", id, "", map[string]any{"logical": true})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -717,9 +764,13 @@ func (s *Server) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	_, err := s.store.DB.Exec("UPDATE users SET status='active',disabled_reason=NULL,updated_at=? WHERE id=?", now(), id)
+	result, err := s.store.DB.Exec("UPDATE users SET status='active',disabled_reason=NULL,updated_at=? WHERE id=? AND status<>'deleted'", now(), id)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		writeError(w, sql.ErrNoRows)
 		return
 	}
 	s.audit(a, "account.enabled", "user", id, "", map[string]any{})
@@ -762,7 +813,7 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT u.id,u.username,u.display_name,u.system_role,u.status,m.role FROM users u LEFT JOIN project_memberships m ON m.user_id=u.id AND m.project_id=? ORDER BY u.display_name`, projectID)
+	rows, err := s.store.DB.Query(`SELECT u.id,u.username,u.display_name,u.system_role,u.status,m.role FROM users u LEFT JOIN project_memberships m ON m.user_id=u.id AND m.project_id=? WHERE u.status<>'deleted' ORDER BY u.display_name`, projectID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -876,7 +927,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		(SELECT COUNT(*) FROM agent_ssh_keys k WHERE k.agent_id=a.id AND k.revoked_at IS NULL),
 		(SELECT MAX(last_used_at) FROM agent_ssh_keys k WHERE k.agent_id=a.id),
 		CASE WHEN EXISTS(SELECT 1 FROM agent_ssh_sessions x WHERE x.agent_id=a.id AND x.disconnected_at IS NULL) THEN 1 ELSE 0 END
-		FROM agents a ORDER BY a.name`)
+		FROM agents a WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -895,6 +946,46 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	agentID := r.PathValue("id")
+	var status string
+	var revokedAt *string
+	if err := s.store.DB.QueryRow("SELECT status,revoked_at FROM agents WHERE id=?", agentID).Scan(&status, &revokedAt); err != nil {
+		writeError(w, err)
+		return
+	}
+	if status == "deleted" || revokedAt != nil {
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	stamp := now()
+	if err := s.store.Write(r.Context(), func(tx *sql.Tx) error {
+		if _, err := tx.Exec("UPDATE agents SET status='deleted',revoked_at=? WHERE id=?", stamp, agentID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE agent_ssh_keys SET revoked_at=? WHERE agent_id=? AND revoked_at IS NULL", stamp, agentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec("UPDATE agent_ssh_sessions SET disconnected_at=?,disconnect_reason='agent_deleted' WHERE agent_id=? AND disconnected_at IS NULL", stamp, agentID)
+		return err
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.ssh != nil {
+		s.ssh.disconnectAgent(agentID, "agent_deleted", true)
+	}
+	s.audit(a, "agent.deleted", "agent", agentID, "", map[string]any{"logical": true})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
 func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -908,7 +999,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,CASE WHEN g.agent_id IS NULL THEN 0 ELSE 1 END,COALESCE(g.allow_unassigned_claim,0),
 		CASE WHEN EXISTS(SELECT 1 FROM agent_ssh_keys k WHERE k.agent_id=a.id AND k.revoked_at IS NULL) THEN 1 ELSE 0 END,
 		CASE WHEN EXISTS(SELECT 1 FROM agent_ssh_sessions x WHERE x.agent_id=a.id AND x.disconnected_at IS NULL) THEN 1 ELSE 0 END
-		FROM agents a LEFT JOIN agent_project_grants g ON g.agent_id=a.id AND g.project_id=? ORDER BY a.name`, projectID)
+		FROM agents a LEFT JOIN agent_project_grants g ON g.agent_id=a.id AND g.project_id=? WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`, projectID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -940,6 +1031,11 @@ func (s *Server) enableAgent(w http.ResponseWriter, r *http.Request) {
 	allow := 0
 	if input.AllowUnassignedClaim {
 		allow = 1
+	}
+	var exists int
+	if err := s.store.DB.QueryRow("SELECT 1 FROM agents WHERE id=? AND status<>'deleted' AND revoked_at IS NULL", r.PathValue("agentId")).Scan(&exists); err != nil {
+		writeError(w, err)
+		return
 	}
 	_, err := s.store.DB.Exec(`INSERT INTO agent_project_grants(agent_id,project_id,allow_unassigned_claim,created_at) VALUES(?,?,?,?)
 		ON CONFLICT(agent_id,project_id) DO UPDATE SET allow_unassigned_claim=excluded.allow_unassigned_claim`, r.PathValue("agentId"), projectID, allow, now())
@@ -1478,11 +1574,27 @@ func (s *Server) downloadAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox")
 	disposition := "attachment"
-	if strings.HasPrefix(mimeType, "image/") || mimeType == "text/markdown" || strings.EqualFold(filepath.Ext(name), ".md") {
+	if attachmentCanPreviewInline(mimeType, name) {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, name))
 	http.ServeFile(w, r, filePath)
+}
+
+func attachmentCanPreviewInline(mimeType, name string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	if strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	if mimeType == "application/json" || mimeType == "application/xml" || mimeType == "application/yaml" || mimeType == "application/x-yaml" {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".txt", ".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".xml", ".yaml", ".yml", ".log", ".ini", ".cfg", ".conf", ".sql", ".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".htm", ".go", ".py", ".sh", ".ps1", ".toml":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) validateFollowers(projectID string, followerIDs []string) error {

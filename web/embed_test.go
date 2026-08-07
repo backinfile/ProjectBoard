@@ -121,6 +121,27 @@ func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
 	}
 }
 
+func TestTaskDetailSupportsSidebarDescriptionAttachmentsAndTextPreview(t *testing.T) {
+	app, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := Files.ReadFile("assets/reference-theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"task-basic-panel", "task-detail-grid", "task-conversation-scroll", "taskDescriptionAttachmentInput", "readableAttachmentKind", "data-preview-attachment"} {
+		if !strings.Contains(string(app), marker) {
+			t.Errorf("task detail UI is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{".task-basic-panel", ".task-detail-grid", ".description-attachment-picker", ".text-attachment-preview", ".composer-main:focus-within"} {
+		if !strings.Contains(string(css), marker) {
+			t.Errorf("task detail styling is missing %q", marker)
+		}
+	}
+}
+
 func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 	app, err := Files.ReadFile("assets/app.js")
 	if err != nil {

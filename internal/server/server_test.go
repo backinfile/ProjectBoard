@@ -49,6 +49,70 @@ func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
 	}
 }
 
+func TestDeletingUserRetainsRecordButHidesItFromLists(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	created := requestJSON(t, client, http.MethodPost, host.URL+"/api/users", csrf, map[string]any{"username": "soft-delete-user", "displayName": "Soft Delete User", "systemRole": "user"})
+	userID := created["id"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "soft-delete", "name": "Soft Delete", "repositoryUrl": "https://example.com/soft-delete.git"})
+	projectID := project["id"].(string)
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+projectID+"/members", csrf, map[string]any{"userId": userID, "role": "viewer"})
+
+	requestJSON(t, client, http.MethodDelete, host.URL+"/api/users/"+userID, csrf, nil)
+	requestErrorCode(t, client, http.MethodPost, host.URL+"/api/users/"+userID+"/enable", csrf, nil, http.StatusNotFound, "NOT_FOUND")
+	users := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/users", csrf, nil)
+	for _, user := range users {
+		if user["id"] == userID {
+			t.Fatalf("deleted user remained in default list: %#v", user)
+		}
+	}
+	retained := requestJSON(t, client, http.MethodGet, host.URL+"/api/users/"+userID, csrf, nil)
+	if retained["status"] != "deleted" {
+		t.Fatalf("retained user status=%#v, want deleted", retained["status"])
+	}
+	members := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+projectID+"/members", csrf, nil)
+	for _, member := range members {
+		if member["id"] == userID {
+			t.Fatalf("deleted user remained in project member list: %#v", member)
+		}
+	}
+}
+
+func TestDeletingAgentHidesItFromOrganizationAndProjectLists(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "soft-delete-agent", "purpose": "retained history"})
+	agentID := agent["id"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "agent-delete", "name": "Agent Delete", "repositoryUrl": "https://example.com/agent-delete.git"})
+	projectID := project["id"].(string)
+	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{"allowUnassignedClaim": false})
+
+	requestJSON(t, client, http.MethodDelete, host.URL+"/api/agents/"+agentID, csrf, nil)
+	requestErrorCode(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{"allowUnassignedClaim": true}, http.StatusNotFound, "NOT_FOUND")
+	for _, listedAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil) {
+		if listedAgent["id"] == agentID {
+			t.Fatalf("deleted agent remained in organization list: %#v", listedAgent)
+		}
+	}
+	for _, projectAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+projectID+"/agents", csrf, nil) {
+		if projectAgent["id"] == agentID {
+			t.Fatalf("deleted agent remained in project list: %#v", projectAgent)
+		}
+	}
+}
+
 func TestAgentSSHKeyManagementAndLegacyAgentRoutes(t *testing.T) {
 	handler := server.NewTestHandler(t.TempDir())
 	defer handler.Close()
@@ -147,6 +211,37 @@ func TestTaskMessageAttachmentsCanBeUploadedBoundAndPreviewed(t *testing.T) {
 	content, _ := io.ReadAll(preview.Body)
 	if preview.StatusCode != http.StatusOK || !strings.Contains(preview.Header.Get("Content-Disposition"), "inline") || string(content) != "# Review\n\n- safe preview" {
 		t.Fatalf("preview=%d disposition=%q body=%q", preview.StatusCode, preview.Header.Get("Content-Disposition"), content)
+	}
+
+	var jsonUpload bytes.Buffer
+	jsonWriter := multipart.NewWriter(&jsonUpload)
+	jsonPart, err := jsonWriter.CreateFormFile("file", "context.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = jsonPart.Write([]byte(`{"owner":"Codex","ready":true}`))
+	_ = jsonWriter.Close()
+	jsonRequest, _ := http.NewRequest(http.MethodPost, host.URL+"/api/work-items/FILES-1/attachments", &jsonUpload)
+	jsonRequest.Header.Set("Content-Type", jsonWriter.FormDataContentType())
+	jsonRequest.Header.Set("X-CSRF-Token", csrf)
+	jsonResponse, err := client.Do(jsonRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsonResponse.Body.Close()
+	var jsonAttachment map[string]any
+	_ = json.NewDecoder(jsonResponse.Body).Decode(&jsonAttachment)
+	if jsonResponse.StatusCode != http.StatusCreated || jsonAttachment["entry_id"] != nil {
+		t.Fatalf("description attachment=%d %#v", jsonResponse.StatusCode, jsonAttachment)
+	}
+	jsonPreview, err := client.Get(host.URL + "/api/attachments/" + jsonAttachment["id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jsonPreview.Body.Close()
+	jsonContent, _ := io.ReadAll(jsonPreview.Body)
+	if jsonPreview.StatusCode != http.StatusOK || !strings.Contains(jsonPreview.Header.Get("Content-Disposition"), "inline") || string(jsonContent) != `{"owner":"Codex","ready":true}` {
+		t.Fatalf("json preview=%d disposition=%q body=%q", jsonPreview.StatusCode, jsonPreview.Header.Get("Content-Disposition"), jsonContent)
 	}
 }
 
@@ -571,4 +666,28 @@ func requestJSONArray(t *testing.T, client *http.Client, method, endpoint, csrf 
 		t.Fatalf("%s %s = %d", method, endpoint, response.StatusCode)
 	}
 	return value
+}
+
+func requestErrorCode(t *testing.T, client *http.Client, method, endpoint, csrf string, body any, wantStatus int, wantCode string) {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	request, _ := http.NewRequest(method, endpoint, bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	if csrf != "" {
+		request.Header.Set("X-CSRF-Token", csrf)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var value struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&value)
+	if response.StatusCode != wantStatus || value.Error.Code != wantCode {
+		t.Fatalf("%s %s = %d %q, want %d %q", method, endpoint, response.StatusCode, value.Error.Code, wantStatus, wantCode)
+	}
 }
