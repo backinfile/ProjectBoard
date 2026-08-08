@@ -22,36 +22,41 @@ type Error struct {
 func (e *Error) Error() string { return e.Message }
 
 type WorkItem struct {
-	ID                 string           `json:"id"`
-	ProjectID          string           `json:"project_id"`
-	Number             int64            `json:"number"`
-	ParentID           *string          `json:"parent_id"`
-	Title              string           `json:"title"`
-	Description        string           `json:"description_markdown"`
-	AcceptanceCriteria string           `json:"acceptance_criteria_markdown"`
-	Priority           string           `json:"priority"`
-	Stage              string           `json:"stage"`
-	DiscussionMode     string           `json:"discussion_mode"`
-	ExecutionMode      string           `json:"execution_mode"`
-	AcceptanceMode     string           `json:"acceptance_mode"`
-	TargetBranch       string           `json:"target_branch"`
-	AssigneeKind       *string          `json:"assignee_kind"`
-	AssigneeID         *string          `json:"assignee_id"`
-	AssignmentState    *string          `json:"assignment_state"`
-	BlockedAt          *string          `json:"blocked_at"`
-	BlockedReason      *string          `json:"blocked_reason"`
-	Version            int64            `json:"version"`
-	CreatedAt          string           `json:"created_at"`
-	UpdatedAt          string           `json:"updated_at"`
-	CompletedAt        *string          `json:"completed_at"`
-	CreatedByUserID    *string          `json:"created_by_user_id"`
-	FollowerIDs        []string         `json:"follower_ids"`
-	Conversation       []map[string]any `json:"conversation"`
-	Conclusions        []map[string]any `json:"conclusions"`
-	Executions         []map[string]any `json:"executions"`
-	Acceptances        []map[string]any `json:"acceptances"`
-	Attachments        []map[string]any `json:"attachments"`
-	Dependencies       []string         `json:"dependencies"`
+	ID                   string           `json:"id"`
+	ProjectID            string           `json:"project_id"`
+	Number               int64            `json:"number"`
+	ParentID             *string          `json:"parent_id"`
+	Title                string           `json:"title"`
+	Description          string           `json:"description_markdown"`
+	AcceptanceCriteria   string           `json:"acceptance_criteria_markdown"`
+	Priority             string           `json:"priority"`
+	Stage                string           `json:"stage"`
+	TargetBranch         string           `json:"target_branch"`
+	AssigneeKind         *string          `json:"assignee_kind"`
+	AssigneeID           *string          `json:"assignee_id"`
+	IsAgentTask          bool             `json:"is_agent_task"`
+	PauseAfterPlan       bool             `json:"pause_after_plan"`
+	PauseAfterCompletion bool             `json:"pause_after_completion"`
+	PlanPauseConsumed    bool             `json:"plan_pause_consumed"`
+	AgentState           string           `json:"agent_state"`
+	AssignedAgentID      *string          `json:"assigned_agent_id"`
+	CodexThreadID        *string          `json:"codex_thread_id"`
+	WorkspacePath        *string          `json:"workspace_path"`
+	WorkspaceSizeBytes   int64            `json:"workspace_size_bytes"`
+	ResumeRequested      bool             `json:"resume_requested"`
+	BlockedAt            *string          `json:"blocked_at"`
+	BlockedReason        *string          `json:"blocked_reason"`
+	Version              int64            `json:"version"`
+	CreatedAt            string           `json:"created_at"`
+	UpdatedAt            string           `json:"updated_at"`
+	CompletedAt          *string          `json:"completed_at"`
+	ClosedAt             *string          `json:"closed_at"`
+	CreatedByUserID      *string          `json:"created_by_user_id"`
+	FollowerIDs          []string         `json:"follower_ids"`
+	Conversation         []map[string]any `json:"conversation"`
+	Executions           []map[string]any `json:"executions"`
+	Attachments          []map[string]any `json:"attachments"`
+	Dependencies         []string         `json:"dependencies"`
 }
 
 type Module struct {
@@ -62,81 +67,74 @@ type Module struct {
 func New(s *store.Store) *Module   { return &Module{store: s, now: time.Now} }
 func timestamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 func id() string                   { return security.Token(18) }
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+func nullable(v string) any {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return v
+}
 
 type CreateInput struct {
 	RequestID, ProjectID, Title, DescriptionMarkdown, AcceptanceCriteriaMarkdown string
 	Priority, TargetBranch, AssigneeKind, AssigneeID, ParentID, CreatedByUserID  string
-	Stage, DiscussionMode, ExecutionMode, AcceptanceMode                         string
 	FollowerIDs                                                                  []string
+	IsAgentTask, PauseAfterPlan, PauseAfterCompletion                            bool
 }
 
-func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*WorkItem, error) {
-	if strings.TrimSpace(input.Title) == "" || input.ProjectID == "" {
+func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*WorkItem, error) {
+	if strings.TrimSpace(in.Title) == "" || in.ProjectID == "" {
 		return nil, &Error{422, "VALIDATION_ERROR", "Project and title are required"}
 	}
-	if input.Priority == "" {
-		input.Priority = "medium"
+	if in.Priority == "" {
+		in.Priority = "medium"
+	}
+	if !in.IsAgentTask {
+		in.PauseAfterPlan = false
+		in.PauseAfterCompletion = false
+	} else {
+		in.AssigneeKind = ""
+		in.AssigneeID = ""
 	}
 	var itemID string
 	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		var key, branch, discussion, execution, acceptance string
-		if err := tx.QueryRowContext(ctx, "SELECT project_key,default_target_branch,discussion_mode,execution_mode,acceptance_mode FROM projects WHERE id=?", input.ProjectID).Scan(&key, &branch, &discussion, &execution, &acceptance); err != nil {
+		var key, branch, allowedJSON string
+		if err := tx.QueryRowContext(ctx, "SELECT project_key,default_target_branch,allowed_target_branches_json FROM projects WHERE id=?", in.ProjectID).Scan(&key, &branch, &allowedJSON); err != nil {
 			return err
 		}
-		if input.TargetBranch != "" {
-			branch = input.TargetBranch
+		if in.TargetBranch != "" {
+			branch = in.TargetBranch
 		}
-		if input.DiscussionMode != "" {
-			discussion = input.DiscussionMode
-		}
-		if input.ExecutionMode != "" {
-			execution = input.ExecutionMode
-		}
-		if input.AcceptanceMode != "" {
-			acceptance = input.AcceptanceMode
+		if !branchAllowed(branch, allowedJSON) {
+			return &Error{422, "TARGET_BRANCH_NOT_ALLOWED", "Target branch is not allowed by the project"}
 		}
 		var number int64
-		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM work_items WHERE project_id=?", input.ProjectID).Scan(&number); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM work_items WHERE project_id=?", in.ProjectID).Scan(&number); err != nil {
 			return err
 		}
 		itemID = fmt.Sprintf("%s-%d", strings.ToUpper(key), number)
-		now := timestamp(m.now())
-		stage := input.Stage
-		if stage == "" {
-			stage = "todo"
+		stamp := timestamp(m.now())
+		agentState := "idle"
+		if in.IsAgentTask {
+			agentState = "queued"
 		}
-		var kind, idValue, state any
-		if input.AssigneeID != "" {
-			if input.Stage == "" {
-				stage = "discussion"
-			}
-			kind = input.AssigneeKind
-			idValue = input.AssigneeID
-			state = "reserved"
-		}
-		var parent any
-		if input.ParentID != "" {
-			parent = input.ParentID
-		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO work_items(id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, input.ProjectID, number, parent, input.Title, input.DescriptionMarkdown, input.AcceptanceCriteriaMarkdown, input.Priority, stage, discussion, execution, acceptance, branch, kind, idValue, state, nullable(input.CreatedByUserID), now, now)
+		_, err := tx.ExecContext(ctx, `INSERT INTO work_items(id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,target_branch,assignee_kind,assignee_id,is_agent_task,pause_after_plan,pause_after_completion,agent_state,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, in.ProjectID, number, nullable(in.ParentID), in.Title, in.DescriptionMarkdown, in.AcceptanceCriteriaMarkdown, in.Priority, "created", branch, nullable(in.AssigneeKind), nullable(in.AssigneeID), boolInt(in.IsAgentTask), boolInt(in.PauseAfterPlan), boolInt(in.PauseAfterCompletion), agentState, nullable(in.CreatedByUserID), stamp, stamp)
 		if err != nil {
 			return err
 		}
-		if input.AssigneeID != "" {
-			_, err = tx.ExecContext(ctx, "INSERT INTO assignments(id,work_item_id,assignee_kind,assignee_id,state,generation,created_at) VALUES(?,?,?,?,?,?,?)", id(), itemID, input.AssigneeKind, input.AssigneeID, "reserved", 1, now)
-			if err != nil {
-				return err
+		for _, fid := range in.FollowerIDs {
+			if fid != "" {
+				if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, fid, stamp); err != nil {
+					return err
+				}
 			}
 		}
-		for _, followerID := range input.FollowerIDs {
-			if followerID == "" {
-				continue
-			}
-			if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, followerID, now); err != nil {
-				return err
-			}
-		}
-		return timeline(ctx, tx, itemID, "stage_transition", stage, actor, map[string]any{"from": nil, "to": stage}, 1)
+		return timeline(ctx, tx, itemID, "stage_transition", "created", actor, map[string]any{"from": nil, "to": "created"}, 1)
 	})
 	if err != nil {
 		return nil, err
@@ -144,112 +142,149 @@ func (m *Module) Create(ctx context.Context, actor Actor, input CreateInput) (*W
 	return m.Get(ctx, itemID)
 }
 
-func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
-	row := m.store.DB.QueryRowContext(ctx, `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,discussion_mode,execution_mode,acceptance_mode,target_branch,assignee_kind,assignee_id,assignment_state,blocked_at,blocked_reason,version,created_at,updated_at,completed_at,created_by_user_id FROM work_items WHERE id=?`, itemID)
+func scanItem(row interface{ Scan(...any) error }) (*WorkItem, error) {
 	var w WorkItem
-	if err := row.Scan(&w.ID, &w.ProjectID, &w.Number, &w.ParentID, &w.Title, &w.Description, &w.AcceptanceCriteria, &w.Priority, &w.Stage, &w.DiscussionMode, &w.ExecutionMode, &w.AcceptanceMode, &w.TargetBranch, &w.AssigneeKind, &w.AssigneeID, &w.AssignmentState, &w.BlockedAt, &w.BlockedReason, &w.Version, &w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.CreatedByUserID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, &Error{404, "NOT_FOUND", "Work item not found"}
-		}
+	var agentTask, pap, pac, ppc, resume int
+	err := row.Scan(&w.ID, &w.ProjectID, &w.Number, &w.ParentID, &w.Title, &w.Description, &w.AcceptanceCriteria, &w.Priority, &w.Stage, &w.TargetBranch, &w.AssigneeKind, &w.AssigneeID, &agentTask, &pap, &pac, &ppc, &w.AgentState, &w.AssignedAgentID, &w.CodexThreadID, &w.WorkspacePath, &resume, &w.BlockedAt, &w.BlockedReason, &w.Version, &w.CreatedAt, &w.UpdatedAt, &w.CompletedAt, &w.ClosedAt, &w.CreatedByUserID)
+	w.IsAgentTask = agentTask != 0
+	w.PauseAfterPlan = pap != 0
+	w.PauseAfterCompletion = pac != 0
+	w.PlanPauseConsumed = ppc != 0
+	w.ResumeRequested = resume != 0
+	return &w, err
+}
+
+const itemSelect = `SELECT id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,target_branch,assignee_kind,assignee_id,is_agent_task,pause_after_plan,pause_after_completion,plan_pause_consumed,agent_state,assigned_agent_id,codex_thread_id,workspace_path,resume_requested,blocked_at,blocked_reason,version,created_at,updated_at,completed_at,closed_at,created_by_user_id FROM work_items`
+
+func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
+	w, err := scanItem(m.store.DB.QueryRowContext(ctx, itemSelect+" WHERE id=?", itemID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, &Error{404, "NOT_FOUND", "Work item not found"}
+	}
+	if err != nil {
 		return nil, err
 	}
 	w.Conversation = readMaps(ctx, m.store.DB, "SELECT id,kind,stage,author_type,author_id,payload_json,created_at FROM conversation_entries WHERE work_item_id=? ORDER BY created_at,id", itemID)
-	w.Conclusions = readMaps(ctx, m.store.DB, "SELECT id,version,goal_markdown,scope_markdown,out_of_scope_markdown,implementation_plan_markdown,acceptance_criteria_markdown,risks_markdown,created_at FROM discussion_conclusions WHERE work_item_id=? ORDER BY version", itemID)
-	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,number,summary_markdown,commits_json,changed_files_json,remaining_risks_markdown,started_at,ended_at FROM execution_attempts WHERE work_item_id=? ORDER BY number", itemID)
-	w.Acceptances = readMaps(ctx, m.store.DB, "SELECT id,number,outcome,note_markdown,criteria_results_json,started_at,completed_at FROM acceptance_attempts WHERE work_item_id=? ORDER BY number", itemID)
+	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,attempt_number,state,thread_id,command_json,result_json,final_message,workspace_path,started_at,ended_at,error_message FROM agent_executions WHERE work_item_id=? ORDER BY attempt_number", itemID)
 	w.Attachments = readMaps(ctx, m.store.DB, "SELECT id,entry_id,original_name,mime,size,created_at FROM attachments WHERE work_item_id=? ORDER BY created_at,id", itemID)
-	w.Dependencies = []string{}
 	w.FollowerIDs = []string{}
-	followers, _ := m.store.DB.QueryContext(ctx, "SELECT user_id FROM work_item_followers WHERE work_item_id=? ORDER BY created_at,user_id", itemID)
-	if followers != nil {
-		for followers.Next() {
-			var followerID string
-			if followers.Scan(&followerID) == nil {
-				w.FollowerIDs = append(w.FollowerIDs, followerID)
-			}
-		}
-		_ = followers.Close()
-	}
-	rows, _ := m.store.DB.QueryContext(ctx, "SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id=?", itemID)
+	rows, _ := m.store.DB.QueryContext(ctx, "SELECT user_id FROM work_item_followers WHERE work_item_id=? ORDER BY created_at,user_id", itemID)
 	if rows != nil {
-		defer rows.Close()
 		for rows.Next() {
-			var d string
-			_ = rows.Scan(&d)
-			w.Dependencies = append(w.Dependencies, d)
-		}
-	}
-	return &w, nil
-}
-
-type ConclusionInput struct {
-	ExpectedVersion                                int64
-	Goal, Scope, OutOfScope, Plan, Criteria, Risks string
-}
-
-func (m *Module) Freeze(ctx context.Context, actor Actor, itemID string, input ConclusionInput) (*WorkItem, error) {
-	err := m.transition(ctx, actor, itemID, input.ExpectedVersion, "discussion", "execution", func(tx *sql.Tx, current *WorkItem, now string) error {
-		var version int64
-		_ = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0)+1 FROM discussion_conclusions WHERE work_item_id=?", itemID).Scan(&version)
-		_, err := tx.ExecContext(ctx, "INSERT INTO discussion_conclusions(id,work_item_id,version,goal_markdown,scope_markdown,out_of_scope_markdown,implementation_plan_markdown,acceptance_criteria_markdown,risks_markdown,created_by_type,created_by_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", id(), itemID, version, input.Goal, input.Scope, input.OutOfScope, input.Plan, input.Criteria, input.Risks, actor.Type, actor.ID, now)
-		if err != nil {
-			return err
-		}
-		return timeline(ctx, tx, itemID, "conclusion_frozen", "execution", actor, map[string]any{"version": version}, current.Version+1)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return m.Get(ctx, itemID)
-}
-
-type Validation struct {
-	Name       string `json:"name"`
-	Required   bool   `json:"required"`
-	ExitCode   int    `json:"exitCode"`
-	DurationMS int64  `json:"durationMs"`
-	LogSummary string `json:"logSummary"`
-}
-type ExecutionInput struct {
-	ExpectedVersion                            int64
-	Summary                                    string
-	Pushed, WorktreeClean, ForbiddenPathsClean bool
-	Commits, ChangedFiles                      []string
-	Validations                                []Validation
-	RemainingRisks                             string
-}
-
-func (m *Module) SubmitExecution(ctx context.Context, actor Actor, itemID string, input ExecutionInput) (*WorkItem, error) {
-	for _, v := range input.Validations {
-		if v.Required && v.ExitCode != 0 {
-			return nil, &Error{422, "VALIDATION_FAILED", "Required validation failed"}
-		}
-	}
-	if !input.WorktreeClean || !input.ForbiddenPathsClean {
-		return nil, &Error{422, "EXECUTION_EVIDENCE_INVALID", "Execution safety checks failed"}
-	}
-	err := m.transition(ctx, actor, itemID, input.ExpectedVersion, "execution", "acceptance", func(tx *sql.Tx, current *WorkItem, now string) error {
-		var number, conclusion int64
-		_ = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM execution_attempts WHERE work_item_id=?", itemID).Scan(&number)
-		_ = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),1) FROM discussion_conclusions WHERE work_item_id=?", itemID).Scan(&conclusion)
-		eid := id()
-		commits, _ := json.Marshal(input.Commits)
-		files, _ := json.Marshal(input.ChangedFiles)
-		_, err := tx.ExecContext(ctx, "INSERT INTO execution_attempts(id,work_item_id,number,assignee_kind,assignee_id,conclusion_version,target_branch,task_branch,lease_generation,summary_markdown,commits_json,changed_files_json,remaining_risks_markdown,pushed_at,started_at,ended_at,end_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", eid, itemID, number, current.AssigneeKind, current.AssigneeID, conclusion, current.TargetBranch, "projectboard/"+strings.ToLower(strings.Split(itemID, "-")[0])+"/"+fmt.Sprint(current.Number), 0, input.Summary, string(commits), string(files), input.RemainingRisks, now, now, now, "submitted")
-		if err != nil {
-			return err
-		}
-		for _, v := range input.Validations {
-			required := 0
-			if v.Required {
-				required = 1
+			var v string
+			if rows.Scan(&v) == nil {
+				w.FollowerIDs = append(w.FollowerIDs, v)
 			}
-			_, err = tx.ExecContext(ctx, "INSERT INTO validation_runs(id,execution_attempt_id,name,required,exit_code,duration_ms,log_summary,created_at) VALUES(?,?,?,?,?,?,?,?)", id(), eid, v.Name, required, v.ExitCode, v.DurationMS, v.LogSummary, now)
-			if err != nil {
+		}
+		rows.Close()
+	}
+	w.Dependencies = []string{}
+	deps, _ := m.store.DB.QueryContext(ctx, "SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id=?", itemID)
+	if deps != nil {
+		for deps.Next() {
+			var v string
+			if deps.Scan(&v) == nil {
+				w.Dependencies = append(w.Dependencies, v)
+			}
+		}
+		deps.Close()
+	}
+	return w, nil
+}
+
+type UpdateInput struct {
+	ExpectedVersion                                                                int64
+	Title, Description, Criteria, Priority, TargetBranch, AssigneeKind, AssigneeID string
+	FollowerIDs                                                                    []string
+	Configure                                                                      bool
+	IsAgentTask, PauseAfterPlan, PauseAfterCompletion                              bool
+}
+
+func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in UpdateInput) (*WorkItem, error) {
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		current, err := getTx(ctx, tx, itemID)
+		if err != nil {
+			return err
+		}
+		if current.Version != in.ExpectedVersion {
+			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
+		}
+		if current.Stage == "closed" {
+			return &Error{409, "TERMINAL", "Closed work items are read-only"}
+		}
+		stamp := timestamp(m.now())
+		title, desc, criteria, priority, branch := current.Title, current.Description, current.AcceptanceCriteria, current.Priority, current.TargetBranch
+		kind, idv := current.AssigneeKind, current.AssigneeID
+		isAgent, pap, pac := current.IsAgentTask, current.PauseAfterPlan, current.PauseAfterCompletion
+		if in.Title != "" {
+			title = in.Title
+		}
+		if in.Description != "" {
+			desc = in.Description
+		}
+		if in.Criteria != "" {
+			criteria = in.Criteria
+		}
+		if in.Priority != "" {
+			priority = in.Priority
+		}
+		if in.TargetBranch != "" {
+			var allowedJSON string
+			if err = tx.QueryRowContext(ctx, "SELECT allowed_target_branches_json FROM projects WHERE id=?", current.ProjectID).Scan(&allowedJSON); err != nil {
 				return err
 			}
+			if !branchAllowed(in.TargetBranch, allowedJSON) {
+				return &Error{422, "TARGET_BRANCH_NOT_ALLOWED", "Target branch is not allowed by the project"}
+			}
+			branch = in.TargetBranch
 		}
-		return timeline(ctx, tx, itemID, "validation", "acceptance", actor, map[string]any{"executionAttemptId": eid, "validations": input.Validations}, current.Version+1)
+		if in.Configure {
+			var executionCount int
+			if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_executions WHERE work_item_id=?", itemID).Scan(&executionCount); err != nil {
+				return err
+			}
+			if current.AssignedAgentID != nil || executionCount > 0 {
+				if in.IsAgentTask != current.IsAgentTask || in.PauseAfterPlan != current.PauseAfterPlan || in.PauseAfterCompletion != current.PauseAfterCompletion {
+					return &Error{409, "AGENT_CONFIG_LOCKED", "Agent settings are locked after execution starts"}
+				}
+			} else {
+				isAgent, pap, pac = in.IsAgentTask, in.PauseAfterPlan, in.PauseAfterCompletion
+				if !isAgent {
+					pap = false
+					pac = false
+				}
+				kind = nil
+				idv = nil
+				if in.AssigneeID != "" {
+					kind = &in.AssigneeKind
+					idv = &in.AssigneeID
+				}
+			}
+		}
+		state := current.AgentState
+		if isAgent && state == "idle" {
+			state = "queued"
+		}
+		if !isAgent {
+			state = "idle"
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE work_items SET title=?,description_markdown=?,acceptance_criteria_markdown=?,priority=?,target_branch=?,assignee_kind=?,assignee_id=?,is_agent_task=?,pause_after_plan=?,pause_after_completion=?,agent_state=?,version=version+1,updated_at=? WHERE id=?", title, desc, criteria, priority, branch, kind, idv, boolInt(isAgent), boolInt(pap), boolInt(pac), state, stamp, itemID)
+		if err != nil {
+			return err
+		}
+		if in.Configure {
+			if _, err = tx.ExecContext(ctx, "DELETE FROM work_item_followers WHERE work_item_id=?", itemID); err != nil {
+				return err
+			}
+			for _, fid := range in.FollowerIDs {
+				if fid != "" {
+					if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, fid, stamp); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return timeline(ctx, tx, itemID, "work_item_updated", current.Stage, actor, map[string]any{"isAgentTask": isAgent}, current.Version+1)
 	})
 	if err != nil {
 		return nil, err
@@ -257,43 +292,58 @@ func (m *Module) SubmitExecution(ctx context.Context, actor Actor, itemID string
 	return m.Get(ctx, itemID)
 }
 
-type AcceptanceInput struct {
-	ExpectedVersion int64
-	Outcome, Note   string
-	CriteriaResults any
+func branchAllowed(branch, raw string) bool {
+	var allowed []string
+	if json.Unmarshal([]byte(raw), &allowed) != nil || len(allowed) == 0 {
+		return false
+	}
+	for _, candidate := range allowed {
+		if candidate == branch {
+			return true
+		}
+	}
+	return false
 }
 
-func (m *Module) Accept(ctx context.Context, actor Actor, itemID string, input AcceptanceInput) (*WorkItem, error) {
-	next := "execution"
-	if input.Outcome == "pass" {
-		next = "completed"
-		if actor.Type == "agent" {
-			var allowTaskClose, allowSubtaskClose int
-			var parentID sql.NullString
-			err := m.store.DB.QueryRowContext(ctx, `SELECT p.allow_agent_auto_close,p.allow_agent_auto_close_subtasks,w.parent_id
-				FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?`, itemID).Scan(&allowTaskClose, &allowSubtaskClose, &parentID)
-			if err != nil {
-				return nil, err
-			}
-			if (!parentID.Valid && allowTaskClose != 0) || (parentID.Valid && allowSubtaskClose != 0) {
-				next = "order_closed"
-			}
-		}
-	} else if input.Outcome == "scope_unclear" {
-		next = "discussion"
-	} else if input.Outcome == "abandon" {
-		next = "abandoned"
-	}
-	err := m.transition(ctx, actor, itemID, input.ExpectedVersion, "acceptance", next, func(tx *sql.Tx, current *WorkItem, now string) error {
-		var number, conclusion int64
-		_ = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM acceptance_attempts WHERE work_item_id=?", itemID).Scan(&number)
-		_ = tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),1) FROM discussion_conclusions WHERE work_item_id=?", itemID).Scan(&conclusion)
-		criteria, _ := json.Marshal(input.CriteriaResults)
-		_, err := tx.ExecContext(ctx, "INSERT INTO acceptance_attempts(id,work_item_id,number,acceptor_type,acceptor_id,conclusion_version,outcome,note_markdown,criteria_results_json,started_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", id(), itemID, number, actor.Type, actor.ID, conclusion, input.Outcome, input.Note, string(criteria), now, now)
+var allowedTransitions = map[string]map[string]bool{"created": {"in_progress": true}, "in_progress": {"completed": true}, "completed": {"in_progress": true, "closed": true}}
+
+func (m *Module) MoveStage(ctx context.Context, actor Actor, itemID string, version int64, target, note string) (*WorkItem, error) {
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		current, err := getTx(ctx, tx, itemID)
 		if err != nil {
 			return err
 		}
-		return timeline(ctx, tx, itemID, "acceptance_result", next, actor, map[string]any{"outcome": input.Outcome, "noteMarkdown": input.Note}, current.Version+1)
+		if current.Version != version {
+			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
+		}
+		if current.AgentState == "running" && actor.Type != "agent" {
+			return &Error{409, "AGENT_RUNNING", "Cannot change state while Agent is running"}
+		}
+		if !allowedTransitions[current.Stage][target] {
+			return &Error{409, "INVALID_TRANSITION", "Invalid task state transition"}
+		}
+		stamp := timestamp(m.now())
+		var completed, closed any
+		if target == "completed" {
+			completed = stamp
+		}
+		if target == "closed" {
+			completed = current.CompletedAt
+			closed = stamp
+		}
+		if target == "in_progress" {
+			completed = nil
+			closed = nil
+		}
+		agentState := current.AgentState
+		if target == "closed" {
+			agentState = "finished"
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE work_items SET stage=?,agent_state=?,completed_at=?,closed_at=?,version=version+1,updated_at=? WHERE id=?", target, agentState, completed, closed, stamp, itemID)
+		if err != nil {
+			return err
+		}
+		return timeline(ctx, tx, itemID, "stage_transition", target, actor, map[string]any{"from": current.Stage, "to": target, "noteMarkdown": note}, version+1)
 	})
 	if err != nil {
 		return nil, err
@@ -302,6 +352,9 @@ func (m *Module) Accept(ctx context.Context, actor Actor, itemID string, input A
 }
 
 func (m *Module) AddMessage(ctx context.Context, actor Actor, itemID, markdown string, expectedVersion int64) (*WorkItem, error) {
+	return m.AddMessageWithResume(ctx, actor, itemID, markdown, expectedVersion, false)
+}
+func (m *Module) AddMessageWithResume(ctx context.Context, actor Actor, itemID, markdown string, expectedVersion int64, resume bool) (*WorkItem, error) {
 	if strings.TrimSpace(markdown) == "" {
 		return nil, &Error{422, "VALIDATION_ERROR", "Message is required"}
 	}
@@ -310,11 +363,29 @@ func (m *Module) AddMessage(ctx context.Context, actor Actor, itemID, markdown s
 		if err != nil {
 			return err
 		}
+		if current.Stage == "closed" {
+			return &Error{409, "TERMINAL", "Closed work items are read-only"}
+		}
 		if expectedVersion > 0 && current.Version != expectedVersion {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		raw, _ := json.Marshal(map[string]any{"markdown": markdown})
-		_, err = tx.ExecContext(ctx, "INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) VALUES(?,?,?,?,?,?,?,?,?)", id(), itemID, "message", current.Stage, actor.Type, nullable(actor.ID), string(raw), current.Version, timestamp(m.now()))
+		if resume && (!current.IsAgentTask || !strings.HasPrefix(current.AgentState, "paused_")) {
+			return &Error{409, "AGENT_NOT_PAUSED", "Agent is not paused"}
+		}
+		raw, _ := json.Marshal(map[string]any{"markdown": markdown, "resumeAgent": resume})
+		stamp := timestamp(m.now())
+		if _, err = tx.ExecContext(ctx, "INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) VALUES(?,?,?,?,?,?,?,?,?)", id(), itemID, "message", current.Stage, actor.Type, nullable(actor.ID), string(raw), current.Version, stamp); err != nil {
+			return err
+		}
+		if current.IsAgentTask && current.AgentState == "running" && !resume {
+			_, err = tx.ExecContext(ctx, "UPDATE work_items SET resume_requested=1 WHERE id=?", itemID)
+		}
+		if resume {
+			_, err = tx.ExecContext(ctx, "UPDATE work_items SET resume_requested=1,agent_state='queued',stage=CASE WHEN stage='completed' THEN 'in_progress' ELSE stage END,completed_at=CASE WHEN stage='completed' THEN NULL ELSE completed_at END,version=version+1,updated_at=? WHERE id=?", stamp, itemID)
+			if err == nil {
+				err = timeline(ctx, tx, itemID, "agent_resumed", "in_progress", Actor{Type: "system"}, map[string]any{"message": "A member requested the Agent to continue"}, current.Version+1)
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -323,17 +394,17 @@ func (m *Module) AddMessage(ctx context.Context, actor Actor, itemID, markdown s
 	return m.Get(ctx, itemID)
 }
 
-func (m *Module) SetBlocked(ctx context.Context, actor Actor, itemID string, expectedVersion int64, reason string, blocked bool) (*WorkItem, error) {
+func (m *Module) SetBlocked(ctx context.Context, actor Actor, itemID string, version int64, reason string, blocked bool) (*WorkItem, error) {
 	err := m.store.Write(ctx, func(tx *sql.Tx) error {
 		current, err := getTx(ctx, tx, itemID)
 		if err != nil {
 			return err
 		}
-		if current.Version != expectedVersion {
+		if current.Version != version {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
-			return &Error{409, "TERMINAL", "Terminal work items cannot change"}
+		if current.Stage == "closed" {
+			return &Error{409, "TERMINAL", "Closed work items are read-only"}
 		}
 		stamp := timestamp(m.now())
 		var at, why any
@@ -346,15 +417,11 @@ func (m *Module) SetBlocked(ctx context.Context, actor Actor, itemID string, exp
 			why = reason
 			kind = "blocked"
 		}
-		result, err := tx.ExecContext(ctx, "UPDATE work_items SET blocked_at=?,blocked_reason=?,version=version+1,updated_at=? WHERE id=? AND version=?", at, why, stamp, itemID, expectedVersion)
+		_, err = tx.ExecContext(ctx, "UPDATE work_items SET blocked_at=?,blocked_reason=?,version=version+1,updated_at=? WHERE id=?", at, why, stamp, itemID)
 		if err != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
-		if n != 1 {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		return timeline(ctx, tx, itemID, kind, current.Stage, actor, map[string]any{"reason": reason}, expectedVersion+1)
+		return timeline(ctx, tx, itemID, kind, current.Stage, actor, map[string]any{"reason": reason}, version+1)
 	})
 	if err != nil {
 		return nil, err
@@ -362,221 +429,8 @@ func (m *Module) SetBlocked(ctx context.Context, actor Actor, itemID string, exp
 	return m.Get(ctx, itemID)
 }
 
-func (m *Module) Abandon(ctx context.Context, actor Actor, itemID string, expectedVersion int64, reason string) (*WorkItem, error) {
-	if strings.TrimSpace(reason) == "" {
-		return nil, &Error{422, "REASON_REQUIRED", "Abandon reason required"}
-	}
+func (m *Module) Assign(ctx context.Context, actor Actor, itemID string, version int64, kind, assigneeID, reason string) (*WorkItem, error) {
 	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		current, err := getTx(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		if current.Version != expectedVersion {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
-			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
-		}
-		stamp := timestamp(m.now())
-		_, err = tx.ExecContext(ctx, "UPDATE work_items SET stage='abandoned',abandoned_at=?,abandoned_reason=?,abandoned_from_stage=?,version=version+1,updated_at=? WHERE id=?", stamp, reason, current.Stage, stamp, itemID)
-		if err != nil {
-			return err
-		}
-		if err = timeline(ctx, tx, itemID, "abandoned", "abandoned", actor, map[string]any{"from": current.Stage, "reason": reason}, expectedVersion+1); err != nil {
-			return err
-		}
-		return timeline(ctx, tx, itemID, "stage_transition", "abandoned", actor, map[string]any{"from": current.Stage, "to": "abandoned"}, expectedVersion+1)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return m.Get(ctx, itemID)
-}
-
-func (m *Module) Assign(ctx context.Context, actor Actor, itemID string, expectedVersion int64, kind, assigneeID, reason string) (*WorkItem, error) {
-	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		current, err := getTx(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		if current.Version != expectedVersion {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
-			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
-		}
-		stamp := timestamp(m.now())
-		stage := current.Stage
-		if stage == "todo" {
-			stage = "discussion"
-		}
-		_, err = tx.ExecContext(ctx, "UPDATE work_items SET assignee_kind=?,assignee_id=?,assignment_state='reserved',stage=?,version=version+1,lease_generation=lease_generation+1,updated_at=? WHERE id=?", kind, assigneeID, stage, stamp, itemID)
-		if err != nil {
-			return err
-		}
-		if err = timeline(ctx, tx, itemID, "assignment_changed", stage, actor, map[string]any{"kind": kind, "id": assigneeID, "reason": reason}, expectedVersion+1); err != nil {
-			return err
-		}
-		if stage != current.Stage {
-			return timeline(ctx, tx, itemID, "stage_transition", stage, actor, map[string]any{"from": current.Stage, "to": stage}, expectedVersion+1)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return m.Get(ctx, itemID)
-}
-
-type UpdateInput struct {
-	ExpectedVersion                                      int64
-	Title, Description, Criteria, Priority, TargetBranch string
-	Stage, DiscussionMode, ExecutionMode, AcceptanceMode string
-	AssigneeKind, AssigneeID                             string
-	FollowerIDs                                          []string
-	Configure                                            bool
-}
-
-func (m *Module) Update(ctx context.Context, actor Actor, itemID string, input UpdateInput) (*WorkItem, error) {
-	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		current, err := getTx(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		if current.Version != input.ExpectedVersion {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if current.Stage == "completed" || current.Stage == "order_closed" || current.Stage == "abandoned" {
-			return &Error{409, "TERMINAL", "Terminal work item cannot change"}
-		}
-		var title, description, criteria, priority, branch, discussion, execution, acceptance string
-		err = tx.QueryRowContext(ctx, "SELECT title,description_markdown,acceptance_criteria_markdown,priority,target_branch,discussion_mode,execution_mode,acceptance_mode FROM work_items WHERE id=?", itemID).Scan(&title, &description, &criteria, &priority, &branch, &discussion, &execution, &acceptance)
-		if err != nil {
-			return err
-		}
-		if input.Title != "" {
-			title = input.Title
-		}
-		if input.Description != "" {
-			description = input.Description
-		}
-		if input.Criteria != "" {
-			criteria = input.Criteria
-		}
-		if input.Priority != "" {
-			priority = input.Priority
-		}
-		if input.DiscussionMode != "" {
-			discussion = input.DiscussionMode
-		}
-		if input.ExecutionMode != "" {
-			execution = input.ExecutionMode
-		}
-		if input.AcceptanceMode != "" {
-			acceptance = input.AcceptanceMode
-		}
-		stage := current.Stage
-		if input.Stage != "" {
-			stage = input.Stage
-		}
-		if input.TargetBranch != "" && input.TargetBranch != branch {
-			branch = input.TargetBranch
-			if !input.Configure && stage != "todo" {
-				stage = "discussion"
-			}
-		}
-		stamp := timestamp(m.now())
-		assigneeKind, assigneeID, assignmentState := nullable(pointerValue(current.AssigneeKind)), nullable(pointerValue(current.AssigneeID)), any("reserved")
-		if input.Configure {
-			assigneeKind, assigneeID = nullable(input.AssigneeKind), nullable(input.AssigneeID)
-			if input.AssigneeID == "" {
-				assignmentState = nil
-			}
-			_, _ = tx.ExecContext(ctx, "UPDATE assignments SET ended_at=?,ended_reason='configuration_changed' WHERE work_item_id=? AND ended_at IS NULL", stamp, itemID)
-			_, _ = tx.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='configuration_changed' WHERE work_item_id=? AND released_at IS NULL", stamp, itemID)
-			if input.AssigneeID != "" {
-				_, err = tx.ExecContext(ctx, "INSERT INTO assignments(id,work_item_id,assignee_kind,assignee_id,state,generation,created_at) VALUES(?,?,?,?,?,?,?)", id(), itemID, input.AssigneeKind, input.AssigneeID, "reserved", current.Version+1, stamp)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		_, err = tx.ExecContext(ctx, "UPDATE work_items SET title=?,description_markdown=?,acceptance_criteria_markdown=?,priority=?,target_branch=?,stage=?,discussion_mode=?,execution_mode=?,acceptance_mode=?,assignee_kind=?,assignee_id=?,assignment_state=?,version=version+1,lease_generation=lease_generation+1,updated_at=? WHERE id=?", title, description, criteria, priority, branch, stage, discussion, execution, acceptance, assigneeKind, assigneeID, assignmentState, stamp, itemID)
-		if err != nil {
-			return err
-		}
-		if input.Configure {
-			if _, err = tx.ExecContext(ctx, "DELETE FROM work_item_followers WHERE work_item_id=?", itemID); err != nil {
-				return err
-			}
-			for _, followerID := range input.FollowerIDs {
-				if followerID == "" {
-					continue
-				}
-				if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO work_item_followers(work_item_id,user_id,created_at) VALUES(?,?,?)", itemID, followerID, stamp); err != nil {
-					return err
-				}
-			}
-		}
-		return timeline(ctx, tx, itemID, "work_item_configured", stage, actor, map[string]any{"stageChanged": stage != current.Stage, "assigneeChanged": input.Configure && (input.AssigneeKind != pointerValue(current.AssigneeKind) || input.AssigneeID != pointerValue(current.AssigneeID)), "followers": len(input.FollowerIDs)}, input.ExpectedVersion+1)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return m.Get(ctx, itemID)
-}
-
-func (m *Module) MoveStage(ctx context.Context, actor Actor, itemID string, expectedVersion int64, targetStage, note string) (*WorkItem, error) {
-	allowed := map[string]bool{"todo": true, "discussion": true, "execution": true, "acceptance": true, "completed": true, "order_closed": true}
-	if !allowed[targetStage] {
-		return nil, &Error{422, "INVALID_STAGE", "Target stage is not supported"}
-	}
-	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		current, err := getTx(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		if current.Version != expectedVersion {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if current.Stage == "abandoned" {
-			return &Error{409, "TERMINAL", "Abandoned work item cannot change stage"}
-		}
-		if current.Stage == targetStage {
-			return &Error{422, "UNCHANGED_STAGE", "Choose a different target stage"}
-		}
-		stamp := timestamp(m.now())
-		var completed any
-		if targetStage == "completed" || targetStage == "order_closed" {
-			completed = stamp
-		}
-		result, err := tx.ExecContext(ctx, "UPDATE work_items SET stage=?,completed_at=?,version=version+1,lease_generation=lease_generation+1,updated_at=? WHERE id=? AND version=?", targetStage, completed, stamp, itemID, expectedVersion)
-		if err != nil {
-			return err
-		}
-		if count, _ := result.RowsAffected(); count != 1 {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if targetStage == "completed" || targetStage == "order_closed" {
-			_, _ = tx.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='stage_changed' WHERE work_item_id=? AND released_at IS NULL", stamp, itemID)
-		}
-		return timeline(ctx, tx, itemID, "stage_transition", targetStage, actor, map[string]any{"from": current.Stage, "to": targetStage, "noteMarkdown": note}, expectedVersion+1)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return m.Get(ctx, itemID)
-}
-
-func pointerValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-func (m *Module) transition(ctx context.Context, actor Actor, itemID string, version int64, from, to string, inside func(*sql.Tx, *WorkItem, string) error) error {
-	return m.store.Write(ctx, func(tx *sql.Tx) error {
 		current, err := getTx(ctx, tx, itemID)
 		if err != nil {
 			return err
@@ -584,45 +438,36 @@ func (m *Module) transition(ctx context.Context, actor Actor, itemID string, ver
 		if current.Version != version {
 			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
 		}
-		if current.Stage != from {
-			return &Error{409, "INVALID_STAGE", "Work item is not in the required stage"}
+		if current.IsAgentTask {
+			return &Error{409, "AGENT_TASK_AUTO_ASSIGNED", "Agent tasks are assigned automatically"}
 		}
-		now := timestamp(m.now())
-		completed := any(nil)
-		if to == "completed" {
-			completed = now
+		if current.Stage == "closed" {
+			return &Error{409, "TERMINAL", "Closed work items are read-only"}
 		}
-		result, err := tx.ExecContext(ctx, "UPDATE work_items SET stage=?,version=version+1,updated_at=?,completed_at=COALESCE(?,completed_at) WHERE id=? AND version=?", to, now, completed, itemID, version)
+		stamp := timestamp(m.now())
+		_, err = tx.ExecContext(ctx, "UPDATE work_items SET assignee_kind=?,assignee_id=?,version=version+1,updated_at=? WHERE id=?", kind, assigneeID, stamp, itemID)
 		if err != nil {
 			return err
 		}
-		n, _ := result.RowsAffected()
-		if n != 1 {
-			return &Error{409, "VERSION_CONFLICT", "Work item version changed"}
-		}
-		if err = inside(tx, current, now); err != nil {
-			return err
-		}
-		return timeline(ctx, tx, itemID, "stage_transition", to, actor, map[string]any{"from": from, "to": to}, version+1)
+		return timeline(ctx, tx, itemID, "assignment_changed", current.Stage, actor, map[string]any{"kind": kind, "id": assigneeID, "reason": reason}, version+1)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, itemID)
 }
 
-func getTx(ctx context.Context, tx *sql.Tx, id string) (*WorkItem, error) {
-	var w WorkItem
-	err := tx.QueryRowContext(ctx, "SELECT id,project_id,number,title,stage,target_branch,assignee_kind,assignee_id,version FROM work_items WHERE id=?", id).Scan(&w.ID, &w.ProjectID, &w.Number, &w.Title, &w.Stage, &w.TargetBranch, &w.AssigneeKind, &w.AssigneeID, &w.Version)
-	return &w, err
+func getTx(ctx context.Context, tx *sql.Tx, itemID string) (*WorkItem, error) {
+	w, err := scanItem(tx.QueryRowContext(ctx, itemSelect+" WHERE id=?", itemID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, &Error{404, "NOT_FOUND", "Work item not found"}
+	}
+	return w, err
 }
 func timeline(ctx context.Context, tx *sql.Tx, itemID, kind, stage string, actor Actor, payload any, version int64) error {
 	raw, _ := json.Marshal(payload)
-	now := timestamp(time.Now())
-	_, err := tx.ExecContext(ctx, "INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) VALUES(?,?,?,?,?,?,?,?,?)", id(), itemID, kind, stage, actor.Type, nullable(actor.ID), string(raw), version, now)
+	_, err := tx.ExecContext(ctx, "INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) VALUES(?,?,?,?,?,?,?,?,?)", id(), itemID, kind, stage, actor.Type, nullable(actor.ID), string(raw), version, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
-}
-func nullable(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
 }
 func readMaps(ctx context.Context, db *sql.DB, query string, args ...any) []map[string]any {
 	rows, err := db.QueryContext(ctx, query, args...)
@@ -633,29 +478,29 @@ func readMaps(ctx context.Context, db *sql.DB, query string, args ...any) []map[
 	cols, _ := rows.Columns()
 	out := []map[string]any{}
 	for rows.Next() {
-		values := make([]any, len(cols))
+		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
+		for i := range vals {
+			ptrs[i] = &vals[i]
 		}
 		if rows.Scan(ptrs...) != nil {
 			continue
 		}
-		m := map[string]any{}
+		row := map[string]any{}
 		for i, c := range cols {
-			if b, ok := values[i].([]byte); ok {
-				m[c] = string(b)
-			} else {
-				m[c] = values[i]
+			v := vals[i]
+			if b, ok := v.([]byte); ok {
+				v = string(b)
 			}
 			if strings.HasSuffix(c, "_json") {
 				var decoded any
-				if s, ok := m[c].(string); ok && json.Unmarshal([]byte(s), &decoded) == nil {
-					m[strings.TrimSuffix(c, "_json")] = decoded
+				if s, ok := v.(string); ok && json.Unmarshal([]byte(s), &decoded) == nil {
+					v = decoded
 				}
 			}
+			row[c] = v
 		}
-		out = append(out, m)
+		out = append(out, row)
 	}
 	return out
 }

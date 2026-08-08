@@ -1776,3 +1776,13 @@
     padding-left: 16px;
   }
 }
+.agent-pause-group {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line, #d8d8d8);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface, #fff) 92%, #6f7cff 8%);
+}
+.agent-pause-group[hidden] { display: none; }
+.agent-pause-group h4 { margin: 0 0 12px; }
+.resume-agent { color: var(--accent, #3157d5); }

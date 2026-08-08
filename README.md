@@ -1,74 +1,62 @@
 # ProjectBoard
 
-ProjectBoard 是供成员与 Codex Agent 协作的安全任务队列。服务端以一个 Go 二进制同时提供 HTTPS 工作台、SQLite 持久化和独立 SSH MCP 服务；Agent 只需登记 Ed25519 公钥，不需要 Runner、Bearer Token 或专用客户端。
+ProjectBoard 是供人类成员与本地 Codex Agent 协作的任务看板。它以单个 Go 服务提供 Web 界面、SQLite 持久化和内置调度器；Agent 不需要 SSH、MCP 或外部 Runner，服务进程会直接调用同一台机器上的 `codex` CLI。
 
-当前 Git 提供商仅支持 GitHub。ProjectBoard 根据 Agent、项目授权、任务指派、execution 和有效租约推导唯一仓库，并签发最长一小时、单仓库 `contents:write` 的 GitHub installation token。短期 Token 只通过 SSH Git credential protocol 交给 Git，不进入提示词、remote URL、数据库、审计或日志。
+## 前置条件
+
+- Go 1.26（从源码构建时）
+- `git` 与 `codex` 位于 ProjectBoard 服务账户的 `PATH`
+- 该服务账户已完成 Codex 登录
+- 使用 Agent 写入仓库时，管理员已在界面中配置并授权 GitHub App
 
 ## 构建与启动
-
-需要 Go 1.26：
 
 ```bash
 go build -o projectboard ./cmd/projectboard
 PROJECTBOARD_BOOTSTRAP_PASSWORD='change-this-password' ./projectboard serve
 ```
 
-默认监听：
-
-- Web：`:3333`（生产环境应通过 TLS 反向代理发布为 HTTPS）
-- Agent SSH：`:2222`
-- 数据目录：`./data`
+默认 Web 地址为 `http://localhost:3333`，数据目录为 `./data`。生产环境应通过 TLS 反向代理提供 HTTPS。
 
 常用环境变量：
 
 ```text
 PORT=3333
 PROJECTBOARD_DATA_DIR=./data
-PROJECTBOARD_SSH_LISTEN_ADDRESS=:2222
-PROJECTBOARD_SSH_PUBLIC_HOST=board.example.com
-PROJECTBOARD_SSH_PUBLIC_PORT=2222
-PROJECTBOARD_SSH_HOST_KEY_PATH=./data/secrets/ssh_host_ed25519
+PROJECTBOARD_BOOTSTRAP_USERNAME=admin
+PROJECTBOARD_BOOTSTRAP_PASSWORD=change-this-password
 PROJECTBOARD_PUBLIC_URL=https://board.example.com
 ```
 
-SSH 监听或 host key 初始化失败时，`serve` 会直接失败。首次启动会在配置路径生成权限受限的 Ed25519 host key。
+## Agent 使用方式
 
-## 连接 Codex
+管理员创建 Agent 时，运行类型固定为“本地 Codex CLI”，并设置：
 
-1. 在“系统设置 → Agent SSH 密钥”创建 Agent，并记录 Agent ID。
-2. 在 Codex 主机执行 `ssh-keygen -t ed25519 -f ~/.ssh/projectboard_agent`，只把 `.pub` 内容登记到 ProjectBoard。
-3. 从管理页复制 host key 指纹和精确的 `known_hosts` 行，核对后固定保存；不要使用盲目信任未知主机的选项。
-4. 将 SSH MCP 写入用户级 `~/.codex/config.toml`，让 App、CLI 和 IDE 共用：
+- 最大并发任务数，默认 `1`
+- 单轮超时分钟数，默认 `120`
+- 允许参与的项目
 
-```toml
-[mcp_servers.projectboard]
-command = "ssh"
-args = ["-T", "-p", "2222", "-i", "/absolute/path/projectboard_agent", "<agent-id>@board.example.com", "projectboard-mcp"]
-startup_timeout_sec = 20
-tool_timeout_sec = 70
+任务创建时可以勾选“是否是 Agent 任务”。只有勾选后才显示同组的两个暂停选项，且默认都关闭：
+
+- 计划完成时暂停：首次轮次只生成计划，成员点击“继续执行”并发送可编辑确认消息后恢复同一 Codex session。
+- 任务完成时暂停：Agent 成功后停在“完成”，等待成员返工或手动关闭；未勾选时自动关闭。
+
+任务状态固定为 `创建 → 进行 → 完成 → 关闭`。关闭是不可恢复的只读终态；阻塞是独立标记，阻塞的 Agent 任务不会被调度。
+
+## 本地执行与资源
+
+每个 Agent 任务使用 `PROJECTBOARD_DATA_DIR/workspaces/` 下的独立 clone 和 `projectboard/<project-key>/<task-number>` 分支。ProjectBoard 使用：
+
+```text
+codex exec --json --sandbox workspace-write --output-schema ... -C <workspace>
+codex exec resume <session-id> ...
 ```
 
-5. 让 Codex 持续执行：等待任务、领取、准备仓库与环境、实现并回写证据，然后继续等待，直到用户取消。
+Codex 仍受自身沙箱和审批规则约束。非交互轮次需要额外审批、超时、异常退出或返回无效结构化结果时，任务保持“进行”并进入失败暂停。原始 JSONL 保存在 execution 历史中，任务对话只记录最终消息和系统事件。
 
-完整 Windows/POSIX 操作、安全限制、Git credential helper 和持续执行提示见 [`web/agent-execution.md`](web/agent-execution.md)，运行中的服务也公开在 `/docs/agent-execution.md`。
+GitHub 短期凭据仅注入 Git 子进程的进程级配置，不写入仓库、remote URL、提示词或数据库。关闭任务后工作目录默认保留，可在任务页查看占用并人工清理；未关闭任务不能清理。
 
-## Agent 行为与安全边界
-
-- 每个 Agent 可登记多把永久有效的 Ed25519 公钥；删除前一直有效。
-- 每个 Agent 同时只有一个 MCP SSH 会话。管理员可显式断开。
-- 删除当前会话使用的密钥会立即断连、撤销 Git 凭据、释放租约并恢复任务；普通网络断线只撤销凭据，租约到期前可重连恢复。
-- 项目授权默认不允许领取未指派任务。只有打开 `allowUnassignedClaim` 后才可自动认领。
-- 每个 Agent 同时只持有一个任务租约。已指派任务优先，其次是允许认领的未指派任务；同类按 `urgent`、`high`、`medium`、`low` 和创建时间排序。
-- Agent 自主读取仓库说明并配置环境，但必须记录实际命令、结果和风险；仍受 Codex 沙箱、审批和操作系统权限约束。
-- 只允许 `projectboard-mcp` 与 `projectboard-git-credential <execution-id>` SSH 命令；shell、PTY、SFTP/SCP 和端口转发均被拒绝。
-
-## GitHub 配置
-
-管理员在系统设置中保存 ProjectBoard 公开地址，然后从项目设置启动 GitHub App 配置。GitHub App 安装权限需要 `Contents: read & write`；运行时凭据仍会按单 execution、单仓库降权。
-
-Agent 对每项任务使用独立工作目录和 `projectboard/<project-key>/<task-number>` 分支。不得 force-push、不得直接推送目标分支，也不得回退到机器已有的 Git 登录。
-
-## 数据、备份与升级
+## 数据与升级
 
 SQLite 使用 WAL。备份和恢复：
 
@@ -77,7 +65,7 @@ SQLite 使用 WAL。备份和恢复：
 ./projectboard restore --input ./backups/<backup-directory>
 ```
 
-Schema v5 是不兼容的认证迁移：旧 Agent Token、配对、设备、Runner 状态和 GitLab 数据会被删除；旧活动租约以 `auth_migration` 结束，历史执行记录迁移为 `agent_executions`。
+当前 schema 为 v6，与旧 schema 不兼容；旧数据库启动时会返回明确错误，不执行数据迁移。
 
 ## 验证
 
@@ -85,5 +73,3 @@ Schema v5 是不兼容的认证迁移：旧 Agent Token、配对、设备、Runn
 go test ./...
 go build ./cmd/projectboard
 ```
-
-未来 Runner 与 GitLab 的重新引入条件分别记录在 [`docs/FUTURE_RUNNER.md`](docs/FUTURE_RUNNER.md) 和 [`docs/FUTURE_GITLAB.md`](docs/FUTURE_GITLAB.md)，当前版本不包含代码桩或隐藏入口。

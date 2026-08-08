@@ -2,27 +2,29 @@
 
 ```mermaid
 flowchart LR
-  C["Codex App / CLI / IDE"] -->|"system ssh + pinned host key"| S["ProjectBoard SSH :2222"]
-  S --> M["SSH MCP transport"]
-  M --> E["Agent Execution module"]
-  E --> Q["Tasks, assignments, leases, evidence"]
-  E --> B["Git credential broker"]
-  B -->|"single repository, <= 1 hour"| G["GitHub App"]
-  H["Human web client"] --> W["HTTPS API"]
-  W --> Q
-  Q --> D[("SQLite WAL")]
+  H["Human web client"] --> A["HTTPS API"]
+  A --> Q["Task conversation and state"]
+  S["Built-in scheduler"] --> Q
+  S --> C["Local codex CLI"]
+  C --> W["Per-task workspace"]
+  S --> G["GitHub App credential provider"]
+  Q --> D[("SQLite WAL, schema v6")]
 ```
 
-## Deep module boundaries
+## Module boundaries
 
-`internal/agentexec` owns Agent authorization, task discovery and ordering, atomic claim, one-Agent/one-lease capacity, heartbeat, release, environment evidence and task lifecycle operations. Transports call it directly; they do not forward to internal HTTP handlers.
+`internal/workqueue` owns task creation, the four-state transition rules, blocking, conversation writes and explicit Agent resume semantics.
 
-`internal/server/agent_ssh.go` owns SSH authentication and protocol restrictions. It accepts only registered Ed25519 keys, permits only `projectboard-mcp` and execution credential commands, enforces one primary session, and rejects shells, PTYs, file transfer and forwarding.
+`internal/agentexec` owns scheduling, capacity accounting, atomic claim, workspace preparation, Codex process lifecycle, session continuation, structured result validation, execution evidence and cleanup restrictions.
 
-`internal/providers` owns GitHub App interaction. Callers provide an already-derived installation and repository; permission is fixed to `contents:write`. Issued tokens live only in the SSH gateway's memory and are revoked on submission, release, disconnect or key revocation.
+`internal/providers` owns GitHub App integration. Repository credentials are issued for the selected project and injected only into a Git child process; Codex does not receive the token.
 
-The HTTPS API remains for human administration and collaboration. There is no Bearer Agent API, HTTP MCP endpoint, local stdio forwarding command, Runner process or GitLab adapter.
+`internal/server` owns the session/CSRF-protected human API and embedded UI. Agent project grants express participation only.
 
-## Persistence and migration
+## Runtime lifecycle
 
-Schema v5 stores `agent_ssh_keys`, `agent_ssh_sessions`, `agent_executions` and `agent_environment_steps`, plus `allow_unassigned_claim` on project Agent grants. It ends pre-migration leases with `auth_migration`, retains execution history under its new name, and removes legacy tokens, pairing, devices, local mappings, Runner status and GitLab data.
+The scheduler is woken by relevant API changes and also polls as a fallback. On restart, running executions are recorded as interrupted and their tasks enter failure pause with workspace and session retained. Removing an Agent cancels its processes and requeues non-closed tasks without their Agent/session binding.
+
+Each task workspace is retained after closure until an authorized member explicitly cleans it. Cleanup validates that the target remains beneath the managed workspace directory.
+
+Schema v6 is intentionally incompatible with earlier schemas; startup rejects old databases instead of migrating them.

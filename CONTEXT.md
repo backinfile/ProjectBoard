@@ -1,8 +1,9 @@
 # Engineering context
 
-- Agent authentication: registered, non-revoked OpenSSH Ed25519 public keys.
-- Transport: built-in SSH server; MCP runs as stdio inside `projectboard-mcp`.
-- Execution: `internal/agentexec`, one active lease per Agent.
-- Git: GitHub App installation tokens scoped to the execution's single repository.
+- Agent runtime: local `codex` CLI started by the ProjectBoard service process.
+- Scheduling: built-in event-woken loop with polling fallback and per-Agent capacity.
+- Task workflow: `created -> in_progress -> completed -> closed`, with an independent block flag.
+- Continuity: one Codex session ID and isolated workspace per task.
+- Git: short-lived GitHub App credentials scoped to Git child processes.
 - Human surface: embedded web UI and session/CSRF-protected HTTPS API.
-- Removed surfaces: Agent Bearer tokens, pairing/devices, HTTP MCP, local MCP forwarding, Runner and GitLab.
+- Deliberately absent: SSH Agent transport, MCP Agent server, external Runner and remote execution.

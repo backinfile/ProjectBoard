@@ -52,18 +52,11 @@ func main() {
 		BootstrapUsername: env("PROJECTBOARD_BOOTSTRAP_USERNAME", "admin"),
 		BootstrapPassword: os.Getenv("PROJECTBOARD_BOOTSTRAP_PASSWORD"),
 		Production:        env("PROJECTBOARD_ENV", "development") == "production",
-		SSHListenAddress:  env("PROJECTBOARD_SSH_LISTEN_ADDRESS", ":2222"),
-		SSHPublicHost:     os.Getenv("PROJECTBOARD_SSH_PUBLIC_HOST"),
-		SSHPublicPort:     env("PROJECTBOARD_SSH_PUBLIC_PORT", "2222"),
-		SSHHostKeyPath:    os.Getenv("PROJECTBOARD_SSH_HOST_KEY_PATH"),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer handler.Close()
-	if err = handler.StartSSH(); err != nil {
-		log.Fatal(err)
-	}
 	address := ":" + env("PORT", "3333")
 	log.Printf("ProjectBoard listening on http://localhost%s", address)
 	httpServer := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}

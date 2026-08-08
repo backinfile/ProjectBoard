@@ -2,13 +2,13 @@ package server_test
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -21,7 +21,6 @@ import (
 
 	"github.com/projectboard/projectboard/internal/providers"
 	"github.com/projectboard/projectboard/internal/server"
-	"golang.org/x/crypto/ssh"
 )
 
 func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
@@ -97,10 +96,10 @@ func TestDeletingAgentHidesItFromOrganizationAndProjectLists(t *testing.T) {
 	agentID := agent["id"].(string)
 	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "agent-delete", "name": "Agent Delete", "repositoryUrl": "https://example.com/agent-delete.git"})
 	projectID := project["id"].(string)
-	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{"allowUnassignedClaim": false})
+	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{})
 
 	requestJSON(t, client, http.MethodDelete, host.URL+"/api/agents/"+agentID, csrf, nil)
-	requestErrorCode(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{"allowUnassignedClaim": true}, http.StatusNotFound, "NOT_FOUND")
+	requestErrorCode(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{}, http.StatusNotFound, "NOT_FOUND")
 	for _, listedAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil) {
 		if listedAgent["id"] == agentID {
 			t.Fatalf("deleted agent remained in organization list: %#v", listedAgent)
@@ -113,7 +112,7 @@ func TestDeletingAgentHidesItFromOrganizationAndProjectLists(t *testing.T) {
 	}
 }
 
-func TestAgentSSHKeyManagementAndLegacyAgentRoutes(t *testing.T) {
+func TestLocalCodexAgentConfigurationIsExposed(t *testing.T) {
 	handler := server.NewTestHandler(t.TempDir())
 	defer handler.Close()
 	host := httptest.NewServer(handler)
@@ -122,46 +121,34 @@ func TestAgentSSHKeyManagementAndLegacyAgentRoutes(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
 	csrf := login["csrfToken"].(string)
-	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "ssh-admin-test", "purpose": "test"})
-	agentID := agent["id"].(string)
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "local-codex", "purpose": "test", "runtimeType": "local_codex_cli", "maxConcurrentTasks": 3, "turnTimeoutMinutes": 45})
+	if agent["runtimeType"] != "local_codex_cli" || agent["maxConcurrentTasks"] != float64(3) || agent["turnTimeoutMinutes"] != float64(45) {
+		t.Fatalf("unexpected Agent: %#v", agent)
+	}
+	agents := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil)
+	if len(agents) != 1 || agents[0]["currentLoad"] != float64(0) {
+		t.Fatalf("unexpected Agents: %#v", agents)
+	}
+	requestErrorCode(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "invalid", "maxConcurrentTasks": -1, "turnTimeoutMinutes": 120}, http.StatusUnprocessableEntity, "INVALID_AGENT_CONFIGURATION")
+}
 
-	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
+func TestCreatingAgentFailsWhenCodexIsMissingFromPath(t *testing.T) {
+	handler, err := server.New(server.Config{
+		DataDir:           t.TempDir(),
+		BootstrapUsername: "admin",
+		BootstrapPassword: "StrongPassword123",
+		LookPath:          func(string) (string, error) { return "", errors.New("missing") },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sshKey, _ := ssh.NewPublicKey(publicKey)
-	created := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agentID+"/ssh-keys", csrf, map[string]any{"label": "workstation", "publicKey": string(ssh.MarshalAuthorizedKey(sshKey))})
-	if !strings.HasPrefix(created["fingerprint"].(string), "SHA256:") {
-		t.Fatalf("unexpected fingerprint: %#v", created)
-	}
-	keys := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents/"+agentID+"/ssh-keys", csrf, nil)
-	if len(keys) != 1 || keys[0]["label"] != "workstation" {
-		t.Fatalf("unexpected SSH keys: %#v", keys)
-	}
-
-	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	rsaPublic, _ := ssh.NewPublicKey(&rsaKey.PublicKey)
-	payload, _ := json.Marshal(map[string]any{"label": "unsupported", "publicKey": string(ssh.MarshalAuthorizedKey(rsaPublic))})
-	request, _ := http.NewRequest(http.MethodPost, host.URL+"/api/agents/"+agentID+"/ssh-keys", bytes.NewReader(payload))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-CSRF-Token", csrf)
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnprocessableEntity {
-		t.Fatalf("RSA Agent key status=%d", response.StatusCode)
-	}
-
-	legacy, err := client.Post(host.URL+"/api/agent/poll", "application/json", strings.NewReader("{}"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy.Body.Close()
-	if legacy.StatusCode != http.StatusNotFound && legacy.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("legacy Agent route status=%d", legacy.StatusCode)
-	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	requestErrorCode(t, client, http.MethodPost, host.URL+"/api/agents", login["csrfToken"].(string), map[string]any{"name": "missing-codex", "purpose": "test PATH validation"}, http.StatusUnprocessableEntity, "CODEX_CLI_NOT_FOUND")
 }
 
 func TestTaskMessageAttachmentsCanBeUploadedBoundAndPreviewed(t *testing.T) {
@@ -274,34 +261,14 @@ func TestHumanCanCompleteTheRequiredWorkItemFlow(t *testing.T) {
 		"descriptionMarkdown": "Implement the agreed scope.", "acceptanceCriteriaMarkdown": "All checks pass.",
 		"assigneeKind": "human", "assigneeId": me["id"],
 	})
-	if item["stage"] != "discussion" {
-		t.Fatalf("created stage = %v, want discussion", item["stage"])
+	if item["stage"] != "created" {
+		t.Fatalf("created stage = %v, want created", item["stage"])
 	}
-
-	item = requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/CORE-1/discussion-conclusions", csrf, map[string]any{
-		"requestId": "freeze-work-001", "expectedVersion": item["version"], "goalMarkdown": "Ship",
-		"scopeMarkdown": "Go server", "outOfScopeMarkdown": "None", "implementationPlanMarkdown": "Build vertically",
-		"acceptanceCriteriaMarkdown": "All checks pass", "risksMarkdown": "Migration",
-	})
-	if item["stage"] != "execution" {
-		t.Fatalf("frozen stage = %v, want execution", item["stage"])
-	}
-
-	item = requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/CORE-1/submit-execution", csrf, map[string]any{
-		"requestId": "execute-work-001", "expectedVersion": item["version"], "summaryMarkdown": "Implemented",
-		"pushed": true, "worktreeClean": true, "forbiddenPathsClean": true, "commits": []string{"abc123"},
-		"changedFiles": []string{"main.go"}, "validations": []map[string]any{{"name": "test", "required": true, "exitCode": 0, "durationMs": 10, "logSummary": "ok"}},
-		"remainingRisksMarkdown": "",
-	})
-	if item["stage"] != "acceptance" {
-		t.Fatalf("execution stage = %v, want acceptance", item["stage"])
-	}
-
-	item = requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/CORE-1/acceptance-attempts", csrf, map[string]any{
-		"requestId": "accept-work-001", "expectedVersion": item["version"], "outcome": "pass", "noteMarkdown": "Accepted",
-	})
-	if item["stage"] != "completed" {
-		t.Fatalf("accepted stage = %v, want completed", item["stage"])
+	for _, target := range []string{"in_progress", "completed", "closed"} {
+		item = requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/CORE-1/stage", csrf, map[string]any{"expectedVersion": item["version"], "targetStage": target, "noteMarkdown": "advance"})
+		if item["stage"] != target {
+			t.Fatalf("stage = %v, want %s", item["stage"], target)
+		}
 	}
 	if conversation, ok := item["conversation"].([]any); !ok || len(conversation) < 4 {
 		t.Fatalf("conversation = %#v, want recorded lifecycle", item["conversation"])
@@ -332,15 +299,13 @@ func TestWorkItemFollowersCriteriaAndNotifications(t *testing.T) {
 	if len(followers) != 1 || followers[0] != member["id"] {
 		t.Fatalf("followers=%#v", followers)
 	}
-	item = requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/work-items/PEOPLE-1/discussion-conclusions", csrf, map[string]any{
-		"expectedVersion": item["version"], "goalMarkdown": "Ship", "scopeMarkdown": "Feature", "implementationPlanMarkdown": "Implement", "acceptanceCriteriaMarkdown": "Initial criterion",
-	})
-	if item["stage"] != "execution" {
-		t.Fatalf("stage=%v, want execution", item["stage"])
+	item = requestJSON(t, adminClient, http.MethodPost, host.URL+"/api/work-items/PEOPLE-1/stage", csrf, map[string]any{"expectedVersion": item["version"], "targetStage": "in_progress"})
+	if item["stage"] != "in_progress" {
+		t.Fatalf("stage=%v, want in_progress", item["stage"])
 	}
 	item = requestJSON(t, adminClient, http.MethodPatch, host.URL+"/api/work-items/PEOPLE-1", csrf, map[string]any{"expectedVersion": item["version"], "acceptanceCriteriaMarkdown": "Initial criterion\nAdded during execution"})
-	if item["stage"] != "execution" || !strings.Contains(item["acceptance_criteria_markdown"].(string), "Added during execution") {
-		t.Fatalf("criteria update during execution failed: %#v", item)
+	if item["stage"] != "in_progress" || !strings.Contains(item["acceptance_criteria_markdown"].(string), "Added during execution") {
+		t.Fatalf("criteria update during progress failed: %#v", item)
 	}
 	memberJar, _ := cookiejar.New(nil)
 	memberClient := &http.Client{Jar: memberJar}
