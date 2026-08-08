@@ -187,3 +187,38 @@ func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalAgentWorkflowIsEmbedded(t *testing.T) {
+	data, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(data)
+	for _, marker := range []string{
+		"local_codex_cli",
+		"maxConcurrentTasks",
+		"turnTimeoutMinutes",
+		"isAgentTask",
+		"pauseAfterPlan",
+		"pauseAfterCompletion",
+		"resumeAgent",
+		"continueAgent",
+		"['created','in_progress','completed','closed']",
+	} {
+		if !strings.Contains(source, marker) {
+			t.Errorf("local Agent workflow is missing %q", marker)
+		}
+	}
+	if strings.Contains(string(mustReadEmbedded(t, "index.html")), "agent-execution.md") {
+		t.Error("the embedded application still links the removed Agent execution guide")
+	}
+}
+
+func mustReadEmbedded(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := Files.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}

@@ -1,104 +1,95 @@
 package agentexec
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
 
-func TestListTasksPrefersAssignedThenPriorityAndHonorsUnassignedGrant(t *testing.T) {
-	database, module, queue, agentID, projectID := fixture(t, true)
-	defer database.Close()
-
-	unassignedLow := createTask(t, queue, projectID, "unassigned low", "low", "", "")
-	unassignedUrgent := createTask(t, queue, projectID, "unassigned urgent", "urgent", "", "")
-	assigned := createTask(t, queue, projectID, "assigned medium", "medium", "agent", agentID)
-
-	tasks, err := module.ListTasks(t.Context(), agentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks) != 3 || tasks[0].ID != assigned.ID || tasks[1].ID != unassignedUrgent.ID || tasks[2].ID != unassignedLow.ID {
-		t.Fatalf("unexpected task order: %#v", tasks)
-	}
-
-	if _, err = database.DB.Exec("UPDATE agent_project_grants SET allow_unassigned_claim=0 WHERE agent_id=? AND project_id=?", agentID, projectID); err != nil {
-		t.Fatal(err)
-	}
-	tasks, err = module.ListTasks(t.Context(), agentID)
-	if err != nil || len(tasks) != 1 || tasks[0].ID != assigned.ID {
-		t.Fatalf("unassigned grant was not enforced: %#v, %v", tasks, err)
-	}
+type fakeRunner struct {
+	results chan Result
+	calls   chan Invocation
 }
 
-func TestClaimIsAtomicAndLimitsAgentToOneLease(t *testing.T) {
-	database, module, queue, agentID, projectID := fixture(t, true)
-	defer database.Close()
-	first := createTask(t, queue, projectID, "first", "high", "", "")
-	second := createTask(t, queue, projectID, "second", "medium", "", "")
-
-	execution, err := module.Claim(t.Context(), agentID, first.ID, first.Version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if execution.TaskBranch != "projectboard/test/1" || execution.RepositoryName != "acme/repo" {
-		t.Fatalf("unexpected execution: %#v", execution)
-	}
-	if _, err = module.Claim(t.Context(), agentID, second.ID, second.Version); err == nil {
-		t.Fatal("second active task was claimed")
-	}
-	if err = module.Release(t.Context(), agentID, execution.ID, execution.LeaseID, "done", false); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = module.Claim(t.Context(), agentID, second.ID, second.Version); err != nil {
-		t.Fatalf("task was not claimable after release: %v", err)
-	}
+func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
+	f.calls <- in
+	return <-f.results, nil
 }
 
-func fixture(t *testing.T, allowUnassigned bool) (*store.Store, *Module, *workqueue.Module, string, string) {
-	t.Helper()
-	database, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue := workqueue.New(database)
-	stamp, agentID, projectID := now(), security.Token(18), security.Token(18)
-	_, err = database.DB.Exec("INSERT INTO agents(id,name,purpose,status,created_at) VALUES(?,?,'test','active',?)", agentID, "agent-"+agentID[:6], stamp)
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = database.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES(?,'test','Test','https://github.com/acme/repo.git',?,?)", projectID, stamp, stamp)
+	_, err = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	allow := 0
-	if allowUnassigned {
-		allow = 1
-	}
-	_, err = database.DB.Exec("INSERT INTO agent_project_grants(agent_id,project_id,allow_unassigned_claim,created_at) VALUES(?,?,?,?)", agentID, projectID, allow, stamp)
+	_, err = db.DB.Exec("INSERT INTO agent_project_grants(agent_id,project_id,created_at) VALUES('a','p',?)", stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorizationID := security.Token(18)
-	_, err = database.DB.Exec("INSERT INTO provider_authorizations(id,provider,name,base_url,installation_id,encrypted_secret,status,created_at,updated_at) VALUES(?,'github','GitHub','https://github.com','99','sealed','active',?,?)", authorizationID, stamp, stamp)
+	queue := workqueue.New(db)
+	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Plan me", IsAgentTask: true, PauseAfterPlan: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = database.DB.Exec("INSERT INTO project_repository_grants(id,project_id,authorization_id,repository_id,repository_name,clone_url,default_branch,access_level,approved_by,approved_at) VALUES(?,?,?,'42','acme/repo','https://github.com/acme/repo.git','main','write','admin',?)", security.Token(18), projectID, authorizationID, stamp)
+	if err = os.MkdirAll(filepath.Join(dir, "workspaces", "pb-1", ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{results: make(chan Result, 2), calls: make(chan Invocation, 2)}
+	runner.results <- Result{ThreadID: "thread-1", Status: "planned", Message: "Implementation plan"}
+	runner.results <- Result{ThreadID: "thread-1", Status: "paused", Message: "Waiting for input"}
+	module := New(db, queue, Options{DataDir: dir, Runner: runner, PollInterval: 10 * time.Millisecond})
+	if err = module.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer module.Close()
+	select {
+	case call := <-runner.calls:
+		if !call.PlanOnly {
+			t.Fatal("first turn was not plan-only")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Agent did not receive task")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		item, err = queue.Get(t.Context(), item.ID)
+		if err == nil && item.AgentState == "paused_plan" {
+			if item.CodexThreadID == nil || *item.CodexThreadID != "thread-1" {
+				t.Fatalf("thread = %#v", item.CodexThreadID)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if item.AgentState != "paused_plan" {
+		t.Fatalf("agent state = %s", item.AgentState)
+	}
+	item, err = queue.AddMessageWithResume(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, item.ID, "Continue", item.Version, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return database, New(database, queue), queue, agentID, projectID
-}
-
-func createTask(t *testing.T, queue *workqueue.Module, projectID, title, priority, kind, assigneeID string) *workqueue.WorkItem {
-	t.Helper()
-	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "admin"}, workqueue.CreateInput{ProjectID: projectID, Title: title, AcceptanceCriteriaMarkdown: "done", Priority: priority, AssigneeKind: kind, AssigneeID: assigneeID})
-	if err != nil {
-		t.Fatal(err)
+	module.Wake()
+	select {
+	case call := <-runner.calls:
+		if call.PlanOnly || call.ThreadID != "thread-1" {
+			t.Fatalf("resume invocation = %+v", call)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Agent session was not resumed")
 	}
-	return item
 }

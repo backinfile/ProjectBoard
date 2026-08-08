@@ -1,13 +1,20 @@
-// Package agentexec owns the authenticated Agent task lifecycle. Its interface
-// is the only execution surface used by the SSH MCP transport.
 package agentexec
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/projectboard/projectboard/internal/security"
@@ -15,417 +22,546 @@ import (
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
 
-type Error struct {
-	Code    string
-	Message string
+type Credential struct {
+	Token  string
+	Revoke func(context.Context) error
+}
+type CredentialProvider interface {
+	Issue(context.Context, string) (*Credential, error)
+}
+type Invocation struct {
+	WorkDir, Prompt, ThreadID string
+	Timeout                   time.Duration
+	PlanOnly                  bool
+}
+type Result struct{ ThreadID, Status, Message, Raw, CommandJSON string }
+type Runner interface {
+	Run(context.Context, Invocation) (Result, error)
 }
 
-func (e *Error) Error() string { return e.Message }
-
-type Module struct {
-	store *store.Store
-	queue *workqueue.Module
+type ExecRunner struct {
+	Command    string
+	SchemaPath string
 }
 
-func New(database *store.Store, queue *workqueue.Module) *Module {
-	return &Module{store: database, queue: queue}
-}
-
-type TaskSummary struct {
-	ID            string `json:"id"`
-	ProjectID     string `json:"projectId"`
-	ProjectKey    string `json:"projectKey"`
-	Number        int64  `json:"number"`
-	Title         string `json:"title"`
-	Priority      string `json:"priority"`
-	Stage         string `json:"stage"`
-	TargetBranch  string `json:"targetBranch"`
-	Version       int64  `json:"version"`
-	Assigned      bool   `json:"assigned"`
-	RepositoryURL string `json:"repositoryUrl"`
-}
-
-type Execution struct {
-	ID             string              `json:"executionId"`
-	LeaseID        string              `json:"leaseId"`
-	ExpiresAt      string              `json:"expiresAt"`
-	TaskBranch     string              `json:"taskBranch"`
-	RepositoryURL  string              `json:"repositoryUrl"`
-	RepositoryName string              `json:"repositoryName"`
-	WorkItem       *workqueue.WorkItem `json:"workItem"`
-	ProjectPolicy  map[string]any      `json:"projectPolicy"`
-}
-
-func (m *Module) Authorize(agentID, keyID string) error {
-	var found int
-	err := m.store.DB.QueryRow(`SELECT 1 FROM agent_ssh_keys k JOIN agents a ON a.id=k.agent_id
-		WHERE k.id=? AND k.agent_id=? AND k.revoked_at IS NULL AND a.revoked_at IS NULL AND a.status='active'`, keyID, agentID).Scan(&found)
-	if err != nil {
-		return &Error{Code: "AGENT_AUTH_REVOKED", Message: "Agent or SSH key is no longer authorized"}
+func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
+	command := r.Command
+	if command == "" {
+		command = "codex"
 	}
+	args := []string{"exec"}
+	if in.ThreadID != "" {
+		args = append(args, "resume", in.ThreadID, "--json", "--output-schema", r.SchemaPath, "-c", `sandbox_mode="workspace-write"`, "-")
+	} else {
+		args = append(args, "--json", "--sandbox", "workspace-write", "--output-schema", r.SchemaPath, "-C", in.WorkDir, "-")
+	}
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = in.WorkDir
+	cmd.Stdin = strings.NewReader(in.Prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	raw := stdout.String()
+	commandJSON, _ := json.Marshal(append([]string{command}, args...))
+	result := Result{Raw: raw, ThreadID: in.ThreadID, CommandJSON: string(commandJSON)}
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	scanner.Buffer(make([]byte, 64*1024), 4<<20)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		switch event["type"] {
+		case "thread.started":
+			if v, ok := event["thread_id"].(string); ok {
+				result.ThreadID = v
+			}
+		case "item.completed":
+			item, _ := event["item"].(map[string]any)
+			if item["type"] == "agent_message" {
+				if v, ok := item["text"].(string); ok {
+					result.Message = v
+				}
+			}
+		case "turn.failed", "error":
+			if err == nil {
+				err = errors.New("Codex reported a failed turn")
+			}
+		}
+	}
+	if err != nil {
+		return result, fmt.Errorf("codex exec: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var envelope struct{ Status, Message string }
+	if json.Unmarshal([]byte(result.Message), &envelope) != nil {
+		return result, errors.New("Codex returned invalid structured output")
+	}
+	result.Status = envelope.Status
+	result.Message = envelope.Message
+	if result.Status == "" || result.Message == "" {
+		return result, errors.New("Codex result is missing status or message")
+	}
+	return result, nil
+}
+
+type Options struct {
+	DataDir      string
+	Runner       Runner
+	Credentials  CredentialProvider
+	PollInterval time.Duration
+}
+type Module struct {
+	store       *store.Store
+	queue       *workqueue.Module
+	dataDir     string
+	runner      Runner
+	credentials CredentialProvider
+	poll        time.Duration
+	wake        chan struct{}
+	ctx         context.Context
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	running     map[string]runControl
+}
+
+type runControl struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func New(database *store.Store, queue *workqueue.Module, options ...Options) *Module {
+	var o Options
+	if len(options) > 0 {
+		o = options[0]
+	}
+	if o.DataDir == "" {
+		o.DataDir = "./data"
+	}
+	if o.PollInterval <= 0 {
+		o.PollInterval = 5 * time.Second
+	}
+	if o.Runner == nil {
+		o.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(o.DataDir, "codex-result-schema.json")}
+	}
+	return &Module{store: database, queue: queue, dataDir: o.DataDir, runner: o.Runner, credentials: o.Credentials, poll: o.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
+}
+
+const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","paused","failed"]},"message":{"type":"string"}},"required":["status","message"],"additionalProperties":false}`
+
+func (m *Module) Start() error {
+	if err := os.MkdirAll(filepath.Join(m.dataDir, "workspaces"), 0o700); err != nil {
+		return err
+	}
+	if _, ok := m.runner.(*ExecRunner); ok {
+		if err := os.WriteFile(filepath.Join(m.dataDir, "codex-result-schema.json"), []byte(resultSchema), 0o600); err != nil {
+			return err
+		}
+	}
+	type interrupted struct{ itemID, executionID string }
+	interruptedRuns := []interrupted{}
+	rows, queryErr := m.store.DB.Query(`SELECT w.id,COALESCE((SELECT e.id FROM agent_executions e WHERE e.work_item_id=w.id AND e.state='running' ORDER BY e.started_at DESC LIMIT 1),'') FROM work_items w WHERE w.agent_state='running'`)
+	if queryErr == nil {
+		for rows.Next() {
+			var run interrupted
+			if rows.Scan(&run.itemID, &run.executionID) == nil {
+				interruptedRuns = append(interruptedRuns, run)
+			}
+		}
+		rows.Close()
+	}
+	stamp := now()
+	_, _ = m.store.DB.Exec("UPDATE agent_executions SET state='failed',ended_at=?,error_message='ProjectBoard restarted while Codex was running' WHERE state='running'", stamp)
+	_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',resume_requested=0,version=version+1,updated_at=? WHERE agent_state='running'", stamp)
+	for _, run := range interruptedRuns {
+		raw, _ := json.Marshal(map[string]any{"message": "ProjectBoard restarted while local Codex was running", "executionId": run.executionID})
+		_, _ = m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,'agent_interrupted',stage,'system',NULL,?,version,? FROM work_items WHERE id=?", security.Token(18), string(raw), stamp, run.itemID)
+	}
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.wg.Add(1)
+	go m.loop()
 	return nil
 }
-
-func (m *Module) ListProjects(ctx context.Context, agentID string) ([]map[string]any, error) {
-	rows, err := m.store.DB.QueryContext(ctx, `SELECT p.id,p.project_key,p.name,p.repository_url,p.default_target_branch,g.allow_unassigned_claim
-		FROM projects p JOIN agent_project_grants g ON g.project_id=p.id
-		WHERE g.agent_id=? AND p.archived_at IS NULL ORDER BY p.name`, agentID)
-	if err != nil {
-		return nil, err
+func (m *Module) Close() {
+	if m.cancel != nil {
+		m.cancel()
 	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
-		var id, key, name, repository, branch string
-		var autoClaim int
-		if err := rows.Scan(&id, &key, &name, &repository, &branch, &autoClaim); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]any{"id": id, "key": key, "name": name, "repositoryUrl": repository, "defaultTargetBranch": branch, "allowUnassignedClaim": autoClaim != 0})
+	m.mu.Lock()
+	for _, control := range m.running {
+		control.cancel()
 	}
-	return out, rows.Err()
+	m.mu.Unlock()
+	m.wg.Wait()
 }
-
-func (m *Module) ListTasks(ctx context.Context, agentID string) ([]TaskSummary, error) {
-	if err := m.expireLeases(ctx); err != nil {
-		return nil, err
+func (m *Module) Wake() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
 	}
-	rows, err := m.store.DB.QueryContext(ctx, `SELECT w.id,w.project_id,p.project_key,w.number,w.title,w.priority,w.stage,w.target_branch,w.version,
-		CASE WHEN w.assignee_kind='agent' AND w.assignee_id=? THEN 1 ELSE 0 END,p.repository_url
-		FROM work_items w JOIN projects p ON p.id=w.project_id JOIN agent_project_grants g ON g.project_id=w.project_id AND g.agent_id=?
-		WHERE p.archived_at IS NULL AND p.allow_agent_execution=1 AND w.blocked_at IS NULL
-		AND w.stage NOT IN('completed','order_closed','abandoned')
-		AND ((w.assignee_kind='agent' AND w.assignee_id=? AND w.assignment_state='reserved') OR (w.assignee_id IS NULL AND g.allow_unassigned_claim=1))
-		AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d JOIN work_items x ON x.id=d.depends_on_id WHERE d.work_item_id=w.id AND x.stage NOT IN('completed','order_closed'))
-		ORDER BY CASE WHEN w.assignee_id=? THEN 0 ELSE 1 END,CASE w.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,w.created_at`, agentID, agentID, agentID, agentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []TaskSummary{}
-	for rows.Next() {
-		var task TaskSummary
-		var assigned int
-		if err := rows.Scan(&task.ID, &task.ProjectID, &task.ProjectKey, &task.Number, &task.Title, &task.Priority, &task.Stage, &task.TargetBranch, &task.Version, &assigned, &task.RepositoryURL); err != nil {
-			return nil, err
-		}
-		task.Assigned = assigned != 0
-		out = append(out, task)
-	}
-	return out, rows.Err()
 }
-
-func (m *Module) expireLeases(ctx context.Context) error {
-	return m.store.Write(ctx, func(tx *sql.Tx) error {
-		stamp := now()
-		if _, err := tx.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='expired' WHERE released_at IS NULL AND expires_at<=?", stamp, stamp); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE agent_executions SET ended_at=?,end_reason='expired' WHERE ended_at IS NULL AND lease_id IN (SELECT id FROM leases WHERE released_at=? AND release_reason='expired')", stamp, stamp); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "UPDATE assignments SET state='reserved' WHERE id IN (SELECT assignment_id FROM leases WHERE released_at=? AND release_reason='expired')", stamp); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, "UPDATE work_items SET assignment_state='reserved',version=version+1,updated_at=? WHERE id IN (SELECT work_item_id FROM leases WHERE released_at=? AND release_reason='expired')", stamp, stamp)
-		return err
-	})
-}
-
-func (m *Module) WaitForTask(ctx context.Context, agentID string, timeout time.Duration) (*TaskSummary, error) {
-	if timeout <= 0 || timeout > 55*time.Second {
-		timeout = 55 * time.Second
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(time.Second)
+func (m *Module) loop() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(m.poll)
 	defer ticker.Stop()
 	for {
-		tasks, err := m.ListTasks(ctx, agentID)
-		if err != nil {
-			return nil, err
-		}
-		if len(tasks) > 0 {
-			return &tasks[0], nil
-		}
+		m.schedule()
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline.C:
-			return nil, nil
+		case <-m.ctx.Done():
+			return
+		case <-m.wake:
 		case <-ticker.C:
 		}
 	}
 }
 
-func (m *Module) Claim(ctx context.Context, agentID, itemID string, expectedVersion int64) (*Execution, error) {
-	if err := m.expireLeases(ctx); err != nil {
-		return nil, err
-	}
-	var executionID, leaseID, expires, projectID, projectKey, repositoryURL, repositoryName, promptsRaw string
-	var number int64
-	var allowSubtasks, allowAutoClose, allowAutoCloseSubtasks int
-	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		stamp := now()
-		var assigneeKind, assigneeID, assignmentState, stage string
-		var assigneeKindPtr, assigneeIDPtr, assignmentStatePtr *string
-		var version int64
-		var blockedAt *string
-		var allowExecution, allowUnassigned int
-		if err := tx.QueryRow(`SELECT w.project_id,p.project_key,w.number,w.assignee_kind,w.assignee_id,w.assignment_state,w.stage,w.blocked_at,w.version,
-			p.allow_agent_execution,g.allow_unassigned_claim,p.repository_url,p.allow_subtasks,p.allow_agent_auto_close,p.allow_agent_auto_close_subtasks,p.agent_prompts_json
-			FROM work_items w JOIN projects p ON p.id=w.project_id JOIN agent_project_grants g ON g.project_id=w.project_id AND g.agent_id=? WHERE w.id=?`, agentID, itemID).
-			Scan(&projectID, &projectKey, &number, &assigneeKindPtr, &assigneeIDPtr, &assignmentStatePtr, &stage, &blockedAt, &version, &allowExecution, &allowUnassigned, &repositoryURL, &allowSubtasks, &allowAutoClose, &allowAutoCloseSubtasks, &promptsRaw); err != nil {
-			if err == sql.ErrNoRows {
-				return &Error{Code: "PROJECT_ACCESS_REQUIRED", Message: "Task is not available to this Agent"}
-			}
-			return err
-		}
-		if assigneeKindPtr != nil {
-			assigneeKind = *assigneeKindPtr
-		}
-		if assigneeIDPtr != nil {
-			assigneeID = *assigneeIDPtr
-		}
-		if assignmentStatePtr != nil {
-			assignmentState = *assignmentStatePtr
-		}
-		if version != expectedVersion {
-			return &Error{Code: "VERSION_CONFLICT", Message: "Work item version changed"}
-		}
-		if allowExecution == 0 || blockedAt != nil || terminal(stage) {
-			return &Error{Code: "NOT_CLAIMABLE", Message: "Task cannot be claimed"}
-		}
-		if err := tx.QueryRow(`SELECT g.repository_name FROM project_repository_grants g
-			JOIN provider_authorizations a ON a.id=g.authorization_id
-			WHERE g.project_id=? AND g.revoked_at IS NULL AND g.access_level='write' AND a.status='active' AND a.provider='github'`, projectID).Scan(&repositoryName); err != nil {
-			return &Error{Code: "GITHUB_GRANT_REQUIRED", Message: "A valid GitHub repository grant is required before this task can be claimed"}
-		}
-		assigned := assigneeKind == "agent" && assigneeID == agentID && assignmentState == "reserved"
-		unassigned := assigneeID == "" && allowUnassigned != 0
-		if !assigned && !unassigned {
-			return &Error{Code: "NOT_ASSIGNED", Message: "Task is neither assigned nor available for automatic claim"}
-		}
-		var active int
-		if tx.QueryRow("SELECT 1 FROM leases WHERE agent_id=? AND released_at IS NULL AND expires_at>?", agentID, stamp).Scan(&active) == nil {
-			return &Error{Code: "AGENT_CAPACITY_EXCEEDED", Message: "Agent already has an active task"}
-		}
-		assignmentID := ""
-		if assigned {
-			if err := tx.QueryRow("SELECT id FROM assignments WHERE work_item_id=? AND ended_at IS NULL ORDER BY created_at DESC LIMIT 1", itemID).Scan(&assignmentID); err != nil {
-				return &Error{Code: "NO_ASSIGNMENT", Message: "Task assignment is missing"}
-			}
-			if _, err := tx.Exec("UPDATE assignments SET state='active' WHERE id=?", assignmentID); err != nil {
-				return err
-			}
-		} else {
-			assignmentID = security.Token(18)
-			if _, err := tx.Exec("INSERT INTO assignments(id,work_item_id,assignee_kind,assignee_id,state,generation,created_at) VALUES(?,?,'agent',?,'active',1,?)", assignmentID, itemID, agentID, stamp); err != nil {
-				return err
-			}
-		}
-		leaseID, executionID = security.Token(18), security.Token(18)
-		expires = time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339Nano)
-		if _, err := tx.Exec("INSERT INTO leases(id,work_item_id,assignment_id,agent_id,generation,expires_at,created_at) VALUES(?,?,?,?,1,?,?)", leaseID, itemID, assignmentID, agentID, expires, stamp); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("INSERT INTO agent_executions(id,work_item_id,agent_id,lease_id,state,created_at) VALUES(?,?,?,?,?,?)", executionID, itemID, agentID, leaseID, stage, stamp); err != nil {
-			return err
-		}
-		result, err := tx.Exec("UPDATE work_items SET assignee_kind='agent',assignee_id=?,assignment_state='active',version=version+1,updated_at=? WHERE id=? AND version=?", agentID, stamp, itemID, expectedVersion)
-		if err != nil {
-			return err
-		}
-		if changed, _ := result.RowsAffected(); changed != 1 {
-			return &Error{Code: "VERSION_CONFLICT", Message: "Work item version changed"}
-		}
-		payload, _ := json.Marshal(map[string]any{"executionId": executionID, "leaseId": leaseID})
-		_, err = tx.Exec("INSERT INTO activity_events(id,project_id,actor_type,actor_id,event_type,object_type,object_id,source,payload_json,created_at) VALUES(?,?,'agent',?,'agent.execution_claimed','work_item',?,'ssh_mcp',?,?)", security.Token(18), projectID, agentID, itemID, string(payload), stamp)
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	item, err := m.queue.Get(ctx, itemID)
-	if err != nil {
-		return nil, err
-	}
-	prompts := []string{}
-	_ = json.Unmarshal([]byte(promptsRaw), &prompts)
-	return &Execution{ID: executionID, LeaseID: leaseID, ExpiresAt: expires, TaskBranch: fmt.Sprintf("projectboard/%s/%d", strings.ToLower(projectKey), number), RepositoryURL: repositoryURL, RepositoryName: repositoryName, WorkItem: item, ProjectPolicy: map[string]any{"allowSubtasks": allowSubtasks != 0, "allowAgentAutoClose": allowAutoClose != 0, "allowAgentAutoCloseSubtasks": allowAutoCloseSubtasks != 0, "agentPrompts": prompts}}, nil
+type claim struct {
+	ExecutionID, ItemID, AgentID, ProjectID, ProjectKey, Title, Description, Criteria, TargetBranch, ThreadID, Workspace string
+	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts                                                         string
+	Number, Attempt, Timeout                                                                                             int64
+	PlanOnly                                                                                                             bool
 }
 
-func (m *Module) Active(ctx context.Context, agentID string) (*Execution, error) {
-	var result Execution
-	var itemID, projectKey string
-	var number int64
-	err := m.store.DB.QueryRowContext(ctx, `SELECT e.id,e.lease_id,l.expires_at,e.work_item_id,p.project_key,w.number,p.repository_url,COALESCE(g.repository_name,'')
-		FROM agent_executions e JOIN leases l ON l.id=e.lease_id JOIN work_items w ON w.id=e.work_item_id JOIN projects p ON p.id=w.project_id
-		JOIN agent_project_grants ag ON ag.project_id=w.project_id AND ag.agent_id=e.agent_id
-		LEFT JOIN project_repository_grants g ON g.project_id=p.id AND g.revoked_at IS NULL
-		WHERE e.agent_id=? AND e.ended_at IS NULL AND l.released_at IS NULL AND l.expires_at>? ORDER BY e.created_at DESC LIMIT 1`, agentID, now()).
-		Scan(&result.ID, &result.LeaseID, &result.ExpiresAt, &itemID, &projectKey, &number, &result.RepositoryURL, &result.RepositoryName)
-	if err == sql.ErrNoRows {
+func (m *Module) schedule() {
+	for {
+		c, err := m.claim()
+		if err != nil || c == nil {
+			return
+		}
+		ctx, cancel := context.WithCancel(m.ctx)
+		control := runControl{cancel: cancel, done: make(chan struct{})}
+		m.mu.Lock()
+		m.running[c.ExecutionID] = control
+		m.mu.Unlock()
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			defer func() { m.mu.Lock(); delete(m.running, c.ExecutionID); close(control.done); m.mu.Unlock(); m.Wake() }()
+			m.execute(ctx, c)
+		}()
+	}
+}
+func (m *Module) claim() (*claim, error) {
+	var c *claim
+	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
+		row := tx.QueryRow(`SELECT w.id,w.project_id,p.project_key,w.number,w.title,w.description_markdown,w.acceptance_criteria_markdown,w.target_branch,COALESCE(w.codex_thread_id,''),COALESCE(w.workspace_path,''),p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,
+		(SELECT COALESCE(MAX(e.attempt_number),0)+1 FROM agent_executions e WHERE e.work_item_id=w.id),CASE WHEN w.pause_after_plan=1 AND w.plan_pause_consumed=0 THEN 1 ELSE 0 END
+		FROM work_items w JOIN projects p ON p.id=w.project_id JOIN agent_project_grants g ON g.project_id=w.project_id JOIN agents a ON a.id=g.agent_id
+		WHERE w.is_agent_task=1 AND w.blocked_at IS NULL AND w.stage IN('created','in_progress') AND w.agent_state='queued' AND a.status='active' AND a.revoked_at IS NULL
+		AND (SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')<a.max_concurrent_tasks
+		ORDER BY (CAST((SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,w.created_at,w.id LIMIT 1`)
+		var v claim
+		var plan int
+		if err := row.Scan(&v.ItemID, &v.ProjectID, &v.ProjectKey, &v.Number, &v.Title, &v.Description, &v.Criteria, &v.TargetBranch, &v.ThreadID, &v.Workspace, &v.AgentRules, &v.ValidationCommands, &v.ForbiddenPaths, &v.AgentPrompts, &v.AgentID, &v.Timeout, &v.Attempt, &plan); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		v.PlanOnly = plan != 0
+		v.ExecutionID = security.Token(18)
+		stamp := now()
+		result, err := tx.Exec("UPDATE work_items SET stage='in_progress',agent_state='running',assigned_agent_id=?,resume_requested=0,version=version+1,updated_at=? WHERE id=? AND agent_state='queued'", v.AgentID, stamp, v.ItemID)
+		if err != nil {
+			return err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return nil
+		}
+		workspace := v.Workspace
+		if workspace == "" {
+			workspace = filepath.Join(m.dataDir, "workspaces", safe(v.ItemID))
+		}
+		v.Workspace = workspace
+		_, err = tx.Exec("INSERT INTO agent_executions(id,work_item_id,agent_id,attempt_number,state,prompt_markdown,workspace_path,started_at) VALUES(?,?,?,?,?,?,?,?)", v.ExecutionID, v.ItemID, v.AgentID, v.Attempt, "running", "pending", workspace, stamp)
+		if err == nil {
+			c = &v
+		}
+		return err
+	})
+	return c, err
+}
+
+func safe(v string) string {
+	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
+	return r.Replace(strings.ToLower(v))
+}
+func (m *Module) prepare(ctx context.Context, c *claim) error {
+	if _, err := os.Stat(filepath.Join(c.Workspace, ".git")); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(c.Workspace), 0o700); err != nil {
+		return err
+	}
+	var cloneURL string
+	if err := m.store.DB.QueryRowContext(ctx, "SELECT COALESCE(g.clone_url,p.repository_url) FROM projects p LEFT JOIN project_repository_grants g ON g.project_id=p.id AND g.revoked_at IS NULL WHERE p.id=?", c.ProjectID).Scan(&cloneURL); err != nil {
+		return err
+	}
+	cred, err := m.issue(ctx, c.ProjectID)
+	if err != nil {
+		return err
+	}
+	if cred != nil && cred.Revoke != nil {
+		defer cred.Revoke(context.Background())
+	}
+	args := []string{"clone"}
+	if strings.TrimSpace(c.TargetBranch) != "" {
+		args = append(args, "--branch", c.TargetBranch)
+	}
+	args = append(args, cloneURL, c.Workspace)
+	if err = git(ctx, "", cred, args...); err != nil {
+		return err
+	}
+	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
+	return git(ctx, c.Workspace, nil, "switch", "-c", branch)
+}
+func git(ctx context.Context, dir string, cred *Credential, args ...string) error {
+	full := []string{}
+	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
+	cmd.Dir = dir
+	if cred != nil && cred.Token != "" {
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+func (m *Module) issue(ctx context.Context, projectID string) (*Credential, error) {
+	if m.credentials == nil {
 		return nil, nil
 	}
+	return m.credentials.Issue(ctx, projectID)
+}
+
+func (m *Module) prompt(ctx context.Context, c *claim) string {
+	item, _ := m.queue.Get(ctx, c.ItemID)
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nTarget branch: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch)
+	fmt.Fprintf(&b, "Project Agent rules:\n%s\nProject prompt segments (JSON):\n%s\nValidation commands (JSON):\n%s\nForbidden paths (JSON):\n%s\n", c.AgentRules, c.AgentPrompts, c.ValidationCommands, c.ForbiddenPaths)
+	if c.PlanOnly {
+		b.WriteString("Produce a concrete implementation plan only. Do not edit files. Return status planned.\n")
+	} else {
+		b.WriteString("Implement and verify the task in this workspace, then commit all task changes on the current branch. Do not push; ProjectBoard will push the clean committed branch. Return completed only when the task is genuinely complete; otherwise return paused or failed.\n")
+	}
+	b.WriteString("Recent ProjectBoard conversation:\n")
+	for _, entry := range item.Conversation {
+		raw, _ := json.Marshal(entry)
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	b.WriteString("Your final response must follow the supplied JSON schema. Put the user-facing Markdown in message.\n")
+	return b.String()
+}
+func (m *Module) execute(parent context.Context, c *claim) {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(c.Timeout)*time.Minute)
+	defer cancel()
+	if err := m.prepare(ctx, c); err != nil {
+		m.fail(c, c.ThreadID, err)
+		return
+	}
+	prompt := m.prompt(ctx, c)
+	_, _ = m.store.DB.Exec("UPDATE agent_executions SET prompt_markdown=? WHERE id=?", prompt, c.ExecutionID)
+	_ = m.event(c, "agent_started", "Local Codex execution started")
+	result, err := m.runner.Run(ctx, Invocation{WorkDir: c.Workspace, Prompt: prompt, ThreadID: c.ThreadID, Timeout: time.Duration(c.Timeout) * time.Minute, PlanOnly: c.PlanOnly})
 	if err != nil {
-		return nil, err
+		m.recordResult(c, result, "failed", err)
+		m.fail(c, result.ThreadID, err)
+		return
 	}
-	result.TaskBranch = fmt.Sprintf("projectboard/%s/%d", strings.ToLower(projectKey), number)
-	result.WorkItem, err = m.queue.Get(ctx, itemID)
-	return &result, err
+	m.recordResult(c, result, result.Status, nil)
+	m.finish(c, result)
 }
-
-func (m *Module) Heartbeat(ctx context.Context, agentID, executionID, leaseID string) (string, error) {
-	expires := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339Nano)
-	result, err := m.store.DB.ExecContext(ctx, `UPDATE leases SET expires_at=? WHERE id=? AND agent_id=? AND released_at IS NULL
-		AND EXISTS(SELECT 1 FROM agent_executions e JOIN work_items w ON w.id=e.work_item_id
-		JOIN agent_project_grants g ON g.project_id=w.project_id AND g.agent_id=e.agent_id
-		WHERE e.id=? AND e.lease_id=leases.id AND e.ended_at IS NULL)`, expires, leaseID, agentID, executionID)
-	if err != nil {
-		return "", err
+func (m *Module) recordResult(c *claim, r Result, state string, runErr error) {
+	var msg any
+	if runErr != nil {
+		msg = runErr.Error()
 	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		return "", &Error{Code: "LEASE_INVALID", Message: "Lease or execution is no longer valid"}
-	}
-	return expires, nil
+	payload, _ := json.Marshal(map[string]any{"status": r.Status, "message": r.Message})
+	_, _ = m.store.DB.Exec("UPDATE agent_executions SET state=?,thread_id=?,command_json=?,result_json=?,output_jsonl=?,final_message=?,ended_at=?,error_message=? WHERE id=?", state, nullable(r.ThreadID), defaultJSON(r.CommandJSON), string(payload), r.Raw, nullable(r.Message), now(), msg, c.ExecutionID)
 }
-
-func (m *Module) Release(ctx context.Context, agentID, executionID, leaseID, reason string, block bool) error {
-	if strings.TrimSpace(reason) == "" {
-		reason = "released"
+func (m *Module) fail(c *claim, threadID string, err error) {
+	if !m.active(c) {
+		return
 	}
-	return m.store.Write(ctx, func(tx *sql.Tx) error {
-		var itemID, projectID string
-		if err := tx.QueryRow(`SELECT e.work_item_id FROM agent_executions e JOIN leases l ON l.id=e.lease_id
-			JOIN work_items w ON w.id=e.work_item_id JOIN agent_project_grants g ON g.project_id=w.project_id AND g.agent_id=e.agent_id
-			WHERE e.id=? AND e.agent_id=? AND l.id=? AND e.ended_at IS NULL AND l.released_at IS NULL`, executionID, agentID, leaseID).Scan(&itemID); err != nil {
-			return &Error{Code: "LEASE_INVALID", Message: "Execution is no longer active"}
-		}
-		if err := tx.QueryRow("SELECT project_id FROM work_items WHERE id=?", itemID).Scan(&projectID); err != nil {
-			return err
-		}
-		stamp := now()
-		if _, err := tx.Exec("UPDATE leases SET released_at=?,release_reason=? WHERE id=?", stamp, reason, leaseID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec("UPDATE agent_executions SET ended_at=?,end_reason=? WHERE id=?", stamp, reason, executionID); err != nil {
-			return err
-		}
-		if block {
-			if _, err := tx.Exec("UPDATE work_items SET blocked_at=?,blocked_reason=?,assignment_state='reserved',version=version+1,updated_at=? WHERE id=?", stamp, reason, stamp, itemID); err != nil {
-				return err
-			}
-		} else if _, err := tx.Exec("UPDATE work_items SET assignment_state='reserved',version=version+1,updated_at=? WHERE id=?", stamp, itemID); err != nil {
-			return err
-		}
-		payload, _ := json.Marshal(map[string]any{"executionId": executionID, "leaseId": leaseID, "reason": reason, "blocked": block})
-		_, err := tx.Exec("INSERT INTO activity_events(id,project_id,actor_type,actor_id,event_type,object_type,object_id,source,payload_json,created_at) VALUES(?,?,'agent',?,'agent.execution_released','work_item',?,'ssh_mcp',?,?)", security.Token(18), projectID, agentID, itemID, string(payload), stamp)
-		return err
-	})
+	_ = m.event(c, "agent_failed", err.Error())
+	_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',codex_thread_id=COALESCE(?,codex_thread_id),workspace_path=?,version=version+1,updated_at=? WHERE id=?", nullable(threadID), c.Workspace, now(), c.ItemID)
 }
-
-func (m *Module) RecordEnvironment(ctx context.Context, agentID, executionID, command string, exitCode, durationMS int, summary string) error {
-	if err := m.requireExecution(ctx, agentID, executionID); err != nil {
-		return err
+func (m *Module) finish(c *claim, r Result) {
+	if !m.active(c) {
+		return
 	}
-	_, err := m.store.DB.ExecContext(ctx, "INSERT INTO agent_environment_steps(id,execution_id,command,exit_code,duration_ms,summary,created_at) VALUES(?,?,?,?,?,?,?)", security.Token(18), executionID, command, exitCode, durationMS, summary, now())
-	return err
-}
-
-func (m *Module) RecordProgress(ctx context.Context, agentID, executionID, markdown string, expectedVersion int64) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
-	}
-	return m.queue.AddMessage(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, markdown, expectedVersion)
-}
-
-func (m *Module) WorkItemID(ctx context.Context, agentID, executionID string) (string, error) {
-	return m.executionItem(ctx, agentID, executionID)
-}
-
-func (m *Module) GetTask(ctx context.Context, agentID, itemID string) (*workqueue.WorkItem, error) {
-	var allowed int
-	if m.store.DB.QueryRowContext(ctx, `SELECT 1 FROM work_items w JOIN agent_project_grants g ON g.project_id=w.project_id
-		WHERE w.id=? AND g.agent_id=?`, itemID, agentID).Scan(&allowed) != nil {
-		return nil, &Error{Code: "PROJECT_ACCESS_REQUIRED", Message: "Task is outside this Agent's project grants"}
-	}
-	return m.queue.Get(ctx, itemID)
-}
-
-func (m *Module) FreezeConclusion(ctx context.Context, agentID, executionID string, input workqueue.ConclusionInput) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
-	}
-	return m.queue.Freeze(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, input)
-}
-
-func (m *Module) MoveStage(ctx context.Context, agentID, executionID string, expectedVersion int64, target, note string) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
-	}
-	return m.queue.MoveStage(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, expectedVersion, target, note)
-}
-
-func (m *Module) SetBlocked(ctx context.Context, agentID, executionID string, expectedVersion int64, reason string, blocked bool) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
-	}
-	return m.queue.SetBlocked(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, expectedVersion, reason, blocked)
-}
-
-func (m *Module) SubmitExecution(ctx context.Context, agentID, executionID, leaseID string, input workqueue.ExecutionInput) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
-	}
-	var valid int
-	if m.store.DB.QueryRowContext(ctx, "SELECT 1 FROM leases WHERE id=? AND agent_id=? AND released_at IS NULL AND expires_at>?", leaseID, agentID, now()).Scan(&valid) != nil {
-		return nil, &Error{Code: "LEASE_INVALID", Message: "Active lease required"}
-	}
-	item, err := m.queue.SubmitExecution(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, input)
-	if err != nil {
-		return nil, err
+	if r.Message != "" {
+		_ = m.agentMessage(c, r.Message)
 	}
 	stamp := now()
-	_, _ = m.store.DB.ExecContext(ctx, "UPDATE leases SET released_at=?,release_reason='submitted' WHERE id=?", stamp, leaseID)
-	_, _ = m.store.DB.ExecContext(ctx, "UPDATE agent_executions SET ended_at=?,end_reason='submitted' WHERE id=?", stamp, executionID)
-	return item, nil
-}
-
-func (m *Module) SubmitAcceptance(ctx context.Context, agentID, executionID string, input workqueue.AcceptanceInput) (*workqueue.WorkItem, error) {
-	itemID, err := m.executionItem(ctx, agentID, executionID)
-	if err != nil {
-		return nil, err
+	switch r.Status {
+	case "planned":
+		_ = m.event(c, "agent_plan_paused", "Agent completed the plan and is waiting for confirmation")
+		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_plan',plan_pause_consumed=1,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
+	case "completed":
+		var pending, pause int
+		_ = m.store.DB.QueryRow("SELECT resume_requested,pause_after_completion FROM work_items WHERE id=?", c.ItemID).Scan(&pending, &pause)
+		if pending != 0 {
+			_ = m.event(c, "agent_resumed", "New member messages arrived while Codex was running; continuing the session")
+			_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='queued',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
+			return
+		}
+		if err := m.push(context.Background(), c); err != nil {
+			m.fail(c, r.ThreadID, err)
+			return
+		}
+		if pause != 0 {
+			_ = m.event(c, "agent_completion_paused", "Agent completed the task and is waiting for human closure")
+			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='completed',agent_state='paused_completion',completed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
+		} else {
+			_ = m.event(c, "agent_closed", "Agent completed and automatically closed the task")
+			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='closed',agent_state='finished',completed_at=?,closed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
+		}
+	case "paused":
+		_ = m.event(c, "agent_paused", r.Message)
+		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
+	default:
+		m.fail(c, r.ThreadID, errors.New("Agent returned failed status"))
 	}
-	return m.queue.Accept(ctx, workqueue.Actor{Type: "agent", ID: agentID}, itemID, input)
+}
+func (m *Module) active(c *claim) bool {
+	var count int
+	return m.store.DB.QueryRow("SELECT COUNT(*) FROM work_items WHERE id=? AND assigned_agent_id=? AND agent_state='running'", c.ItemID, c.AgentID).Scan(&count) == nil && count == 1
+}
+func (m *Module) push(ctx context.Context, c *claim) error {
+	status, err := gitOutput(ctx, c.Workspace, nil, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		return errors.New("Codex completed with uncommitted workspace changes")
+	}
+	cred, err := m.issue(ctx, c.ProjectID)
+	if err != nil {
+		return err
+	}
+	if cred != nil && cred.Revoke != nil {
+		defer cred.Revoke(context.Background())
+	}
+	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
+	return git(ctx, c.Workspace, cred, "push", "-u", "origin", branch)
 }
 
-func (m *Module) requireExecution(ctx context.Context, agentID, executionID string) error {
-	_, err := m.executionItem(ctx, agentID, executionID)
+func gitOutput(ctx context.Context, dir string, cred *Credential, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	if cred != nil && cred.Token != "" {
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+func (m *Module) agentMessage(c *claim, message string) error {
+	raw, _ := json.Marshal(map[string]any{"markdown": message})
+	_, err := m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,'message',stage,'agent',?, ?,version,? FROM work_items WHERE id=?", security.Token(18), c.AgentID, string(raw), now(), c.ItemID)
+	return err
+}
+func (m *Module) event(c *claim, kind, message string) error {
+	raw, _ := json.Marshal(map[string]any{"message": message, "executionId": c.ExecutionID})
+	_, err := m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,?,stage,'system',NULL,?,version,? FROM work_items WHERE id=?", security.Token(18), kind, string(raw), now(), c.ItemID)
 	return err
 }
 
-func (m *Module) executionItem(ctx context.Context, agentID, executionID string) (string, error) {
-	var itemID string
-	err := m.store.DB.QueryRowContext(ctx, `SELECT e.work_item_id FROM agent_executions e JOIN leases l ON l.id=e.lease_id
-		JOIN work_items w ON w.id=e.work_item_id JOIN agent_project_grants g ON g.project_id=w.project_id AND g.agent_id=e.agent_id
-		WHERE e.id=? AND e.agent_id=? AND e.ended_at IS NULL AND l.released_at IS NULL AND l.expires_at>?`, executionID, agentID, now()).Scan(&itemID)
-	if err != nil {
-		return "", &Error{Code: "ACTIVE_EXECUTION_REQUIRED", Message: "An active execution and lease are required"}
+func (m *Module) DeleteAgent(ctx context.Context, agentID string) error {
+	var waits []<-chan struct{}
+	m.mu.Lock()
+	for executionID, control := range m.running {
+		var id string
+		if m.store.DB.QueryRow("SELECT agent_id FROM agent_executions WHERE id=?", executionID).Scan(&id) == nil && id == agentID {
+			control.cancel()
+			waits = append(waits, control.done)
+		}
 	}
-	return itemID, nil
+	m.mu.Unlock()
+	if err := waitForRuns(ctx, waits); err != nil {
+		return err
+	}
+	stamp := now()
+	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET stage='created',agent_state='queued',assigned_agent_id=NULL,codex_thread_id=NULL,resume_requested=0,version=version+1,updated_at=? WHERE assigned_agent_id=? AND stage<>'closed'", stamp, agentID)
+	m.Wake()
+	return err
 }
-
-func terminal(stage string) bool {
-	return stage == "completed" || stage == "order_closed" || stage == "abandoned"
+func (m *Module) DisableProjectAgent(ctx context.Context, agentID, projectID string) error {
+	var waits []<-chan struct{}
+	m.mu.Lock()
+	for executionID, control := range m.running {
+		var found int
+		if m.store.DB.QueryRow(`SELECT 1 FROM agent_executions e JOIN work_items w ON w.id=e.work_item_id WHERE e.id=? AND e.agent_id=? AND w.project_id=?`, executionID, agentID, projectID).Scan(&found) == nil {
+			control.cancel()
+			waits = append(waits, control.done)
+		}
+	}
+	m.mu.Unlock()
+	if err := waitForRuns(ctx, waits); err != nil {
+		return err
+	}
+	stamp := now()
+	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET stage='created',agent_state='queued',assigned_agent_id=NULL,codex_thread_id=NULL,resume_requested=0,version=version+1,updated_at=? WHERE assigned_agent_id=? AND project_id=? AND stage<>'closed'", stamp, agentID, projectID)
+	m.Wake()
+	return err
 }
-
+func waitForRuns(ctx context.Context, waits []<-chan struct{}) error {
+	for _, done := range waits {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+func (m *Module) CleanWorkspace(ctx context.Context, itemID string) error {
+	var stage, path string
+	if err := m.store.DB.QueryRowContext(ctx, "SELECT stage,COALESCE(workspace_path,'') FROM work_items WHERE id=?", itemID).Scan(&stage, &path); err != nil {
+		return err
+	}
+	if stage != "closed" {
+		return errors.New("only closed task workspaces can be cleaned")
+	}
+	if path == "" {
+		return nil
+	}
+	base, _ := filepath.Abs(filepath.Join(m.dataDir, "workspaces"))
+	target, _ := filepath.Abs(path)
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return errors.New("workspace path is outside the managed directory")
+	}
+	if runtime.GOOS == "windows" {
+		target = filepath.Clean(target)
+	}
+	if err = os.RemoveAll(target); err == nil {
+		_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), itemID)
+	}
+	return err
+}
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+func nullable(v string) any {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return v
+}
+func defaultJSON(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "[]"
+	}
+	return v
+}
+func ParsePositive(raw string, fallback int) int {
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return fallback
+	}
+	return v
+}
