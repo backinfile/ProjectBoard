@@ -2,11 +2,41 @@ package workqueue
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/projectboard/projectboard/internal/store"
 )
+
+func TestTaskTagsAreNormalizedAndUpdated(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := New(db)
+	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Tagged task", Tags: []string{" frontend ", "Urgent", "FRONTEND", ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(item.Tags, []string{"frontend", "Urgent"}) {
+		t.Fatalf("created tags = %#v", item.Tags)
+	}
+	item, err = q.Update(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, UpdateInput{ExpectedVersion: item.Version, Configure: true, Tags: []string{"backend"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(item.Tags, []string{"backend"}) {
+		t.Fatalf("updated tags = %#v", item.Tags)
+	}
+}
 
 func TestAgentPauseFlagsAreClearedForHumanTask(t *testing.T) {
 	dir := t.TempDir()

@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -140,9 +141,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/members", s.handle(s.addMember))
 	mux.HandleFunc("PATCH /api/projects/{id}/members/{userId}", s.handle(s.updateMember))
 	mux.HandleFunc("DELETE /api/projects/{id}/members/{userId}", s.handle(s.removeMember))
-	mux.HandleFunc("GET /api/projects/{id}/agents", s.handle(s.listProjectAgents))
-	mux.HandleFunc("PUT /api/projects/{id}/agents/{agentId}", s.handle(s.enableAgent))
-	mux.HandleFunc("DELETE /api/projects/{id}/agents/{agentId}", s.handle(s.disableAgent))
 	mux.HandleFunc("GET /api/users", s.handle(s.listUsers))
 	mux.HandleFunc("POST /api/users", s.handle(s.createUser))
 	mux.HandleFunc("GET /api/users/{id}", s.handle(s.getUser))
@@ -153,6 +151,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.handle(s.resetPassword))
 	mux.HandleFunc("POST /api/agents", s.handle(s.createAgent))
 	mux.HandleFunc("GET /api/agents", s.handle(s.listAgents))
+	mux.HandleFunc("POST /api/agents/{id}/disable", s.handle(s.disableOrganizationAgent))
+	mux.HandleFunc("POST /api/agents/{id}/enable", s.handle(s.enableOrganizationAgent))
 	mux.HandleFunc("DELETE /api/agents/{id}", s.handle(s.deleteAgent))
 	mux.HandleFunc("GET /api/provider-authorizations", s.handle(s.listAuthorizations))
 	mux.HandleFunc("GET /api/provider-authorizations/{id}/repositories", s.handle(s.authorizationRepositories))
@@ -906,8 +906,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{422, "INVALID_AGENT_CONFIGURATION", "Local Codex CLI, a positive capacity, and a positive timeout are required", nil})
 		return
 	}
-	if strings.TrimSpace(in.Name) == "" || strings.TrimSpace(in.Purpose) == "" {
-		writeError(w, &domainError{422, "INVALID_AGENT_CONFIGURATION", "Agent name and purpose are required", nil})
+	in.Name = strings.TrimSpace(in.Name)
+	in.Purpose = strings.TrimSpace(in.Purpose)
+	if in.Name == "" {
+		writeError(w, &domainError{422, "INVALID_AGENT_CONFIGURATION", "Agent name is required", nil})
 		return
 	}
 	if _, err := s.config.LookPath("codex"); err != nil {
@@ -924,12 +926,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "runtimeType": in.RuntimeType, "maxConcurrentTasks": in.MaxConcurrentTasks, "turnTimeoutMinutes": in.TurnTimeoutMinutes, "enabled": true})
 }
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
+	_, ok := s.human(w, r)
 	if !ok {
-		return
-	}
-	if err := requireAdmin(a); err != nil {
-		writeError(w, err)
 		return
 	}
 	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,
@@ -949,9 +947,63 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "currentLoad": running})
+		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": status == "active", "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "currentLoad": running})
 	}
 	writeJSON(w, 200, out)
+}
+func (s *Server) disableOrganizationAgent(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	agentID := r.PathValue("id")
+	result, err := s.store.DB.Exec("UPDATE agents SET status='disabled' WHERE id=? AND status='active' AND revoked_at IS NULL", agentID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		var status string
+		if scanErr := s.store.DB.QueryRow("SELECT status FROM agents WHERE id=? AND revoked_at IS NULL", agentID).Scan(&status); scanErr != nil || status == "deleted" {
+			writeError(w, sql.ErrNoRows)
+			return
+		}
+	}
+	if err = s.exec.DeactivateAgent(r.Context(), agentID); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(a, "agent.disabled", "agent", agentID, "", map[string]any{})
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+func (s *Server) enableOrganizationAgent(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.store.DB.Exec("UPDATE agents SET status='active' WHERE id=? AND status='disabled' AND revoked_at IS NULL", r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		var status string
+		if scanErr := s.store.DB.QueryRow("SELECT status FROM agents WHERE id=? AND revoked_at IS NULL", r.PathValue("id")).Scan(&status); scanErr != nil || status == "deleted" {
+			writeError(w, sql.ErrNoRows)
+			return
+		}
+	}
+	s.exec.Wake()
+	s.audit(a, "agent.enabled", "agent", r.PathValue("id"), "", map[string]any{})
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
@@ -974,7 +1026,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stamp := now()
-	if err := s.exec.DeleteAgent(r.Context(), agentID); err != nil {
+	if err := s.exec.DeactivateAgent(r.Context(), agentID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -990,80 +1042,6 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	s.audit(a, "agent.deleted", "agent", agentID, "", map[string]any{"logical": true})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
-func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if !s.canView(projectID, a) {
-		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
-		return
-	}
-	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,CASE WHEN g.agent_id IS NULL THEN 0 ELSE 1 END,
-		(SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')
-		FROM agents a LEFT JOIN agent_project_grants g ON g.agent_id=a.id AND g.project_id=? WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`, projectID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
-		var id, name, purpose, status string
-		var runtimeType string
-		var capacity, timeout, enabled, running int
-		_ = rows.Scan(&id, &name, &purpose, &status, &runtimeType, &capacity, &timeout, &enabled, &running)
-		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "currentLoad": running, "enabled": enabled != 0})
-	}
-	writeJSON(w, 200, out)
-}
-func (s *Server) enableAgent(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if err := s.requireDeveloper(projectID, a); err != nil {
-		writeError(w, err)
-		return
-	}
-	var exists int
-	if err := s.store.DB.QueryRow("SELECT 1 FROM agents WHERE id=? AND status<>'deleted' AND revoked_at IS NULL", r.PathValue("agentId")).Scan(&exists); err != nil {
-		writeError(w, err)
-		return
-	}
-	_, err := s.store.DB.Exec(`INSERT INTO agent_project_grants(agent_id,project_id,created_at) VALUES(?,?,?) ON CONFLICT(agent_id,project_id) DO NOTHING`, r.PathValue("agentId"), projectID, now())
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	s.exec.Wake()
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-func (s *Server) disableAgent(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if err := s.requireDeveloper(projectID, a); err != nil {
-		writeError(w, err)
-		return
-	}
-	agentID := r.PathValue("agentId")
-	if err := s.exec.DisableProjectAgent(r.Context(), agentID, projectID); err != nil {
-		writeError(w, err)
-		return
-	}
-	_, err := s.store.DB.Exec("DELETE FROM agent_project_grants WHERE agent_id=? AND project_id=?", agentID, projectID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-
 func (s *Server) listAuthorizations(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -1240,6 +1218,7 @@ func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 		AssigneeID           string   `json:"assigneeId"`
 		ParentID             string   `json:"parentId"`
 		FollowerIDs          []string `json:"followerIds"`
+		Tags                 []string `json:"tags"`
 		IsAgentTask          bool     `json:"isAgentTask"`
 		PauseAfterPlan       bool     `json:"pauseAfterPlan"`
 		PauseAfterCompletion bool     `json:"pauseAfterCompletion"`
@@ -1260,7 +1239,7 @@ func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID, CreatedByUserID: a.ID, FollowerIDs: in.FollowerIDs, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
+	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID, CreatedByUserID: a.ID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1295,6 +1274,7 @@ func (s *Server) updateWorkItem(w http.ResponseWriter, r *http.Request) {
 		AssigneeKind         string   `json:"assigneeKind"`
 		AssigneeID           string   `json:"assigneeId"`
 		FollowerIDs          []string `json:"followerIds"`
+		Tags                 []string `json:"tags"`
 		Configure            bool     `json:"configure"`
 		IsAgentTask          bool     `json:"isAgentTask"`
 		PauseAfterPlan       bool     `json:"pauseAfterPlan"`
@@ -1319,7 +1299,7 @@ func (s *Server) updateWorkItem(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, FollowerIDs: in.FollowerIDs, Configure: in.Configure, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
+	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, Configure: in.Configure, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1382,10 +1362,10 @@ func (s *Server) assignWorkItem(w http.ResponseWriter, r *http.Request) {
 	if in.AssigneeKind == "human" {
 		err = s.store.DB.QueryRow("SELECT 1 FROM project_memberships WHERE project_id=? AND user_id=?", item.ProjectID, in.AssigneeID).Scan(&exists)
 	} else {
-		err = s.store.DB.QueryRow("SELECT 1 FROM agent_project_grants WHERE project_id=? AND agent_id=?", item.ProjectID, in.AssigneeID).Scan(&exists)
+		err = s.store.DB.QueryRow("SELECT 1 FROM agents WHERE id=? AND status='active' AND revoked_at IS NULL", in.AssigneeID).Scan(&exists)
 	}
 	if err != nil {
-		writeError(w, &domainError{422, "INVALID_ASSIGNEE", "Assignee is not enabled for this project", nil})
+		writeError(w, &domainError{422, "INVALID_ASSIGNEE", "Assignee is not available", nil})
 		return
 	}
 	item, err = s.queue.Assign(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, in.ExpectedVersion, in.AssigneeKind, in.AssigneeID, in.Reason)
@@ -1800,12 +1780,34 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	}
 	query := "SELECT id,project_id,actor_type,actor_id,event_type,object_type,object_id,source,payload_json,created_at FROM activity_events"
 	args := []any{}
+	countQuery := "SELECT COUNT(*) FROM activity_events"
+	countArgs := []any{}
 	if projectID != "" {
 		query += " WHERE project_id=?"
 		args = append(args, projectID)
+		countQuery += " WHERE project_id=?"
+		countArgs = append(countArgs, projectID)
 	}
-	query += " ORDER BY created_at DESC LIMIT 500"
-	writeRows(w, s.store.DB, query, args...)
+	page, pageSize := 1, 20
+	if value, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && value > 0 {
+		page = value
+	}
+	if value, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && value > 0 && value <= 100 {
+		pageSize = value
+	}
+	if !r.URL.Query().Has("page") && !r.URL.Query().Has("pageSize") {
+		query += " ORDER BY created_at DESC LIMIT 500"
+		writeRows(w, s.store.DB, query, args...)
+		return
+	}
+	var total int
+	if err := s.store.DB.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
+		writeError(w, err)
+		return
+	}
+	query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, pageSize, (page-1)*pageSize)
+	writeJSON(w, 200, map[string]any{"items": readRows(s.store.DB, query, args...), "page": page, "pageSize": pageSize, "total": total})
 }
 
 func mentionedUserIDs(db *sql.DB, markdown string) []string {
@@ -1853,14 +1855,49 @@ func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT n.id,n.project_id,n.work_item_id,n.kind,n.title,n.body,n.actor_type,n.actor_id,n.read_at,n.created_at,w.title AS work_item_title FROM notifications n LEFT JOIN work_items w ON w.id=n.work_item_id WHERE n.user_id=?`
+	projectID := strings.TrimSpace(r.URL.Query().Get("projectId"))
+	page, pageSize := 1, 20
+	if value, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && value > 0 {
+		page = value
+	}
+	if value, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && value > 0 && value <= 100 {
+		pageSize = value
+	}
+	paginated := r.URL.Query().Has("page") || r.URL.Query().Has("pageSize")
+	query := `SELECT n.id,n.project_id,n.work_item_id,n.kind,n.title,n.body,n.actor_type,n.actor_id,n.read_at,n.created_at,w.title AS work_item_title,p.name AS project_name,p.project_key FROM notifications n LEFT JOIN work_items w ON w.id=n.work_item_id LEFT JOIN projects p ON p.id=n.project_id WHERE n.user_id=?`
 	args := []any{a.ID}
-	if projectID := r.URL.Query().Get("projectId"); projectID != "" {
+	if projectID != "" {
 		query += " AND n.project_id=?"
 		args = append(args, projectID)
 	}
-	query += " ORDER BY n.created_at DESC LIMIT 200"
-	writeJSON(w, 200, readRows(s.store.DB, query, args...))
+	if !paginated {
+		query += " ORDER BY n.created_at DESC LIMIT 200"
+		writeJSON(w, 200, readRows(s.store.DB, query, args...))
+		return
+	}
+	var total, unreadCount, filteredUnreadCount int
+	countQuery := "SELECT COUNT(*) FROM notifications WHERE user_id=?"
+	countArgs := []any{a.ID}
+	if projectID != "" {
+		countQuery += " AND project_id=?"
+		countArgs = append(countArgs, projectID)
+	}
+	if err := s.store.DB.QueryRow(countQuery, countArgs...).Scan(&total); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.store.DB.QueryRow("SELECT COUNT(*) FROM notifications WHERE user_id=? AND read_at IS NULL", a.ID).Scan(&unreadCount); err != nil {
+		writeError(w, err)
+		return
+	}
+	unreadQuery := countQuery + " AND read_at IS NULL"
+	if err := s.store.DB.QueryRow(unreadQuery, countArgs...).Scan(&filteredUnreadCount); err != nil {
+		writeError(w, err)
+		return
+	}
+	query += " ORDER BY n.created_at DESC LIMIT ? OFFSET ?"
+	args = append(args, pageSize, (page-1)*pageSize)
+	writeJSON(w, 200, map[string]any{"items": readRows(s.store.DB, query, args...), "page": page, "pageSize": pageSize, "total": total, "unreadCount": unreadCount, "filteredUnreadCount": filteredUnreadCount})
 }
 
 func readRows(db *sql.DB, query string, args ...any) []map[string]any {
@@ -1911,7 +1948,12 @@ func (s *Server) readAllNotifications(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := s.store.DB.Exec("UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE user_id=?", now(), a.ID)
+	query, args := "UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE user_id=?", []any{now(), a.ID}
+	if projectID := strings.TrimSpace(r.URL.Query().Get("projectId")); projectID != "" {
+		query += " AND project_id=?"
+		args = append(args, projectID)
+	}
+	_, err := s.store.DB.Exec(query, args...)
 	if err != nil {
 		writeError(w, err)
 		return

@@ -53,6 +53,7 @@ type WorkItem struct {
 	ClosedAt             *string          `json:"closed_at"`
 	CreatedByUserID      *string          `json:"created_by_user_id"`
 	FollowerIDs          []string         `json:"follower_ids"`
+	Tags                 []string         `json:"tags"`
 	Conversation         []map[string]any `json:"conversation"`
 	Executions           []map[string]any `json:"executions"`
 	Attachments          []map[string]any `json:"attachments"`
@@ -84,6 +85,7 @@ type CreateInput struct {
 	RequestID, ProjectID, Title, DescriptionMarkdown, AcceptanceCriteriaMarkdown string
 	Priority, TargetBranch, AssigneeKind, AssigneeID, ParentID, CreatedByUserID  string
 	FollowerIDs                                                                  []string
+	Tags                                                                         []string
 	IsAgentTask, PauseAfterPlan, PauseAfterCompletion                            bool
 }
 
@@ -134,6 +136,15 @@ func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Work
 				}
 			}
 		}
+		tags, tagErr := normalizeTags(in.Tags)
+		if tagErr != nil {
+			return tagErr
+		}
+		for _, tag := range tags {
+			if _, err = tx.ExecContext(ctx, "INSERT INTO work_item_tags(work_item_id,tag,created_at) VALUES(?,?,?)", itemID, tag, stamp); err != nil {
+				return err
+			}
+		}
 		return timeline(ctx, tx, itemID, "stage_transition", "created", actor, map[string]any{"from": nil, "to": "created"}, 1)
 	})
 	if err != nil {
@@ -165,6 +176,11 @@ func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
 		return nil, err
 	}
 	w.Conversation = readMaps(ctx, m.store.DB, "SELECT id,kind,stage,author_type,author_id,payload_json,created_at FROM conversation_entries WHERE work_item_id=? ORDER BY created_at,id", itemID)
+	for _, entry := range w.Conversation {
+		if payload, ok := entry["payload_json"]; ok {
+			entry["payload"] = payload
+		}
+	}
 	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,attempt_number,state,thread_id,command_json,result_json,final_message,workspace_path,started_at,ended_at,error_message FROM agent_executions WHERE work_item_id=? ORDER BY attempt_number", itemID)
 	w.Attachments = readMaps(ctx, m.store.DB, "SELECT id,entry_id,original_name,mime,size,created_at FROM attachments WHERE work_item_id=? ORDER BY created_at,id", itemID)
 	w.FollowerIDs = []string{}
@@ -177,6 +193,17 @@ func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
 			}
 		}
 		rows.Close()
+	}
+	w.Tags = []string{}
+	tagRows, _ := m.store.DB.QueryContext(ctx, "SELECT tag FROM work_item_tags WHERE work_item_id=? ORDER BY created_at,tag", itemID)
+	if tagRows != nil {
+		for tagRows.Next() {
+			var tag string
+			if tagRows.Scan(&tag) == nil {
+				w.Tags = append(w.Tags, tag)
+			}
+		}
+		tagRows.Close()
 	}
 	w.Dependencies = []string{}
 	deps, _ := m.store.DB.QueryContext(ctx, "SELECT depends_on_id FROM work_item_dependencies WHERE work_item_id=?", itemID)
@@ -196,6 +223,7 @@ type UpdateInput struct {
 	ExpectedVersion                                                                int64
 	Title, Description, Criteria, Priority, TargetBranch, AssigneeKind, AssigneeID string
 	FollowerIDs                                                                    []string
+	Tags                                                                           []string
 	Configure                                                                      bool
 	IsAgentTask, PauseAfterPlan, PauseAfterCompletion                              bool
 }
@@ -283,6 +311,18 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 					}
 				}
 			}
+			tags, tagErr := normalizeTags(in.Tags)
+			if tagErr != nil {
+				return tagErr
+			}
+			if _, err = tx.ExecContext(ctx, "DELETE FROM work_item_tags WHERE work_item_id=?", itemID); err != nil {
+				return err
+			}
+			for _, tag := range tags {
+				if _, err = tx.ExecContext(ctx, "INSERT INTO work_item_tags(work_item_id,tag,created_at) VALUES(?,?,?)", itemID, tag, stamp); err != nil {
+					return err
+				}
+			}
 		}
 		return timeline(ctx, tx, itemID, "work_item_updated", current.Stage, actor, map[string]any{"isAgentTask": isAgent}, current.Version+1)
 	})
@@ -290,6 +330,29 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 		return nil, err
 	}
 	return m.Get(ctx, itemID)
+}
+
+func normalizeTags(values []string) ([]string, error) {
+	if len(values) > 20 {
+		return nil, &Error{422, "TOO_MANY_TAGS", "A task can have at most 20 tags"}
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		tag := strings.TrimSpace(value)
+		if tag == "" {
+			continue
+		}
+		if len([]rune(tag)) > 30 {
+			return nil, &Error{422, "TAG_TOO_LONG", "Tags can contain at most 30 characters"}
+		}
+		key := strings.ToLower(tag)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, tag)
+		}
+	}
+	return out, nil
 }
 
 func branchAllowed(branch, raw string) bool {

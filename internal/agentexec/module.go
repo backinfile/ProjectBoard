@@ -246,7 +246,7 @@ func (m *Module) claim() (*claim, error) {
 	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
 		row := tx.QueryRow(`SELECT w.id,w.project_id,p.project_key,w.number,w.title,w.description_markdown,w.acceptance_criteria_markdown,w.target_branch,COALESCE(w.codex_thread_id,''),COALESCE(w.workspace_path,''),p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,
 		(SELECT COALESCE(MAX(e.attempt_number),0)+1 FROM agent_executions e WHERE e.work_item_id=w.id),CASE WHEN w.pause_after_plan=1 AND w.plan_pause_consumed=0 THEN 1 ELSE 0 END
-		FROM work_items w JOIN projects p ON p.id=w.project_id JOIN agent_project_grants g ON g.project_id=w.project_id JOIN agents a ON a.id=g.agent_id
+		FROM work_items w JOIN projects p ON p.id=w.project_id CROSS JOIN agents a
 		WHERE w.is_agent_task=1 AND w.blocked_at IS NULL AND w.stage IN('created','in_progress') AND w.agent_state='queued' AND a.status='active' AND a.revoked_at IS NULL
 		AND (SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')<a.max_concurrent_tasks
 		ORDER BY (CAST((SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,w.created_at,w.id LIMIT 1`)
@@ -338,7 +338,8 @@ func (m *Module) issue(ctx context.Context, projectID string) (*Credential, erro
 func (m *Module) prompt(ctx context.Context, c *claim) string {
 	item, _ := m.queue.Get(ctx, c.ItemID)
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nTarget branch: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch)
+	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nDevelopment branch: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch)
+	b.WriteString("Default Git workflow: start from the development branch, do the task on the already-created ProjectBoard work branch, and after verification merge the work branch back into the development branch. Leave the branch that should be published checked out. If the task description or ProjectBoard conversation explicitly specifies a different branch or Git workflow, follow that explicit instruction instead.\n")
 	fmt.Fprintf(&b, "Project Agent rules:\n%s\nProject prompt segments (JSON):\n%s\nValidation commands (JSON):\n%s\nForbidden paths (JSON):\n%s\n", c.AgentRules, c.AgentPrompts, c.ValidationCommands, c.ForbiddenPaths)
 	if c.PlanOnly {
 		b.WriteString("Produce a concrete implementation plan only. Do not edit files. Return status planned.\n")
@@ -358,6 +359,7 @@ func (m *Module) execute(parent context.Context, c *claim) {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(c.Timeout)*time.Minute)
 	defer cancel()
 	if err := m.prepare(ctx, c); err != nil {
+		m.recordResult(c, Result{ThreadID: c.ThreadID}, "failed", err)
 		m.fail(c, c.ThreadID, err)
 		return
 	}
@@ -409,6 +411,7 @@ func (m *Module) finish(c *claim, r Result) {
 			return
 		}
 		if err := m.push(context.Background(), c); err != nil {
+			m.recordResult(c, r, "failed", err)
 			m.fail(c, r.ThreadID, err)
 			return
 		}
@@ -445,7 +448,14 @@ func (m *Module) push(ctx context.Context, c *claim) error {
 	if cred != nil && cred.Revoke != nil {
 		defer cred.Revoke(context.Background())
 	}
-	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
+	branch, err := gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
+	if err != nil {
+		return err
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return errors.New("Codex completed on a detached HEAD")
+	}
 	return git(ctx, c.Workspace, cred, "push", "-u", "origin", branch)
 }
 
@@ -472,7 +482,7 @@ func (m *Module) event(c *claim, kind, message string) error {
 	return err
 }
 
-func (m *Module) DeleteAgent(ctx context.Context, agentID string) error {
+func (m *Module) DeactivateAgent(ctx context.Context, agentID string) error {
 	var waits []<-chan struct{}
 	m.mu.Lock()
 	for executionID, control := range m.running {
@@ -488,25 +498,6 @@ func (m *Module) DeleteAgent(ctx context.Context, agentID string) error {
 	}
 	stamp := now()
 	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET stage='created',agent_state='queued',assigned_agent_id=NULL,codex_thread_id=NULL,resume_requested=0,version=version+1,updated_at=? WHERE assigned_agent_id=? AND stage<>'closed'", stamp, agentID)
-	m.Wake()
-	return err
-}
-func (m *Module) DisableProjectAgent(ctx context.Context, agentID, projectID string) error {
-	var waits []<-chan struct{}
-	m.mu.Lock()
-	for executionID, control := range m.running {
-		var found int
-		if m.store.DB.QueryRow(`SELECT 1 FROM agent_executions e JOIN work_items w ON w.id=e.work_item_id WHERE e.id=? AND e.agent_id=? AND w.project_id=?`, executionID, agentID, projectID).Scan(&found) == nil {
-			control.cancel()
-			waits = append(waits, control.done)
-		}
-	}
-	m.mu.Unlock()
-	if err := waitForRuns(ctx, waits); err != nil {
-		return err
-	}
-	stamp := now()
-	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET stage='created',agent_state='queued',assigned_agent_id=NULL,codex_thread_id=NULL,resume_requested=0,version=version+1,updated_at=? WHERE assigned_agent_id=? AND project_id=? AND stage<>'closed'", stamp, agentID, projectID)
 	m.Wake()
 	return err
 }

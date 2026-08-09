@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -83,7 +84,7 @@ func TestDeletingUserRetainsRecordButHidesItFromLists(t *testing.T) {
 	}
 }
 
-func TestDeletingAgentHidesItFromOrganizationAndProjectLists(t *testing.T) {
+func TestDeletingAgentHidesItFromOrganizationList(t *testing.T) {
 	handler := server.NewTestHandler(t.TempDir())
 	defer handler.Close()
 	host := httptest.NewServer(handler)
@@ -94,21 +95,47 @@ func TestDeletingAgentHidesItFromOrganizationAndProjectLists(t *testing.T) {
 	csrf := login["csrfToken"].(string)
 	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "soft-delete-agent", "purpose": "retained history"})
 	agentID := agent["id"].(string)
-	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "agent-delete", "name": "Agent Delete", "repositoryUrl": "https://example.com/agent-delete.git"})
-	projectID := project["id"].(string)
-	requestJSON(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agentID+"/disable", csrf, nil)
+	foundDisabled := false
+	for _, listedAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil) {
+		if listedAgent["id"] == agentID {
+			foundDisabled = listedAgent["status"] == "disabled" && listedAgent["enabled"] == false
+		}
+	}
+	if !foundDisabled {
+		t.Fatal("disabled Agent status was not exposed by the organization list")
+	}
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/agents/"+agentID+"/enable", csrf, nil)
 
 	requestJSON(t, client, http.MethodDelete, host.URL+"/api/agents/"+agentID, csrf, nil)
-	requestErrorCode(t, client, http.MethodPut, host.URL+"/api/projects/"+projectID+"/agents/"+agentID, csrf, map[string]any{}, http.StatusNotFound, "NOT_FOUND")
 	for _, listedAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil) {
 		if listedAgent["id"] == agentID {
 			t.Fatalf("deleted agent remained in organization list: %#v", listedAgent)
 		}
 	}
-	for _, projectAgent := range requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+projectID+"/agents", csrf, nil) {
-		if projectAgent["id"] == agentID {
-			t.Fatalf("deleted agent remained in project list: %#v", projectAgent)
-		}
+}
+
+func TestActivitySupportsPagination(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	for index := 1; index <= 5; index++ {
+		requestJSON(t, client, http.MethodPost, host.URL+"/api/users", csrf, map[string]any{"username": fmt.Sprintf("audit-user-%d", index), "displayName": fmt.Sprintf("Audit User %d", index), "systemRole": "user"})
+	}
+	first := requestJSON(t, client, http.MethodGet, host.URL+"/api/activity?page=1&pageSize=2", csrf, nil)
+	second := requestJSON(t, client, http.MethodGet, host.URL+"/api/activity?page=2&pageSize=2", csrf, nil)
+	firstItems := first["items"].([]any)
+	secondItems := second["items"].([]any)
+	if first["total"].(float64) < 5 || len(firstItems) != 2 || len(secondItems) != 2 {
+		t.Fatalf("unexpected activity pages: first=%#v second=%#v", first, second)
+	}
+	if firstItems[0].(map[string]any)["id"] == secondItems[0].(map[string]any)["id"] {
+		t.Fatal("activity pagination returned the same leading event on both pages")
 	}
 }
 
@@ -121,8 +148,8 @@ func TestLocalCodexAgentConfigurationIsExposed(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
 	csrf := login["csrfToken"].(string)
-	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "local-codex", "purpose": "test", "runtimeType": "local_codex_cli", "maxConcurrentTasks": 3, "turnTimeoutMinutes": 45})
-	if agent["runtimeType"] != "local_codex_cli" || agent["maxConcurrentTasks"] != float64(3) || agent["turnTimeoutMinutes"] != float64(45) {
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "local-codex", "runtimeType": "local_codex_cli", "maxConcurrentTasks": 3, "turnTimeoutMinutes": 45})
+	if agent["runtimeType"] != "local_codex_cli" || agent["maxConcurrentTasks"] != float64(3) || agent["turnTimeoutMinutes"] != float64(45) || agent["purpose"] != "" {
 		t.Fatalf("unexpected Agent: %#v", agent)
 	}
 	agents := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil)
@@ -313,6 +340,14 @@ func TestWorkItemFollowersCriteriaAndNotifications(t *testing.T) {
 	notifications := requestJSONArray(t, memberClient, http.MethodGet, host.URL+"/api/notifications", "", nil)
 	if len(notifications) < 2 {
 		t.Fatalf("notifications=%#v, want assignment and update", notifications)
+	}
+	paged := requestJSON(t, memberClient, http.MethodGet, host.URL+"/api/notifications?page=1&pageSize=1&projectId="+project["id"].(string), "", nil)
+	items, ok := paged["items"].([]any)
+	if !ok || len(items) != 1 || paged["total"].(float64) < 2 || paged["unreadCount"].(float64) < 2 {
+		t.Fatalf("paged notifications=%#v", paged)
+	}
+	if items[0].(map[string]any)["project_name"] != "People" {
+		t.Fatalf("notification project=%#v, want People", items[0])
 	}
 }
 

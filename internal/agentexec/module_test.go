@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,10 +38,6 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.DB.Exec("INSERT INTO agent_project_grants(agent_id,project_id,created_at) VALUES('a','p',?)", stamp)
-	if err != nil {
-		t.Fatal(err)
-	}
 	queue := workqueue.New(db)
 	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Plan me", IsAgentTask: true, PauseAfterPlan: true})
 	if err != nil {
@@ -61,6 +58,15 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	case call := <-runner.calls:
 		if !call.PlanOnly {
 			t.Fatal("first turn was not plan-only")
+		}
+		if !strings.Contains(call.Prompt, "Development branch: main") {
+			t.Fatalf("prompt does not identify the development branch: %s", call.Prompt)
+		}
+		if !strings.Contains(call.Prompt, "merge the work branch back into the development branch") {
+			t.Fatalf("prompt does not explain the default branch workflow: %s", call.Prompt)
+		}
+		if !strings.Contains(call.Prompt, "explicit instruction instead") {
+			t.Fatalf("prompt does not give explicit task instructions precedence: %s", call.Prompt)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent did not receive task")
@@ -91,5 +97,52 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent session was not resumed")
+	}
+}
+
+func TestWorkspacePreparationFailureReleasesAgentCapacity(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	missingRepository := "file:///" + filepath.ToSlash(filepath.Join(dir, "missing.git"))
+	if _, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", missingRepository, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp); err != nil {
+		t.Fatal(err)
+	}
+	queue := workqueue.New(db)
+	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Cannot clone", IsAgentTask: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := New(db, queue, Options{DataDir: dir, Runner: &fakeRunner{results: make(chan Result), calls: make(chan Invocation)}, PollInterval: 10 * time.Millisecond})
+	if err = module.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer module.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		item, err = queue.Get(t.Context(), item.ID)
+		if err == nil && item.AgentState == "paused_failure" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if item.AgentState != "paused_failure" {
+		t.Fatalf("agent state = %s", item.AgentState)
+	}
+	var state string
+	var endedAt, errorMessage *string
+	if err = db.DB.QueryRow("SELECT state,ended_at,error_message FROM agent_executions WHERE work_item_id=?", item.ID).Scan(&state, &endedAt, &errorMessage); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || endedAt == nil || errorMessage == nil {
+		t.Fatalf("failed execution was not finalized: state=%s endedAt=%v error=%v", state, endedAt, errorMessage)
 	}
 }
