@@ -49,12 +49,7 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 	if command == "" {
 		command = "codex"
 	}
-	args := []string{"exec"}
-	if in.ThreadID != "" {
-		args = append(args, "resume", in.ThreadID, "--json", "--output-schema", r.SchemaPath, "-c", `sandbox_mode="workspace-write"`, "-")
-	} else {
-		args = append(args, "--json", "--sandbox", "workspace-write", "--output-schema", r.SchemaPath, "-C", in.WorkDir, "-")
-	}
+	args := execArgs(in, r.SchemaPath)
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = in.WorkDir
 	cmd.Stdin = strings.NewReader(in.Prompt)
@@ -103,6 +98,14 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 		return result, errors.New("Codex result is missing status or message")
 	}
 	return result, nil
+}
+
+func execArgs(in Invocation, schemaPath string) []string {
+	args := []string{"exec"}
+	if in.ThreadID != "" {
+		return append(args, "resume", in.ThreadID, "--json", "--output-schema", schemaPath, "-c", `sandbox_mode="danger-full-access"`, "-")
+	}
+	return append(args, "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, "-")
 }
 
 type Options struct {

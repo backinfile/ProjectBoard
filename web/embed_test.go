@@ -142,6 +142,16 @@ func TestTaskDetailSupportsSidebarDescriptionAttachmentsAndTextPreview(t *testin
 	}
 }
 
+func TestFinalTaskRendererHandlesClosedTasksAndEnterToSend(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	if !strings.Contains(app, "const form=$('#chatComposer');if(!form)return;const toolbar=$('.composer-toolbar',form)") {
+		t.Error("task renderer queries inside a missing closed-task composer")
+	}
+	if !strings.Contains(app, "message.addEventListener('keydown'") || !strings.Contains(app, "form.requestSubmit()") {
+		t.Error("task composer does not submit with Enter")
+	}
+}
+
 func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 	app, err := Files.ReadFile("assets/app.js")
 	if err != nil {
@@ -186,6 +196,14 @@ func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 			t.Error("members and Agents must live inside project settings, not the project sidebar")
 		}
 	}
+	for _, forbidden := range []string{"systemAddressForm(value)", "if(state.page==='projectSettings')state.page='queue'", `$('[data-page="projectSettings"]')?.remove()`} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("final settings override contains obsolete behavior %q", forbidden)
+		}
+	}
+	if !strings.Contains(source, "id=\"syncCommits\"") {
+		t.Error("project repository settings do not expose commit synchronization")
+	}
 }
 
 func TestLocalAgentWorkflowIsEmbedded(t *testing.T) {
@@ -217,7 +235,7 @@ func TestLocalAgentWorkflowIsEmbedded(t *testing.T) {
 func TestTaskBoardSupportsStageDragAndDrop(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
-	for _, marker := range []string{"wireTaskBoardDragAndDrop", "dragstart", "dragover", "drop", "targetStage", "/stage"} {
+	for _, marker := range []string{"wireTaskBoardDragAndDrop", "dragstart", "dragover", "drop", "pointerdown", "elementFromPoint", "event.stopPropagation()", "targetStage", "/stage"} {
 		if !strings.Contains(app, marker) {
 			t.Errorf("task board drag-and-drop is missing %q", marker)
 		}

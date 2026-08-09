@@ -25,6 +25,20 @@ func TestCloneArgsUseRemoteDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestExecArgsAllowTaskAgentToCommit(t *testing.T) {
+	fresh := execArgs(Invocation{WorkDir: `C:\work\PB-1`}, `C:\schema.json`)
+	resume := execArgs(Invocation{WorkDir: `C:\work\PB-1`, ThreadID: "thread-1"}, `C:\schema.json`)
+	for name, args := range map[string][]string{"fresh": fresh, "resume": resume} {
+		joined := strings.Join(args, "\x00")
+		if strings.Contains(joined, "workspace-write") {
+			t.Fatalf("%s invocation still blocks .git metadata writes: %#v", name, args)
+		}
+		if !strings.Contains(joined, "danger-full-access") {
+			t.Fatalf("%s invocation does not allow task commits: %#v", name, args)
+		}
+	}
+}
+
 func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
 	f.calls <- in
 	return <-f.results, nil
