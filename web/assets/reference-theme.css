@@ -3543,6 +3543,104 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   background: #fafbfc;
 }
 
+.settings-surface .drawer.project-management-drawer,
+.drawer.project-management-drawer {
+  width: min(760px, 100vw);
+  padding: 0;
+  overflow: hidden;
+}
+
+.project-management-drawer .drawer-head {
+  position: static;
+  margin: 0;
+  padding: 18px 22px;
+}
+
+.managed-project-shell {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.managed-project-summary {
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.managed-project-summary-actions,
+.managed-project-section > header,
+.project-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.managed-project-tabs {
+  padding: 18px 22px 0;
+}
+
+.managed-project-panel {
+  padding: 0 22px 36px;
+}
+
+.managed-project-section {
+  padding: 26px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.managed-project-section:last-child {
+  border-bottom: 0;
+}
+
+.managed-project-section > header {
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.managed-project-section > header h3 {
+  margin: 0;
+  font-size: .9375rem;
+  letter-spacing: -.02em;
+}
+
+.managed-project-section > header p {
+  max-width: 58ch;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: .6875rem;
+  line-height: 1.55;
+}
+
+.managed-project-section .settings-entity-row {
+  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+}
+
+@media (max-width: 700px) {
+  .managed-project-summary {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .managed-project-summary-actions {
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+  }
+
+  .managed-project-section > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .managed-project-section .settings-entity-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .managed-project-section .settings-entity-row > :nth-child(n+3) {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
 .stage-current-card,
 .stage-target-field {
   display: grid;

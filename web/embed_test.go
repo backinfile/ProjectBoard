@@ -152,7 +152,7 @@ func TestFinalTaskRendererHandlesClosedTasksAndEnterToSend(t *testing.T) {
 	}
 }
 
-func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
+func TestProjectManagementDrawerOwnsProjectSettings(t *testing.T) {
 	app, err := Files.ReadFile("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +168,9 @@ func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 		"projectBranchPolicyDrawer",
 		"systemAddressDrawer",
 		"projects-basic-list",
+		"project-management-drawer",
+		"data-managed-project-tab",
+		"managedProjectPanel",
 		"settings-reference-topbar",
 		"settings-reference-tabs",
 		"promptSegmentTitle",
@@ -189,20 +192,22 @@ func TestSettingsUseProjectTabsAndDrawerEditing(t *testing.T) {
 		t.Fatal("project navigation definition is missing")
 	}
 	for _, match := range matches {
-		if !strings.Contains(match[1], "'projectSettings'") {
-			t.Error("project navigation is missing project settings")
+		if strings.Contains(match[1], "'projectSettings'") {
+			t.Error("project navigation still exposes the removed project settings page")
 		}
 		if strings.Contains(match[1], "'members'") || strings.Contains(match[1], "'agents'") {
 			t.Error("members and Agents must live inside project settings, not the project sidebar")
 		}
 	}
-	for _, forbidden := range []string{"systemAddressForm(value)", "if(state.page==='projectSettings')state.page='queue'", `$('[data-page="projectSettings"]')?.remove()`} {
+	for _, forbidden := range []string{"systemAddressForm(value)", "state.page='projectSettings'"} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("final settings override contains obsolete behavior %q", forbidden)
+			t.Errorf("settings routing contains obsolete behavior %q", forbidden)
 		}
 	}
-	if !strings.Contains(source, "id=\"syncCommits\"") {
-		t.Error("project repository settings do not expose commit synchronization")
+	for _, marker := range []string{"id=\"syncManagedProject\"", "id=\"editManagedProjectPolicy\"", "id=\"addManagedProjectPrompt\"", "id=\"editManagedProjectBranch\"", "id=\"enableManagedProjectMember\"", "id=\"enableManagedProjectAgent\""} {
+		if !strings.Contains(source, marker) {
+			t.Errorf("project management drawer is missing %q", marker)
+		}
 	}
 }
 
