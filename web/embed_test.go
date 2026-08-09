@@ -214,6 +214,21 @@ func TestLocalAgentWorkflowIsEmbedded(t *testing.T) {
 	}
 }
 
+func TestTaskBoardSupportsStageDragAndDrop(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{"wireTaskBoardDragAndDrop", "dragstart", "dragover", "drop", "targetStage", "/stage"} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("task board drag-and-drop is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{"[draggable=\"true\"]", ".can-drop", ".drag-over", ".is-dragging"} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("task board drag-and-drop styling is missing %q", marker)
+		}
+	}
+}
+
 func mustReadEmbedded(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := Files.ReadFile(name)
