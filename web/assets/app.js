@@ -349,7 +349,7 @@ function queuePeopleFilterForm(actors){
   });
 }
 
-workItemForm=async function(){
+let workItemForm=async function(){
   const [members,agents]=await Promise.all([api(`/api/projects/${state.project.id}/members`),api('/api/agents')]);
   const activeMembers=members.filter(member=>member.role&&member.status==='active');
   const choices=[...activeMembers.map(member=>`<option value="human:${member.id}">${escapeHTML(member.displayName)} / ${t('human')}</option>`),...agents.filter(agent=>agent.status==='active').map(agent=>`<option value="agent:${agent.id}">${escapeHTML(agent.name)} / Agent</option>`)].join('');
@@ -435,7 +435,7 @@ function memberEnablePicker(members){
   openDrawer(t('enableMember'),`<form class="form" id="enableMemberForm"><label class="field"><span>${t('chooseMember')}</span><select name="userId" required>${available.map(member=>`<option value="${member.id}">${escapeHTML(member.displayName)} · @${escapeHTML(member.username)}</option>`).join('')}</select></label><label class="field"><span>${t('projectRole')}</span><select name="role"><option value="developer">${t('developer')}</option><option value="viewer">${t('viewer')}</option></select></label><p class="drawer-note">${t('addMemberNote')}</p><div class="form-error" hidden></div><button class="button primary" type="submit">${t('enableMember')}</button></form>`,()=>wireForm('#enableMemberForm',async data=>{await api(`/api/projects/${state.project.id}/members`,{method:'POST',body:JSON.stringify(data)});toast(t('memberEnabledToast'))}));
 }
 
-renderAgents=async function(){
+let renderAgents=async function(){
   if(!state.project)return renderQueue();
   const data=await api('/api/agents'),enabled=data.filter(agent=>agent.status==='active');
   const totalCapacity=enabled.reduce((sum,agent)=>sum+(agent.maxConcurrentTasks||1),0),running=enabled.reduce((sum,agent)=>sum+(agent.currentLoad||0),0),available=Math.max(0,totalCapacity-running);
