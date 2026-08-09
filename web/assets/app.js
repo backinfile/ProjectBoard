@@ -801,7 +801,7 @@ localWorkflowUI.renderTask=async function(){
   await localTaskRenderer();
   const item=await api(`/api/work-items/${state.task}`),attachments=item.attachments||[],panel=$('.task-basic-panel');
   if(panel){$('dl',panel)?.insertAdjacentHTML('beforeend',`<div><dt>${t('followers')}</dt><dd>${(item.follower_ids||[]).length}</dd></div>`);panel.insertAdjacentHTML('beforeend',`<section class="task-description-attachments"><h3>${t('descriptionAttachments')}</h3>${attachments.length?attachments.map(attachmentMarkup).join(''):`<p class="task-no-attachments">${t('noDescriptionAttachments')}</p>`}</section>`)}wireTextAttachmentPreviews();
-  const form=$('#chatComposer'),toolbar=$('.composer-toolbar',form);if(!form||!toolbar)return;
+  const form=$('#chatComposer'),toolbar=$('.composer-toolbar',form);if(!form||!toolbar)return;toolbar.firstElementChild?.classList.add('composer-tools');
   toolbar.firstElementChild?.insertAdjacentHTML('beforeend',`<label class="attachment-button" title="${t('addAttachment')}">${icon('paperclip')}<input id="attachmentInput" type="file" multiple></label><span class="pending-attachments" id="pendingAttachments" hidden></span>`);
   let files=[];const input=$('#attachmentInput',form),pending=$('#pendingAttachments',form),paint=()=>{pending.hidden=!files.length;pending.innerHTML=pendingFilesMarkup(files);pending.querySelectorAll('[data-remove-file]').forEach(button=>button.onclick=()=>{files.splice(Number(button.dataset.removeFile),1);paint()})};input.onchange=()=>{files=[...input.files];paint()};
   $('#continueAgent')?.addEventListener('click',()=>form.dataset.resumeAgent='true');
