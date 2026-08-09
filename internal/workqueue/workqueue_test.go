@@ -59,6 +59,35 @@ func TestAgentPauseFlagsAreClearedForHumanTask(t *testing.T) {
 	}
 }
 
+func TestTaskDevelopmentBranchIsNotRestrictedByProjectAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,allowed_target_branches_json,created_at,updated_at) VALUES('p','PB','Project','','[\"main\"]',?,?)", stamp, stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := New(db)
+	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Feature", TargetBranch: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.TargetBranch != "dev" {
+		t.Fatalf("created target branch = %q", item.TargetBranch)
+	}
+	item, err = q.Update(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, UpdateInput{ExpectedVersion: item.Version, TargetBranch: "release/v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.TargetBranch != "release/v2" {
+		t.Fatalf("updated target branch = %q", item.TargetBranch)
+	}
+}
+
 func TestClosedTaskRejectsMessages(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "test.db"))

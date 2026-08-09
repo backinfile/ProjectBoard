@@ -105,15 +105,12 @@ func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Work
 	}
 	var itemID string
 	err := m.store.Write(ctx, func(tx *sql.Tx) error {
-		var key, branch, allowedJSON string
-		if err := tx.QueryRowContext(ctx, "SELECT project_key,default_target_branch,allowed_target_branches_json FROM projects WHERE id=?", in.ProjectID).Scan(&key, &branch, &allowedJSON); err != nil {
+		var key, branch string
+		if err := tx.QueryRowContext(ctx, "SELECT project_key,default_target_branch FROM projects WHERE id=?", in.ProjectID).Scan(&key, &branch); err != nil {
 			return err
 		}
 		if in.TargetBranch != "" {
 			branch = in.TargetBranch
-		}
-		if !branchAllowed(branch, allowedJSON) {
-			return &Error{422, "TARGET_BRANCH_NOT_ALLOWED", "Target branch is not allowed by the project"}
 		}
 		var number int64
 		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(number),0)+1 FROM work_items WHERE project_id=?", in.ProjectID).Scan(&number); err != nil {
@@ -257,13 +254,6 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 			priority = in.Priority
 		}
 		if in.TargetBranch != "" {
-			var allowedJSON string
-			if err = tx.QueryRowContext(ctx, "SELECT allowed_target_branches_json FROM projects WHERE id=?", current.ProjectID).Scan(&allowedJSON); err != nil {
-				return err
-			}
-			if !branchAllowed(in.TargetBranch, allowedJSON) {
-				return &Error{422, "TARGET_BRANCH_NOT_ALLOWED", "Target branch is not allowed by the project"}
-			}
 			branch = in.TargetBranch
 		}
 		if in.Configure {
@@ -353,19 +343,6 @@ func normalizeTags(values []string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-func branchAllowed(branch, raw string) bool {
-	var allowed []string
-	if json.Unmarshal([]byte(raw), &allowed) != nil || len(allowed) == 0 {
-		return false
-	}
-	for _, candidate := range allowed {
-		if candidate == branch {
-			return true
-		}
-	}
-	return false
 }
 
 var allowedTransitions = map[string]map[string]bool{"created": {"in_progress": true}, "in_progress": {"completed": true}, "completed": {"in_progress": true, "closed": true}}

@@ -304,17 +304,53 @@ func (m *Module) prepare(ctx context.Context, c *claim) error {
 	if cred != nil && cred.Revoke != nil {
 		defer cred.Revoke(context.Background())
 	}
-	args := []string{"clone"}
-	if strings.TrimSpace(c.TargetBranch) != "" {
-		args = append(args, "--branch", c.TargetBranch)
-	}
-	args = append(args, cloneURL, c.Workspace)
+	// Let the remote select its default branch. The task's development branch is
+	// workflow metadata and may be renamed or created later; using it as a clone
+	// constraint makes workspace creation fail before the Agent can do any work.
+	args := cloneArgs(cloneURL, c.Workspace)
 	if err = git(ctx, "", cred, args...); err != nil {
 		return err
+	}
+	requestedBranch := strings.TrimSpace(c.TargetBranch)
+	if requestedBranch != "" {
+		exists, existsErr := gitRefExists(ctx, c.Workspace, "refs/remotes/origin/"+requestedBranch)
+		if existsErr != nil {
+			return existsErr
+		}
+		if exists {
+			if err = git(ctx, c.Workspace, nil, "switch", requestedBranch); err != nil {
+				return err
+			}
+		} else {
+			c.TargetBranch, err = gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
+			if err != nil {
+				return err
+			}
+			c.TargetBranch = strings.TrimSpace(c.TargetBranch)
+		}
 	}
 	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
 	return git(ctx, c.Workspace, nil, "switch", "-c", branch)
 }
+
+func cloneArgs(cloneURL, workspace string) []string {
+	return []string{"clone", cloneURL, workspace}
+}
+
+func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", ref)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git show-ref --verify --quiet %s: %w", ref, err)
+}
+
 func git(ctx context.Context, dir string, cred *Credential, args ...string) error {
 	full := []string{}
 	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)

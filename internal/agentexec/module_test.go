@@ -17,6 +17,14 @@ type fakeRunner struct {
 	calls   chan Invocation
 }
 
+func TestCloneArgsUseRemoteDefaultBranch(t *testing.T) {
+	args := cloneArgs("https://github.com/acme/repo.git", `C:\work\PB-1`)
+	want := []string{"clone", "https://github.com/acme/repo.git", `C:\work\PB-1`}
+	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("clone args = %#v, want %#v", args, want)
+	}
+}
+
 func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
 	f.calls <- in
 	return <-f.results, nil
