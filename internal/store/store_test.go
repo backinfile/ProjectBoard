@@ -24,7 +24,7 @@ func TestOpenRejectsUnversionedDatabase(t *testing.T) {
 	}
 }
 
-func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
+func TestOpenCreatesOnlyLocalProjectSchema(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "new.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -32,8 +32,7 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 	defer database.Close()
 
 	for _, table := range []string{
-		"system_settings", "provider_authorizations", "git_provider_settings",
-		"project_repository_grants", "agents", "agent_executions", "work_items",
+		"system_settings", "projects", "agents", "agent_executions", "work_items",
 	} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
@@ -44,6 +43,9 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 		"agent_ssh_keys", "agent_ssh_sessions", "leases", "assignments",
 		"runner_runs", "runner_devices", "runner_status", "discussion_conclusions",
 		"execution_attempts", "validation_runs", "acceptance_attempts", "agent_project_grants",
+		"provider_authorizations", "git_provider_settings", "git_provider_setup_flows",
+		"provider_authorization_metadata", "provider_authorization_repositories",
+		"git_connection_flows", "project_repository_grants", "project_commit_sync_state", "webhook_deliveries",
 	} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 0 {
@@ -52,36 +54,22 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesGlobalAgentConfiguration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v6.db")
+func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v7.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = database.Exec(`CREATE TABLE schema_metadata(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL);
-		INSERT INTO schema_metadata VALUES(1,6,CURRENT_TIMESTAMP);
-		CREATE TABLE agent_project_grants(agent_id TEXT NOT NULL, project_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(agent_id,project_id));
-		INSERT INTO agent_project_grants VALUES('agent','project',CURRENT_TIMESTAMP);`); err != nil {
+		INSERT INTO schema_metadata VALUES(1,7,CURRENT_TIMESTAMP);`); err != nil {
 		t.Fatal(err)
 	}
 	if err = database.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.Close()
-	var version, grants int
-	if err = migrated.DB.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if err = migrated.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_project_grants'").Scan(&grants); err != nil {
-		t.Fatal(err)
-	}
-	if version != SchemaVersion || grants != 0 {
-		t.Fatalf("migration left schema version %d and %d project-grant tables", version, grants)
+	if _, err = Open(path); err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("expected schema 7 to be rejected, got %v", err)
 	}
 }
 

@@ -17,7 +17,7 @@ func TestTaskTagsAreNormalizedAndUpdated(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,15 +46,15 @@ func TestAgentPauseFlagsAreClearedForHumanTask(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	item, err := New(db).Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Human", PauseAfterPlan: true, PauseAfterCompletion: true})
+	item, err := New(db).Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Human", PauseAfterPlan: true, PauseBeforeCompletion: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.IsAgentTask || item.PauseAfterPlan || item.PauseAfterCompletion {
+	if item.IsAgentTask || item.PauseAfterPlan || item.PauseBeforeCompletion {
 		t.Fatalf("unexpected agent settings: %+v", item)
 	}
 }
@@ -67,7 +67,7 @@ func TestTaskDevelopmentBranchIsNotRestrictedByProjectAllowlist(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,allowed_target_branches_json,created_at,updated_at) VALUES('p','PB','Project','','[\"main\"]',?,?)", stamp, stamp)
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestClosedTaskRejectsMessages(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
 	q := New(db)
 	item, _ := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Task"})
 	item, _ = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "in_progress", "")
@@ -104,6 +104,86 @@ func TestClosedTaskRejectsMessages(t *testing.T) {
 	item, _ = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "closed", "")
 	if _, err = q.AddMessage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, "late", item.Version); err == nil {
 		t.Fatal("closed task accepted a message")
+	}
+}
+
+func TestSimpleConversationWorkflowSkipsCompletedStage(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
+	q := New(db)
+	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Conversation", WorkflowType: "simple_conversation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "in_progress", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "completed", ""); err == nil {
+		t.Fatal("simple conversation entered completed stage")
+	}
+	item, err = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "closed", "")
+	if err != nil || item.Stage != "closed" {
+		t.Fatalf("simple conversation did not close directly: item=%+v err=%v", item, err)
+	}
+}
+
+func TestContinueFromMergeReviewReturnsTaskToProgress(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
+	q := New(db)
+	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Review", IsAgentTask: true, PauseBeforeCompletion: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='merge_review',agent_state='paused_completion' WHERE id=?", stamp, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	item, err = q.Get(t.Context(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = q.AgentAction(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "continue_work", "Please revise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Stage != "in_progress" || item.AgentPhase != "work" || item.AgentState != "queued" || item.CompletedAt != nil {
+		t.Fatalf("continued item = %+v", item)
+	}
+}
+
+func TestStandardAgentTaskCannotBypassMergeByClosingCompletedStage(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
+	q := New(db)
+	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Must merge", IsAgentTask: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE work_items SET stage='completed',agent_phase='merge_review',agent_state='paused_completion' WHERE id=?", item.ID); err != nil {
+		t.Fatal(err)
+	}
+	item, _ = q.Get(t.Context(), item.ID)
+	if _, err = q.MoveStage(t.Context(), Actor{Type: "human", ID: "u"}, item.ID, item.Version, "closed", "skip merge"); err == nil {
+		t.Fatal("standard Agent task closed without completing its merge")
 	}
 }
 
@@ -115,7 +195,7 @@ func TestPausedAgentRequiresExplicitResumeMessage(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp)
 	q := New(db)
 	item, err := q.Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Agent task", IsAgentTask: true})
 	if err != nil {

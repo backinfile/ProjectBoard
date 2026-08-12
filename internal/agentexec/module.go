@@ -11,24 +11,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/projectboard/projectboard/internal/projectrepo"
 	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
 
-type Credential struct {
-	Token  string
-	Revoke func(context.Context) error
-}
-type CredentialProvider interface {
-	Issue(context.Context, string) (*Credential, error)
-}
 type Invocation struct {
 	WorkDir, Prompt, ThreadID string
 	Timeout                   time.Duration
@@ -111,22 +104,20 @@ func execArgs(in Invocation, schemaPath string) []string {
 type Options struct {
 	DataDir      string
 	Runner       Runner
-	Credentials  CredentialProvider
 	PollInterval time.Duration
 }
 type Module struct {
-	store       *store.Store
-	queue       *workqueue.Module
-	dataDir     string
-	runner      Runner
-	credentials CredentialProvider
-	poll        time.Duration
-	wake        chan struct{}
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	mu          sync.Mutex
-	running     map[string]runControl
+	store   *store.Store
+	queue   *workqueue.Module
+	dataDir string
+	runner  Runner
+	poll    time.Duration
+	wake    chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	running map[string]runControl
 }
 
 type runControl struct {
@@ -148,15 +139,12 @@ func New(database *store.Store, queue *workqueue.Module, options ...Options) *Mo
 	if o.Runner == nil {
 		o.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(o.DataDir, "codex-result-schema.json")}
 	}
-	return &Module{store: database, queue: queue, dataDir: o.DataDir, runner: o.Runner, credentials: o.Credentials, poll: o.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
+	return &Module{store: database, queue: queue, dataDir: o.DataDir, runner: o.Runner, poll: o.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
 }
 
 const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","paused","failed"]},"message":{"type":"string"}},"required":["status","message"],"additionalProperties":false}`
 
 func (m *Module) Start() error {
-	if err := os.MkdirAll(filepath.Join(m.dataDir, "workspaces"), 0o700); err != nil {
-		return err
-	}
 	if _, ok := m.runner.(*ExecRunner); ok {
 		if err := os.WriteFile(filepath.Join(m.dataDir, "codex-result-schema.json"), []byte(resultSchema), 0o600); err != nil {
 			return err
@@ -219,10 +207,11 @@ func (m *Module) loop() {
 }
 
 type claim struct {
-	ExecutionID, ItemID, AgentID, ProjectID, ProjectKey, Title, Description, Criteria, TargetBranch, ThreadID, Workspace string
-	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts                                                         string
-	Number, Attempt, Timeout                                                                                             int64
-	PlanOnly                                                                                                             bool
+	ExecutionID, ItemID, AgentID, ProjectID, ProjectKey, ProjectPath, Title, Description, Criteria string
+	TargetBranch, WorkflowType, Phase, BaseCommit, ThreadID, Workspace                             string
+	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts                                   string
+	Number, Attempt, Timeout                                                                       int64
+	PlanOnly                                                                                       bool
 }
 
 func (m *Module) schedule() {
@@ -244,18 +233,36 @@ func (m *Module) schedule() {
 		}()
 	}
 }
+
 func (m *Module) claim() (*claim, error) {
 	var c *claim
 	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
-		row := tx.QueryRow(`SELECT w.id,w.project_id,p.project_key,w.number,w.title,w.description_markdown,w.acceptance_criteria_markdown,w.target_branch,COALESCE(w.codex_thread_id,''),COALESCE(w.workspace_path,''),p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,
-		(SELECT COALESCE(MAX(e.attempt_number),0)+1 FROM agent_executions e WHERE e.work_item_id=w.id),CASE WHEN w.pause_after_plan=1 AND w.plan_pause_consumed=0 THEN 1 ELSE 0 END
+		row := tx.QueryRow(`SELECT w.id,w.project_id,p.project_key,p.project_path,w.number,w.title,w.description_markdown,w.acceptance_criteria_markdown,w.target_branch,w.workflow_type,w.agent_phase,COALESCE(w.base_commit_sha,''),COALESCE(w.codex_thread_id,''),COALESCE(w.workspace_path,''),p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,
+		(SELECT COALESCE(MAX(e.attempt_number),0)+1 FROM agent_executions e WHERE e.work_item_id=w.id),
+		CASE WHEN w.agent_phase='work' AND w.pause_after_plan=1 AND w.plan_pause_consumed=0 THEN 1 ELSE 0 END
 		FROM work_items w JOIN projects p ON p.id=w.project_id CROSS JOIN agents a
-		WHERE w.is_agent_task=1 AND w.blocked_at IS NULL AND w.stage IN('created','in_progress') AND w.agent_state='queued' AND a.status='active' AND a.revoked_at IS NULL
+		WHERE w.is_agent_task=1 AND w.blocked_at IS NULL AND w.agent_state='queued'
+		AND ((w.agent_phase='work' AND w.stage IN('created','in_progress')) OR
+			(w.workflow_type='standard' AND w.agent_phase='merge' AND w.stage='completed'))
+		AND a.status='active' AND a.revoked_at IS NULL
 		AND (SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')<a.max_concurrent_tasks
+		AND NOT EXISTS (
+			SELECT 1 FROM work_item_tags wt JOIN json_each(a.reject_tags_json) rejected
+			WHERE wt.work_item_id=w.id AND lower(wt.tag)=lower(CAST(rejected.value AS TEXT))
+		)
+		AND (json_array_length(a.accept_tags_json)=0 OR EXISTS (
+			SELECT 1 FROM work_item_tags wt JOIN json_each(a.accept_tags_json) accepted
+			WHERE wt.work_item_id=w.id AND lower(wt.tag)=lower(CAST(accepted.value AS TEXT))
+		))
+		AND ((w.workflow_type='standard' AND w.agent_phase<>'merge') OR NOT EXISTS (
+			SELECT 1 FROM work_items active
+			WHERE active.project_id=w.project_id AND active.agent_state='running'
+			AND (active.workflow_type='simple_conversation' OR active.agent_phase='merge')
+		))
 		ORDER BY (CAST((SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,w.created_at,w.id LIMIT 1`)
 		var v claim
 		var plan int
-		if err := row.Scan(&v.ItemID, &v.ProjectID, &v.ProjectKey, &v.Number, &v.Title, &v.Description, &v.Criteria, &v.TargetBranch, &v.ThreadID, &v.Workspace, &v.AgentRules, &v.ValidationCommands, &v.ForbiddenPaths, &v.AgentPrompts, &v.AgentID, &v.Timeout, &v.Attempt, &plan); err != nil {
+		if err := row.Scan(&v.ItemID, &v.ProjectID, &v.ProjectKey, &v.ProjectPath, &v.Number, &v.Title, &v.Description, &v.Criteria, &v.TargetBranch, &v.WorkflowType, &v.Phase, &v.BaseCommit, &v.ThreadID, &v.Workspace, &v.AgentRules, &v.ValidationCommands, &v.ForbiddenPaths, &v.AgentPrompts, &v.AgentID, &v.Timeout, &v.Attempt, &plan); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -263,20 +270,20 @@ func (m *Module) claim() (*claim, error) {
 		}
 		v.PlanOnly = plan != 0
 		v.ExecutionID = security.Token(18)
+		if v.WorkflowType == "simple_conversation" || v.Phase == "merge" {
+			v.Workspace = v.ProjectPath
+		} else if v.Workspace == "" {
+			v.Workspace = projectrepo.WorktreePath(v.ProjectPath, v.ProjectKey, v.Number)
+		}
 		stamp := now()
-		result, err := tx.Exec("UPDATE work_items SET stage='in_progress',agent_state='running',assigned_agent_id=?,resume_requested=0,version=version+1,updated_at=? WHERE id=? AND agent_state='queued'", v.AgentID, stamp, v.ItemID)
+		result, err := tx.Exec("UPDATE work_items SET stage=CASE WHEN stage='created' THEN 'in_progress' ELSE stage END,agent_state='running',assigned_agent_id=?,resume_requested=0,version=version+1,updated_at=? WHERE id=? AND agent_state='queued'", v.AgentID, stamp, v.ItemID)
 		if err != nil {
 			return err
 		}
 		if n, _ := result.RowsAffected(); n != 1 {
 			return nil
 		}
-		workspace := v.Workspace
-		if workspace == "" {
-			workspace = filepath.Join(m.dataDir, "workspaces", safe(v.ItemID))
-		}
-		v.Workspace = workspace
-		_, err = tx.Exec("INSERT INTO agent_executions(id,work_item_id,agent_id,attempt_number,state,prompt_markdown,workspace_path,started_at) VALUES(?,?,?,?,?,?,?,?)", v.ExecutionID, v.ItemID, v.AgentID, v.Attempt, "running", "pending", workspace, stamp)
+		_, err = tx.Exec("INSERT INTO agent_executions(id,work_item_id,agent_id,attempt_number,state,prompt_markdown,workspace_path,started_at) VALUES(?,?,?,?,?,?,?,?)", v.ExecutionID, v.ItemID, v.AgentID, v.Attempt, "running", "pending", v.Workspace, stamp)
 		if err == nil {
 			c = &v
 		}
@@ -284,106 +291,53 @@ func (m *Module) claim() (*claim, error) {
 	})
 	return c, err
 }
-
-func safe(v string) string {
-	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
-	return r.Replace(strings.ToLower(v))
-}
 func (m *Module) prepare(ctx context.Context, c *claim) error {
-	if _, err := os.Stat(filepath.Join(c.Workspace, ".git")); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(c.Workspace), 0o700); err != nil {
+	if c.WorkflowType == "simple_conversation" || c.Phase == "merge" {
+		status, err := projectrepo.Status(ctx, c.ProjectPath)
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return errors.New("project repository must be clean before writing its target branch")
+		}
+		branch, err := projectrepo.CurrentBranch(ctx, c.ProjectPath)
+		if err != nil {
+			return err
+		}
+		if branch != c.TargetBranch {
+			if err = projectrepo.Checkout(ctx, c.ProjectPath, c.TargetBranch); err != nil {
+				return err
+			}
+		}
+		c.Workspace = c.ProjectPath
+		_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=? WHERE id=?", c.Workspace, c.ItemID)
 		return err
 	}
-	var cloneURL string
-	if err := m.store.DB.QueryRowContext(ctx, "SELECT COALESCE(g.clone_url,p.repository_url) FROM projects p LEFT JOIN project_repository_grants g ON g.project_id=p.id AND g.revoked_at IS NULL WHERE p.id=?", c.ProjectID).Scan(&cloneURL); err != nil {
-		return err
-	}
-	cred, err := m.issue(ctx, c.ProjectID)
+	workspace, err := projectrepo.EnsureWorktree(ctx, c.ProjectPath, c.ProjectKey, c.Number, c.TargetBranch)
 	if err != nil {
 		return err
 	}
-	if cred != nil && cred.Revoke != nil {
-		defer cred.Revoke(context.Background())
+	c.Workspace = workspace.Path
+	if c.BaseCommit == "" {
+		c.BaseCommit = workspace.BaseCommit
 	}
-	// Let the remote select its default branch. The task's development branch is
-	// workflow metadata and may be renamed or created later; using it as a clone
-	// constraint makes workspace creation fail before the Agent can do any work.
-	args := cloneArgs(cloneURL, c.Workspace)
-	if err = git(ctx, "", cred, args...); err != nil {
-		return err
-	}
-	requestedBranch := strings.TrimSpace(c.TargetBranch)
-	if requestedBranch != "" {
-		exists, existsErr := gitRefExists(ctx, c.Workspace, "refs/remotes/origin/"+requestedBranch)
-		if existsErr != nil {
-			return existsErr
-		}
-		if exists {
-			if err = git(ctx, c.Workspace, nil, "switch", requestedBranch); err != nil {
-				return err
-			}
-		} else {
-			c.TargetBranch, err = gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
-			if err != nil {
-				return err
-			}
-			c.TargetBranch = strings.TrimSpace(c.TargetBranch)
-		}
-	}
-	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
-	return git(ctx, c.Workspace, nil, "switch", "-c", branch)
+	_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=?,base_commit_sha=COALESCE(base_commit_sha,?) WHERE id=?", c.Workspace, c.BaseCommit, c.ItemID)
+	return err
 }
-
-func cloneArgs(cloneURL, workspace string) []string {
-	return []string{"clone", cloneURL, workspace}
-}
-
-func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", ref)
-	cmd.Dir = dir
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("git show-ref --verify --quiet %s: %w", ref, err)
-}
-
-func git(ctx context.Context, dir string, cred *Credential, args ...string) error {
-	full := []string{}
-	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
-	cmd.Dir = dir
-	if cred != nil && cred.Token != "" {
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-func (m *Module) issue(ctx context.Context, projectID string) (*Credential, error) {
-	if m.credentials == nil {
-		return nil, nil
-	}
-	return m.credentials.Issue(ctx, projectID)
-}
-
 func (m *Module) prompt(ctx context.Context, c *claim) string {
 	item, _ := m.queue.Get(ctx, c.ItemID)
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nDevelopment branch: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch)
-	b.WriteString("Default Git workflow: start from the development branch, do the task on the already-created ProjectBoard work branch, and after verification merge the work branch back into the development branch. Leave the branch that should be published checked out. If the task description or ProjectBoard conversation explicitly specifies a different branch or Git workflow, follow that explicit instruction instead.\n")
+	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nTarget branch: %s\nWorkflow: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch, c.WorkflowType)
 	fmt.Fprintf(&b, "Project Agent rules:\n%s\nProject prompt segments (JSON):\n%s\nValidation commands (JSON):\n%s\nForbidden paths (JSON):\n%s\n", c.AgentRules, c.AgentPrompts, c.ValidationCommands, c.ForbiddenPaths)
 	if c.PlanOnly {
 		b.WriteString("Produce a concrete implementation plan only. Do not edit files. Return status planned.\n")
+	} else if c.Phase == "merge" {
+		workBranch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
+		fmt.Fprintf(&b, "Complete this task by merging %s into the currently checked out target branch %s with --no-ff. Use merge commit message %q. Resolve conflicts without discarding unrelated human changes and verify the repository. Do not fetch, pull, or push unless the task description or conversation explicitly requests that network operation. Return completed only when the work branch is fully merged and the repository is clean.\n", workBranch, c.TargetBranch, "merge: "+c.ItemID+" "+c.Title)
+	} else if c.WorkflowType == "simple_conversation" {
+		b.WriteString("Work directly on the checked out project target branch. Implement, verify, and commit the task changes locally. Do not fetch, pull, or push unless the task description or conversation explicitly requests that network operation. Return completed only when the repository is clean and the task is genuinely complete.\n")
 	} else {
-		b.WriteString("Implement and verify the task in this workspace, then commit all task changes on the current branch. Do not push; ProjectBoard will push the clean committed branch. Return completed only when the task is genuinely complete; otherwise return paused or failed.\n")
+		b.WriteString("Implement and verify the task in this isolated worktree, then commit all task changes on the current task branch. Do not merge the target branch. Do not fetch, pull, or push unless the task description or conversation explicitly requests that network operation. Return completed only when the worktree is clean and the task is genuinely ready to merge; otherwise return paused or failed.\n")
 	}
 	b.WriteString("Recent ProjectBoard conversation:\n")
 	for _, entry := range item.Conversation {
@@ -442,25 +396,74 @@ func (m *Module) finish(c *claim, r Result) {
 		_ = m.event(c, "agent_plan_paused", "Agent completed the plan and is waiting for confirmation")
 		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_plan',plan_pause_consumed=1,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
 	case "completed":
-		var pending, pause int
-		_ = m.store.DB.QueryRow("SELECT resume_requested,pause_after_completion FROM work_items WHERE id=?", c.ItemID).Scan(&pending, &pause)
-		if pending != 0 {
-			_ = m.event(c, "agent_resumed", "New member messages arrived while Codex was running; continuing the session")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='queued',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
-			return
-		}
-		if err := m.push(context.Background(), c); err != nil {
+		status, err := projectrepo.Status(context.Background(), c.Workspace)
+		if err != nil || status != "" {
+			if err == nil {
+				err = errors.New("Codex completed with uncommitted workspace changes")
+			}
 			m.recordResult(c, r, "failed", err)
 			m.fail(c, r.ThreadID, err)
 			return
 		}
-		if pause != 0 {
-			_ = m.event(c, "agent_completion_paused", "Agent completed the task and is waiting for human closure")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='completed',agent_state='paused_completion',completed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
-		} else {
-			_ = m.event(c, "agent_closed", "Agent completed and automatically closed the task")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='closed',agent_state='finished',completed_at=?,closed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
+		var pending, pause int
+		_ = m.store.DB.QueryRow("SELECT resume_requested,pause_before_completion FROM work_items WHERE id=?", c.ItemID).Scan(&pending, &pause)
+		if pending != 0 {
+			_ = m.event(c, "agent_resumed", "New member messages arrived while Codex was running; continuing implementation")
+			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='in_progress',completed_at=NULL,agent_phase='work',agent_state='queued',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
+			return
 		}
+		if c.Phase == "merge" {
+			workBranch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
+			merged, mergeErr := projectrepo.IsAncestor(context.Background(), c.ProjectPath, workBranch, c.TargetBranch)
+			if mergeErr != nil || !merged {
+				if mergeErr == nil {
+					mergeErr = errors.New("task branch is not merged into the target branch")
+				}
+				m.recordResult(c, r, "failed", mergeErr)
+				m.fail(c, r.ThreadID, mergeErr)
+				return
+			}
+			workHead, headErr := projectrepo.ResolveRevision(context.Background(), c.ProjectPath, workBranch)
+			if headErr != nil {
+				m.recordResult(c, r, "failed", headErr)
+				m.fail(c, r.ThreadID, headErr)
+				return
+			}
+			if workHead != c.BaseCommit {
+				var mergeCommit bool
+				mergeCommit, mergeErr = projectrepo.HasSecondParent(context.Background(), c.ProjectPath, c.TargetBranch)
+				if mergeErr != nil || !mergeCommit {
+					if mergeErr == nil {
+						mergeErr = errors.New("task changes were not integrated with a --no-ff merge commit")
+					}
+					m.recordResult(c, r, "failed", mergeErr)
+					m.fail(c, r.ThreadID, mergeErr)
+					return
+				}
+			}
+			head, _ := projectrepo.Head(context.Background(), c.ProjectPath)
+			m.recordCommitEvidence(c, head, "merge: "+c.ItemID+" "+c.Title)
+			m.closeTask(c, r.ThreadID, stamp)
+			return
+		}
+		if c.WorkflowType == "simple_conversation" {
+			if pause != 0 {
+				_ = m.event(c, "agent_completion_paused", "Agent completed its work and is waiting for confirmation before closing")
+				_, _ = m.store.DB.Exec("UPDATE work_items SET agent_phase='close_review',agent_state='paused_completion',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
+				return
+			}
+			head, _ := projectrepo.Head(context.Background(), c.ProjectPath)
+			m.recordCommitEvidence(c, head, c.Title)
+			m.closeTask(c, r.ThreadID, stamp)
+			return
+		}
+		if pause != 0 {
+			_ = m.event(c, "agent_completion_paused", "Agent completed implementation and is waiting for merge approval")
+			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='merge_review',agent_state='paused_completion',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
+			return
+		}
+		_, _ = m.store.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='merge',agent_state='queued',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
+		m.Wake()
 	case "paused":
 		_ = m.event(c, "agent_paused", r.Message)
 		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
@@ -468,47 +471,26 @@ func (m *Module) finish(c *claim, r Result) {
 		m.fail(c, r.ThreadID, errors.New("Agent returned failed status"))
 	}
 }
+
+func (m *Module) closeTask(c *claim, threadID, stamp string) {
+	_ = m.event(c, "agent_closed", "Agent completed and closed the task")
+	workspace := any(c.Workspace)
+	if c.WorkflowType == "simple_conversation" {
+		workspace = nil
+	}
+	_, _ = m.store.DB.Exec("UPDATE work_items SET stage='closed',agent_state='finished',completed_at=?,closed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, stamp, threadID, workspace, stamp, c.ItemID)
+}
+
+func (m *Module) recordCommitEvidence(c *claim, sha, message string) {
+	if sha == "" {
+		return
+	}
+	_, _ = m.store.DB.Exec(`INSERT OR IGNORE INTO git_commit_evidence(id,work_item_id,repository_id,commit_sha,message,branch,files_json,created_at) VALUES(?,?,?,?,?,?,'[]',?)`, security.Token(18), c.ItemID, c.ProjectID, sha, message, c.TargetBranch, now())
+}
+
 func (m *Module) active(c *claim) bool {
 	var count int
 	return m.store.DB.QueryRow("SELECT COUNT(*) FROM work_items WHERE id=? AND assigned_agent_id=? AND agent_state='running'", c.ItemID, c.AgentID).Scan(&count) == nil && count == 1
-}
-func (m *Module) push(ctx context.Context, c *claim) error {
-	status, err := gitOutput(ctx, c.Workspace, nil, "status", "--porcelain")
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(status) != "" {
-		return errors.New("Codex completed with uncommitted workspace changes")
-	}
-	cred, err := m.issue(ctx, c.ProjectID)
-	if err != nil {
-		return err
-	}
-	if cred != nil && cred.Revoke != nil {
-		defer cred.Revoke(context.Background())
-	}
-	branch, err := gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
-	if err != nil {
-		return err
-	}
-	branch = strings.TrimSpace(branch)
-	if branch == "" {
-		return errors.New("Codex completed on a detached HEAD")
-	}
-	return git(ctx, c.Workspace, cred, "push", "-u", "origin", branch)
-}
-
-func gitOutput(ctx context.Context, dir string, cred *Credential, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	if cred != nil && cred.Token != "" {
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
 }
 func (m *Module) agentMessage(c *claim, message string) error {
 	raw, _ := json.Marshal(map[string]any{"markdown": message})
@@ -551,28 +533,30 @@ func waitForRuns(ctx context.Context, waits []<-chan struct{}) error {
 	return nil
 }
 func (m *Module) CleanWorkspace(ctx context.Context, itemID string) error {
-	var stage, path string
-	if err := m.store.DB.QueryRowContext(ctx, "SELECT stage,COALESCE(workspace_path,'') FROM work_items WHERE id=?", itemID).Scan(&stage, &path); err != nil {
+	var stage, workflow, workspace, projectPath, projectKey string
+	var number int64
+	if err := m.store.DB.QueryRowContext(ctx, `SELECT w.stage,w.workflow_type,COALESCE(w.workspace_path,''),p.project_path,p.project_key,w.number
+		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?`, itemID).Scan(&stage, &workflow, &workspace, &projectPath, &projectKey, &number); err != nil {
 		return err
 	}
 	if stage != "closed" {
 		return errors.New("only closed task workspaces can be cleaned")
 	}
-	if path == "" {
+	if workflow == "simple_conversation" || workspace == "" {
+		if workflow == "simple_conversation" && workspace != "" {
+			_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), itemID)
+			return err
+		}
 		return nil
 	}
-	base, _ := filepath.Abs(filepath.Join(m.dataDir, "workspaces"))
-	target, _ := filepath.Abs(path)
-	rel, err := filepath.Rel(base, target)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return errors.New("workspace path is outside the managed directory")
+	expected := projectrepo.WorktreePath(projectPath, projectKey, number)
+	if !strings.EqualFold(filepath.Clean(workspace), filepath.Clean(expected)) {
+		return errors.New("workspace path does not match the managed task worktree")
 	}
-	if runtime.GOOS == "windows" {
-		target = filepath.Clean(target)
+	if err := projectrepo.RemoveWorktree(ctx, projectPath, workspace); err != nil {
+		return err
 	}
-	if err = os.RemoveAll(target); err == nil {
-		_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), itemID)
-	}
+	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), itemID)
 	return err
 }
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

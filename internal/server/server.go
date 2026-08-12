@@ -19,11 +19,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/projectboard/projectboard/internal/agentexec"
-	"github.com/projectboard/projectboard/internal/providers"
+	"github.com/projectboard/projectboard/internal/projectrepo"
 	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
@@ -36,7 +35,6 @@ type Config struct {
 	BootstrapUsername string
 	BootstrapPassword string
 	Production        bool
-	GitConnect        providers.GitConnectConfig
 	LookPath          func(string) (string, error)
 }
 
@@ -54,9 +52,6 @@ type Server struct {
 	queue  *workqueue.Module
 	config Config
 	static fs.FS
-	vault  *providers.Vault
-	git    *providers.GitConnector
-	gitMu  sync.RWMutex
 	exec   *agentexec.Module
 }
 
@@ -101,18 +96,9 @@ func New(config Config) (*Application, error) {
 		return nil, err
 	}
 	static, _ := fs.Sub(webassets.Files, ".")
-	vault, err := providers.OpenVault(config.DataDir)
-	if err != nil {
-		database.Close()
-		return nil, err
-	}
 	queue := workqueue.New(database)
-	s := &Server{store: database, queue: queue, config: config, static: static, vault: vault, git: providers.NewGitConnector(config.GitConnect)}
-	if err = s.reloadGitConnector(); err != nil {
-		database.Close()
-		return nil, fmt.Errorf("load web-managed Git provider settings: %w", err)
-	}
-	s.exec = agentexec.New(database, queue, agentexec.Options{DataDir: config.DataDir, Credentials: &localCredentialProvider{server: s}})
+	s := &Server{store: database, queue: queue, config: config, static: static}
+	s.exec = agentexec.New(database, queue, agentexec.Options{DataDir: config.DataDir})
 	if err = s.exec.Start(); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("start local Agent executor: %w", err)
@@ -151,28 +137,10 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.handle(s.resetPassword))
 	mux.HandleFunc("POST /api/agents", s.handle(s.createAgent))
 	mux.HandleFunc("GET /api/agents", s.handle(s.listAgents))
+	mux.HandleFunc("PATCH /api/agents/{id}", s.handle(s.updateAgent))
 	mux.HandleFunc("POST /api/agents/{id}/disable", s.handle(s.disableOrganizationAgent))
 	mux.HandleFunc("POST /api/agents/{id}/enable", s.handle(s.enableOrganizationAgent))
 	mux.HandleFunc("DELETE /api/agents/{id}", s.handle(s.deleteAgent))
-	mux.HandleFunc("GET /api/provider-authorizations", s.handle(s.listAuthorizations))
-	mux.HandleFunc("GET /api/provider-authorizations/{id}/repositories", s.handle(s.authorizationRepositories))
-	mux.HandleFunc("DELETE /api/provider-authorizations/{id}", s.handle(s.revokeAuthorization))
-	mux.HandleFunc("GET /api/projects/{id}/repository-grant", s.handle(s.getRepositoryGrant))
-	mux.HandleFunc("POST /api/projects/{id}/repository-grant", s.handle(s.bindRepositoryGrant))
-	mux.HandleFunc("DELETE /api/projects/{id}/repository-grant", s.handle(s.revokeRepositoryGrant))
-	mux.HandleFunc("POST /api/projects/{id}/sync-commits", s.handle(s.syncProjectCommitsHuman))
-	mux.HandleFunc("GET /api/git/connections", s.handle(s.gitConnectionConfiguration))
-	mux.HandleFunc("GET /api/git/provider-settings", s.handle(s.getGitProviderSettings))
-	mux.HandleFunc("PUT /api/git/provider-settings/{provider}", s.handle(s.updateGitProviderSettings))
-	mux.HandleFunc("POST /api/git/provider-settings/github/manifest/start", s.handle(s.startGitHubManifest))
-	mux.HandleFunc("GET /api/git/provider-settings/github/manifest/callback", s.handle(s.gitHubManifestCallback))
-	mux.HandleFunc("GET /api/git/provider-settings/github/manifest-flows/{id}", s.handle(s.getGitHubManifestFlow))
-	mux.HandleFunc("POST /api/git/provider-settings/github/manifest-flows/{id}/cancel", s.handle(s.cancelGitHubManifestFlow))
-	mux.HandleFunc("POST /api/git/connections/{provider}/start", s.handle(s.startGitConnection))
-	mux.HandleFunc("GET /api/git/connections/{provider}/callback", s.handle(s.gitConnectionCallback))
-	mux.HandleFunc("GET /api/git/connection-flows/{id}", s.handle(s.getGitConnection))
-	mux.HandleFunc("POST /api/git/connection-flows/{id}/complete", s.handle(s.completeGitConnection))
-	mux.HandleFunc("POST /api/git/connection-flows/{id}/cancel", s.handle(s.cancelGitConnection))
 	mux.HandleFunc("GET /api/work-items", s.handle(s.listWorkItems))
 	mux.HandleFunc("POST /api/work-items", s.handle(s.createWorkItem))
 	mux.HandleFunc("GET /api/work-items/{id}", s.handle(s.getWorkItem))
@@ -180,6 +148,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/work-items/{id}/stage", s.handle(s.moveWorkItemStage))
 	mux.HandleFunc("POST /api/work-items/{id}/assign", s.handle(s.assignWorkItem))
 	mux.HandleFunc("POST /api/work-items/{id}/messages", s.handle(s.postMessage))
+	mux.HandleFunc("POST /api/work-items/{id}/agent-action", s.handle(s.agentAction))
 	mux.HandleFunc("POST /api/work-items/{id}/attachments", s.handle(s.uploadAttachment))
 	mux.HandleFunc("GET /api/attachments/{attachmentId}", s.handle(s.downloadAttachment))
 	mux.HandleFunc("PUT /api/work-items/{id}/followers", s.handle(s.updateWorkItemFollowers))
@@ -432,7 +401,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.repository_url,p.remote_name,p.default_target_branch,p.allowed_target_branches_json,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.allow_subtasks,p.agent_prompts_json,p.config_version FROM projects p`
+	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.project_path,p.default_target_branch,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.allow_subtasks,p.agent_prompts_json,p.config_version FROM projects p`
 	args := []any{}
 	if a.Role != "administrator" {
 		query += " JOIN project_memberships m ON m.project_id=p.id WHERE m.user_id=?"
@@ -457,8 +426,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Key, Name     string
-		RepositoryURL string `json:"repositoryUrl"`
+		Key, Name   string
+		ProjectPath string `json:"projectPath"`
 	}
 	decode(r, &in)
 	key := strings.ToLower(strings.TrimSpace(in.Key))
@@ -466,10 +435,15 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{422, "INVALID_PROJECT", "Valid name and 2-20 character key required", nil})
 		return
 	}
+	repository, err := projectrepo.Prepare(r.Context(), in.ProjectPath)
+	if err != nil {
+		writeError(w, &domainError{422, "INVALID_PROJECT_PATH", err.Error(), nil})
+		return
+	}
 	id := security.Token(18)
 	stamp := now()
-	err := s.store.Write(r.Context(), func(tx *sql.Tx) error {
-		_, err := tx.Exec(`INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES(?,?,?,?,?,?)`, id, key, in.Name, in.RepositoryURL, stamp, stamp)
+	err = s.store.Write(r.Context(), func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO projects(id,project_key,name,project_path,default_target_branch,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, id, key, in.Name, repository.Path, repository.DefaultBranch, stamp, stamp)
 		if err != nil {
 			return err
 		}
@@ -497,10 +471,11 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	decode(r, &in)
 	current, _ := s.project(id)
 	name := stringValue(in, "name", current["name"])
-	repo := stringValue(in, "repositoryUrl", current["repositoryUrl"])
 	branch := stringValue(in, "defaultTargetBranch", current["defaultTargetBranch"])
-	allowed := valueOr(in, "allowedTargetBranches", current["allowedTargetBranches"])
-	allowedRaw, _ := json.Marshal(allowed)
+	if exists, branchErr := projectrepo.BranchExists(r.Context(), current["projectPath"].(string), branch); branchErr != nil || !exists {
+		writeError(w, &domainError{422, "TARGET_BRANCH_NOT_FOUND", "Default target branch does not exist in the local repository", nil})
+		return
+	}
 	prompts := valueOr(in, "agentPrompts", current["agentPrompts"])
 	promptList, validPrompts := prompts.([]any)
 	if !validPrompts {
@@ -527,7 +502,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		cleanPrompts = append(cleanPrompts, prompt)
 	}
 	promptsRaw, _ := json.Marshal(cleanPrompts)
-	_, err := s.store.DB.Exec("UPDATE projects SET name=?,repository_url=?,default_target_branch=?,allowed_target_branches_json=?,allow_subtasks=?,agent_prompts_json=?,config_version=config_version+1,updated_at=? WHERE id=?", name, repo, branch, string(allowedRaw), boolInt(boolValue(in, "allowSubtasks", current["allowSubtasks"])), string(promptsRaw), now(), id)
+	_, err := s.store.DB.Exec("UPDATE projects SET name=?,default_target_branch=?,allow_subtasks=?,agent_prompts_json=?,config_version=config_version+1,updated_at=? WHERE id=?", name, branch, boolInt(boolValue(in, "allowSubtasks", current["allowSubtasks"])), string(promptsRaw), now(), id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -536,7 +511,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, project)
 }
 func (s *Server) project(id string) (map[string]any, error) {
-	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,repository_url,remote_name,default_target_branch,allowed_target_branches_json,validation_commands_json,forbidden_paths_json,agent_rules_markdown,allow_subtasks,agent_prompts_json,config_version FROM projects WHERE id=?`, id)
+	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,project_path,default_target_branch,validation_commands_json,forbidden_paths_json,agent_rules_markdown,allow_subtasks,agent_prompts_json,config_version FROM projects WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -888,9 +863,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Name, Purpose      string
-		RuntimeType        string `json:"runtimeType"`
-		MaxConcurrentTasks int    `json:"maxConcurrentTasks"`
-		TurnTimeoutMinutes int    `json:"turnTimeoutMinutes"`
+		RuntimeType        string   `json:"runtimeType"`
+		MaxConcurrentTasks int      `json:"maxConcurrentTasks"`
+		TurnTimeoutMinutes int      `json:"turnTimeoutMinutes"`
+		AcceptTags         []string `json:"acceptTags"`
+		RejectTags         []string `json:"rejectTags"`
 	}
 	decode(r, &in)
 	if in.RuntimeType == "" {
@@ -912,25 +889,37 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &domainError{422, "INVALID_AGENT_CONFIGURATION", "Agent name is required", nil})
 		return
 	}
+	acceptTags, err := normalizeAgentTags(in.AcceptTags)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rejectTags, err := normalizeAgentTags(in.RejectTags)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if _, err := s.config.LookPath("codex"); err != nil {
 		writeError(w, &domainError{422, "CODEX_CLI_NOT_FOUND", "codex is not installed or not available on PATH", nil})
 		return
 	}
 	id, stamp := security.Token(18), now()
-	_, err := s.store.DB.Exec("INSERT INTO agents(id,name,purpose,runtime_type,max_concurrent_tasks,turn_timeout_minutes,status,created_at) VALUES(?,?,?,?,?,?,'active',?)", id, in.Name, in.Purpose, in.RuntimeType, in.MaxConcurrentTasks, in.TurnTimeoutMinutes, stamp)
+	acceptRaw, _ := json.Marshal(acceptTags)
+	rejectRaw, _ := json.Marshal(rejectTags)
+	_, err = s.store.DB.Exec("INSERT INTO agents(id,name,purpose,runtime_type,max_concurrent_tasks,turn_timeout_minutes,accept_tags_json,reject_tags_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,'active',?)", id, in.Name, in.Purpose, in.RuntimeType, in.MaxConcurrentTasks, in.TurnTimeoutMinutes, string(acceptRaw), string(rejectRaw), stamp)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	s.audit(a, "agent.created", "agent", id, "", map[string]any{"name": in.Name})
-	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "runtimeType": in.RuntimeType, "maxConcurrentTasks": in.MaxConcurrentTasks, "turnTimeoutMinutes": in.TurnTimeoutMinutes, "enabled": true})
+	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "runtimeType": in.RuntimeType, "maxConcurrentTasks": in.MaxConcurrentTasks, "turnTimeoutMinutes": in.TurnTimeoutMinutes, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true})
 }
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.human(w, r)
 	if !ok {
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,
+	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,a.accept_tags_json,a.reject_tags_json,
 		(SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')
 		FROM agents a WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`)
 	if err != nil {
@@ -940,16 +929,98 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var id, name, purpose, status string
+		var id, name, purpose, status, acceptRaw, rejectRaw string
 		var runtimeType string
 		var capacity, timeout, running int
-		if err = rows.Scan(&id, &name, &purpose, &status, &runtimeType, &capacity, &timeout, &running); err != nil {
+		if err = rows.Scan(&id, &name, &purpose, &status, &runtimeType, &capacity, &timeout, &acceptRaw, &rejectRaw, &running); err != nil {
 			writeError(w, err)
 			return
 		}
-		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": status == "active", "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "currentLoad": running})
+		acceptTags, rejectTags := []string{}, []string{}
+		_ = json.Unmarshal([]byte(acceptRaw), &acceptTags)
+		_ = json.Unmarshal([]byte(rejectRaw), &rejectTags)
+		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": status == "active", "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "currentLoad": running})
 	}
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		Name               string   `json:"name"`
+		Purpose            string   `json:"purpose"`
+		MaxConcurrentTasks int      `json:"maxConcurrentTasks"`
+		TurnTimeoutMinutes int      `json:"turnTimeoutMinutes"`
+		AcceptTags         []string `json:"acceptTags"`
+		RejectTags         []string `json:"rejectTags"`
+	}
+	decode(r, &in)
+	var name, purpose string
+	var capacity, timeout int
+	if err := s.store.DB.QueryRow("SELECT name,purpose,max_concurrent_tasks,turn_timeout_minutes FROM agents WHERE id=? AND status<>'deleted' AND revoked_at IS NULL", r.PathValue("id")).Scan(&name, &purpose, &capacity, &timeout); err != nil {
+		writeError(w, err)
+		return
+	}
+	if strings.TrimSpace(in.Name) != "" {
+		name = strings.TrimSpace(in.Name)
+	}
+	if in.Purpose != "" {
+		purpose = strings.TrimSpace(in.Purpose)
+	}
+	if in.MaxConcurrentTasks > 0 {
+		capacity = in.MaxConcurrentTasks
+	}
+	if in.TurnTimeoutMinutes > 0 {
+		timeout = in.TurnTimeoutMinutes
+	}
+	acceptTags, err := normalizeAgentTags(in.AcceptTags)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	rejectTags, err := normalizeAgentTags(in.RejectTags)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	acceptRaw, _ := json.Marshal(acceptTags)
+	rejectRaw, _ := json.Marshal(rejectTags)
+	if _, err = s.store.DB.Exec("UPDATE agents SET name=?,purpose=?,max_concurrent_tasks=?,turn_timeout_minutes=?,accept_tags_json=?,reject_tags_json=? WHERE id=?", name, purpose, capacity, timeout, string(acceptRaw), string(rejectRaw), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.exec.Wake()
+	writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "name": name, "purpose": purpose, "runtimeType": "local_codex_cli", "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true})
+}
+
+func normalizeAgentTags(values []string) ([]string, error) {
+	if len(values) > 20 {
+		return nil, &domainError{422, "TOO_MANY_TAGS", "An Agent tag rule can contain at most 20 tags", nil}
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, value := range values {
+		tag := strings.TrimSpace(value)
+		if tag == "" {
+			continue
+		}
+		if len([]rune(tag)) > 30 {
+			return nil, &domainError{422, "TAG_TOO_LONG", "Agent tags can contain at most 30 characters", nil}
+		}
+		key := strings.ToLower(tag)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, tag)
+		}
+	}
+	return out, nil
 }
 func (s *Server) disableOrganizationAgent(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
@@ -1042,186 +1113,28 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	s.audit(a, "agent.deleted", "agent", agentID, "", map[string]any{"logical": true})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
-func (s *Server) listAuthorizations(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	if err := requireAdmin(a); err != nil {
-		writeError(w, err)
-		return
-	}
-	rows, err := s.store.DB.Query(`SELECT p.id,p.provider,p.name,p.base_url,p.app_id,p.installation_id,p.status,p.created_at,(SELECT COUNT(*) FROM project_repository_grants g WHERE g.authorization_id=p.id AND g.revoked_at IS NULL),m.external_account,m.webhook_status FROM provider_authorizations p LEFT JOIN provider_authorization_metadata m ON m.authorization_id=p.id WHERE p.provider='github' ORDER BY p.name`)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer rows.Close()
-	out := []map[string]any{}
-	for rows.Next() {
-		var id, provider, name, base, status, created string
-		var appID, installation, externalAccount, webhookStatus *string
-		var count int
-		_ = rows.Scan(&id, &provider, &name, &base, &appID, &installation, &status, &created, &count, &externalAccount, &webhookStatus)
-		out = append(out, map[string]any{"id": id, "provider": provider, "name": name, "baseUrl": base, "appId": appID, "installationId": installation, "status": status, "createdAt": created, "bindingCount": count, "externalAccount": externalAccount, "webhookStatus": webhookStatus})
-	}
-	writeJSON(w, 200, out)
-}
-func (s *Server) revokeAuthorization(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	if err := requireAdmin(a); err != nil {
-		writeError(w, err)
-		return
-	}
-	id := r.PathValue("id")
-	var count int
-	_ = s.store.DB.QueryRow("SELECT COUNT(*) FROM project_repository_grants WHERE authorization_id=? AND revoked_at IS NULL", id).Scan(&count)
-	if count > 0 {
-		writeError(w, &domainError{409, "AUTHORIZATION_IN_USE", "Revoke project grants first", map[string]any{"bindingCount": count}})
-		return
-	}
-	_, err := s.store.DB.Exec("UPDATE provider_authorizations SET status='revoked',updated_at=? WHERE id=?", now(), id)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-func (s *Server) getRepositoryGrant(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if !s.canView(projectID, a) {
-		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
-		return
-	}
-	grant, err := s.repositoryGrant(projectID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, 200, grant)
-}
-func (s *Server) bindRepositoryGrant(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if err := s.requireDeveloper(projectID, a); err != nil {
-		writeError(w, err)
-		return
-	}
-	var in struct {
-		AuthorizationID string `json:"authorizationId"`
-		RepositoryID    string `json:"repositoryId"`
-		RepositoryName  string `json:"repositoryName"`
-		CloneURL        string `json:"cloneUrl"`
-		DefaultBranch   string `json:"defaultBranch"`
-		AccessLevel     string `json:"accessLevel"`
-	}
-	decode(r, &in)
-	if in.AccessLevel == "" {
-		in.AccessLevel = "write"
-	}
-	if in.AccessLevel != "read" && in.AccessLevel != "write" {
-		writeError(w, &domainError{422, "INVALID_ACCESS_LEVEL", "Access level must be read or write", nil})
-		return
-	}
-	var authorizationStatus, provider string
-	if err := s.store.DB.QueryRow("SELECT status,provider FROM provider_authorizations WHERE id=?", in.AuthorizationID).Scan(&authorizationStatus, &provider); err != nil || authorizationStatus != "active" || provider != "github" {
-		writeError(w, &domainError{422, "AUTHORIZATION_UNAVAILABLE", "Provider authorization is missing or revoked", nil})
-		return
-	}
-	var catalogCount int
-	if err := s.store.DB.QueryRow("SELECT COUNT(*) FROM provider_authorization_repositories WHERE authorization_id=?", in.AuthorizationID).Scan(&catalogCount); err != nil {
-		writeError(w, err)
-		return
-	}
-	if catalogCount > 0 {
-		var canWrite bool
-		err := s.store.DB.QueryRow("SELECT repository_name,clone_url,default_branch,can_write FROM provider_authorization_repositories WHERE authorization_id=? AND repository_id=?", in.AuthorizationID, in.RepositoryID).Scan(&in.RepositoryName, &in.CloneURL, &in.DefaultBranch, &canWrite)
-		if err == sql.ErrNoRows {
-			writeError(w, &domainError{422, "REPOSITORY_NOT_AUTHORIZED", "Repository is not available to this verified provider connection", nil})
-			return
-		}
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if in.AccessLevel == "write" && !canWrite {
-			writeError(w, &domainError{422, "INSUFFICIENT_REPOSITORY_PERMISSION", "The provider connection does not have write permission for this repository", nil})
-			return
-		}
-	}
-	id, stamp := security.Token(18), now()
-	_, err := s.store.DB.Exec(`INSERT INTO project_repository_grants(id,project_id,authorization_id,repository_id,repository_name,clone_url,default_branch,access_level,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET authorization_id=excluded.authorization_id,repository_id=excluded.repository_id,repository_name=excluded.repository_name,clone_url=excluded.clone_url,default_branch=excluded.default_branch,access_level=excluded.access_level,approved_by=excluded.approved_by,approved_at=excluded.approved_at,revoked_at=NULL`, id, projectID, in.AuthorizationID, in.RepositoryID, in.RepositoryName, in.CloneURL, in.DefaultBranch, in.AccessLevel, a.ID, stamp)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	s.audit(a, "project.repository_granted", "repository", in.RepositoryID, projectID, map[string]any{"authorizationId": in.AuthorizationID, "accessLevel": in.AccessLevel})
-	grant, _ := s.repositoryGrant(projectID)
-	writeJSON(w, 201, grant)
-}
-func (s *Server) revokeRepositoryGrant(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if err := s.requireDeveloper(projectID, a); err != nil {
-		writeError(w, err)
-		return
-	}
-	_, err := s.store.DB.Exec("UPDATE project_repository_grants SET revoked_at=? WHERE project_id=? AND revoked_at IS NULL", now(), projectID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	s.audit(a, "project.repository_revoked", "project", projectID, projectID, map[string]any{})
-	writeJSON(w, 200, map[string]bool{"ok": true})
-}
-func (s *Server) repositoryGrant(projectID string) (map[string]any, error) {
-	var id, authorizationID, repositoryID, name, cloneURL, branch, access, approvedBy, approvedAt, provider, authorizationName string
-	err := s.store.DB.QueryRow(`SELECT g.id,g.authorization_id,g.repository_id,g.repository_name,g.clone_url,g.default_branch,g.access_level,g.approved_by,g.approved_at,a.provider,a.name FROM project_repository_grants g JOIN provider_authorizations a ON a.id=g.authorization_id WHERE g.project_id=? AND g.revoked_at IS NULL`, projectID).Scan(&id, &authorizationID, &repositoryID, &name, &cloneURL, &branch, &access, &approvedBy, &approvedAt, &provider, &authorizationName)
-	if err != nil {
-		return nil, err
-	}
-	grant := map[string]any{"id": id, "projectId": projectID, "authorizationId": authorizationID, "authorizationName": authorizationName, "provider": provider, "repositoryId": repositoryID, "repositoryName": name, "cloneUrl": cloneURL, "defaultBranch": branch, "accessLevel": access, "approvedBy": approvedBy, "approvedAt": approvedAt}
-	var lastSync string
-	if s.store.DB.QueryRow("SELECT last_synced_at FROM project_commit_sync_state WHERE project_id=?", projectID).Scan(&lastSync) == nil {
-		grant["lastSyncAt"] = lastSync
-	}
-	return grant, nil
-}
-
 func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
 		return
 	}
 	var in struct {
-		RequestID            string   `json:"requestId"`
-		ProjectID            string   `json:"projectId"`
-		Title                string   `json:"title"`
-		Description          string   `json:"descriptionMarkdown"`
-		Criteria             string   `json:"acceptanceCriteriaMarkdown"`
-		Priority             string   `json:"priority"`
-		TargetBranch         string   `json:"targetBranch"`
-		AssigneeKind         string   `json:"assigneeKind"`
-		AssigneeID           string   `json:"assigneeId"`
-		ParentID             string   `json:"parentId"`
-		FollowerIDs          []string `json:"followerIds"`
-		Tags                 []string `json:"tags"`
-		IsAgentTask          bool     `json:"isAgentTask"`
-		PauseAfterPlan       bool     `json:"pauseAfterPlan"`
-		PauseAfterCompletion bool     `json:"pauseAfterCompletion"`
+		RequestID             string   `json:"requestId"`
+		ProjectID             string   `json:"projectId"`
+		Title                 string   `json:"title"`
+		Description           string   `json:"descriptionMarkdown"`
+		Criteria              string   `json:"acceptanceCriteriaMarkdown"`
+		Priority              string   `json:"priority"`
+		WorkflowType          string   `json:"workflowType"`
+		TargetBranch          string   `json:"targetBranch"`
+		AssigneeKind          string   `json:"assigneeKind"`
+		AssigneeID            string   `json:"assigneeId"`
+		ParentID              string   `json:"parentId"`
+		FollowerIDs           []string `json:"followerIds"`
+		Tags                  []string `json:"tags"`
+		IsAgentTask           bool     `json:"isAgentTask"`
+		PauseAfterPlan        bool     `json:"pauseAfterPlan"`
+		PauseBeforeCompletion bool     `json:"pauseBeforeCompletion"`
 	}
 	decode(r, &in)
 	if err := s.requireDeveloper(in.ProjectID, a); err != nil {
@@ -1232,6 +1145,21 @@ func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if in.WorkflowType == "" {
+		in.WorkflowType = "standard"
+	}
+	var projectPath, defaultBranch string
+	if err := s.store.DB.QueryRow("SELECT project_path,default_target_branch FROM projects WHERE id=?", in.ProjectID).Scan(&projectPath, &defaultBranch); err != nil {
+		writeError(w, err)
+		return
+	}
+	if in.WorkflowType == "simple_conversation" || strings.TrimSpace(in.TargetBranch) == "" {
+		in.TargetBranch = defaultBranch
+	}
+	if exists, branchErr := projectrepo.BranchExists(r.Context(), projectPath, in.TargetBranch); branchErr != nil || !exists {
+		writeError(w, &domainError{422, "TARGET_BRANCH_NOT_FOUND", "Target branch does not exist in the local repository", nil})
+		return
+	}
 	if !in.IsAgentTask && in.AssigneeID != "" {
 		var exists int
 		if in.AssigneeKind != "human" || s.store.DB.QueryRow("SELECT 1 FROM project_memberships WHERE project_id=? AND user_id=?", in.ProjectID, in.AssigneeID).Scan(&exists) != nil {
@@ -1239,7 +1167,7 @@ func (s *Server) createWorkItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID, CreatedByUserID: a.ID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
+	item, err := s.queue.Create(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, workqueue.CreateInput{RequestID: in.RequestID, ProjectID: in.ProjectID, Title: in.Title, DescriptionMarkdown: in.Description, AcceptanceCriteriaMarkdown: in.Criteria, Priority: in.Priority, WorkflowType: in.WorkflowType, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, ParentID: in.ParentID, CreatedByUserID: a.ID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseBeforeCompletion: in.PauseBeforeCompletion})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1265,20 +1193,20 @@ func (s *Server) updateWorkItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ExpectedVersion      int64    `json:"expectedVersion"`
-		Title                string   `json:"title"`
-		Description          string   `json:"descriptionMarkdown"`
-		Criteria             string   `json:"acceptanceCriteriaMarkdown"`
-		Priority             string   `json:"priority"`
-		TargetBranch         string   `json:"targetBranch"`
-		AssigneeKind         string   `json:"assigneeKind"`
-		AssigneeID           string   `json:"assigneeId"`
-		FollowerIDs          []string `json:"followerIds"`
-		Tags                 []string `json:"tags"`
-		Configure            bool     `json:"configure"`
-		IsAgentTask          bool     `json:"isAgentTask"`
-		PauseAfterPlan       bool     `json:"pauseAfterPlan"`
-		PauseAfterCompletion bool     `json:"pauseAfterCompletion"`
+		ExpectedVersion       int64    `json:"expectedVersion"`
+		Title                 string   `json:"title"`
+		Description           string   `json:"descriptionMarkdown"`
+		Criteria              string   `json:"acceptanceCriteriaMarkdown"`
+		Priority              string   `json:"priority"`
+		TargetBranch          string   `json:"targetBranch"`
+		AssigneeKind          string   `json:"assigneeKind"`
+		AssigneeID            string   `json:"assigneeId"`
+		FollowerIDs           []string `json:"followerIds"`
+		Tags                  []string `json:"tags"`
+		Configure             bool     `json:"configure"`
+		IsAgentTask           bool     `json:"isAgentTask"`
+		PauseAfterPlan        bool     `json:"pauseAfterPlan"`
+		PauseBeforeCompletion bool     `json:"pauseBeforeCompletion"`
 	}
 	decode(r, &in)
 	if in.Configure {
@@ -1299,7 +1227,7 @@ func (s *Server) updateWorkItem(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, Configure: in.Configure, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseAfterCompletion: in.PauseAfterCompletion})
+	item, err = s.queue.Update(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, workqueue.UpdateInput{ExpectedVersion: in.ExpectedVersion, Title: in.Title, Description: in.Description, Criteria: in.Criteria, Priority: in.Priority, TargetBranch: in.TargetBranch, AssigneeKind: in.AssigneeKind, AssigneeID: in.AssigneeID, FollowerIDs: in.FollowerIDs, Tags: in.Tags, Configure: in.Configure, IsAgentTask: in.IsAgentTask, PauseAfterPlan: in.PauseAfterPlan, PauseBeforeCompletion: in.PauseBeforeCompletion})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1439,6 +1367,35 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		s.exec.Wake()
 	}
 	writeJSON(w, 201, item)
+}
+
+func (s *Server) agentAction(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(item.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		ExpectedVersion int64  `json:"expectedVersion"`
+		Action          string `json:"action"`
+		Markdown        string `json:"markdown"`
+	}
+	decode(r, &in)
+	item, err = s.queue.AgentAction(r.Context(), workqueue.Actor{Type: a.Type, ID: a.ID}, item.ID, in.ExpectedVersion, in.Action, in.Markdown)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.exec.Wake()
+	writeJSON(w, 200, item)
 }
 
 func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
@@ -2058,20 +2015,19 @@ func securityHeaders(next http.Handler) http.Handler {
 type rowScanner interface{ Scan(...any) error }
 
 func scanProject(row rowScanner) map[string]any {
-	var id, key, name, description, repo, remote, branch, allowed, validations, forbidden, rules, prompts string
+	var id, key, name, description, projectPath, branch, validations, forbidden, rules, prompts string
 	var archived *string
 	var allowSubtasks int
 	var version int64
-	if row.Scan(&id, &key, &name, &description, &archived, &repo, &remote, &branch, &allowed, &validations, &forbidden, &rules, &allowSubtasks, &prompts, &version) != nil {
+	if row.Scan(&id, &key, &name, &description, &archived, &projectPath, &branch, &validations, &forbidden, &rules, &allowSubtasks, &prompts, &version) != nil {
 		return map[string]any{}
 	}
-	var allowedV, validationsV, forbiddenV any
+	var validationsV, forbiddenV any
 	promptValues := []string{}
-	_ = json.Unmarshal([]byte(allowed), &allowedV)
 	_ = json.Unmarshal([]byte(validations), &validationsV)
 	_ = json.Unmarshal([]byte(forbidden), &forbiddenV)
 	_ = json.Unmarshal([]byte(prompts), &promptValues)
-	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "repositoryUrl": repo, "remoteName": remote, "defaultTargetBranch": branch, "allowedTargetBranches": allowedV, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "allowSubtasks": allowSubtasks != 0, "agentPrompts": promptValues, "configVersion": version}
+	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "projectPath": projectPath, "defaultTargetBranch": branch, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "allowSubtasks": allowSubtasks != 0, "agentPrompts": promptValues, "configVersion": version}
 }
 func stringValue(m map[string]any, key string, fallback any) string {
 	if value, ok := m[key].(string); ok {

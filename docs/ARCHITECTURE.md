@@ -2,29 +2,31 @@
 
 ```mermaid
 flowchart LR
-  H["Human web client"] --> A["HTTPS API"]
-  A --> Q["Task conversation and state"]
+  H["Human web client"] --> A["Session and CSRF protected API"]
+  A --> Q["Task state and conversation"]
   S["Built-in scheduler"] --> Q
   S --> C["Local codex CLI"]
-  C --> W["Per-task workspace"]
-  S --> G["GitHub App credential provider"]
-  Q --> D[("SQLite WAL, schema v6")]
+  C --> R["Server-local Git repository"]
+  R --> W["Standard task worktrees"]
+  Q --> D[("SQLite WAL, schema v8")]
 ```
 
 ## Module boundaries
 
-`internal/workqueue` owns task creation, the four-state transition rules, blocking, conversation writes and explicit Agent resume semantics.
+`internal/projectrepo` validates immutable absolute project paths, initializes repositories and baseline commits, manages task worktrees, and exposes safe Git operations.
 
-`internal/agentexec` owns scheduling, capacity accounting, atomic claim, workspace preparation, Codex process lifecycle, session continuation, structured result validation, execution evidence and cleanup restrictions.
+`internal/workqueue` owns task creation, workflow-specific transitions, blocking, conversation writes, and explicit Agent review actions.
 
-`internal/providers` owns GitHub App integration. Repository credentials are issued for the selected project and injected only into a Git child process; Codex does not receive the token.
+`internal/agentexec` owns tag-aware scheduling, capacity accounting, atomic claim, project-level main-repository serialization, Codex session continuity, structured result validation, merge execution evidence, and safe worktree cleanup.
 
-`internal/server` owns the session/CSRF-protected human API and embedded UI. Agent project grants express participation only.
+`internal/server` owns the human API and embedded UI. It validates project paths and target branches before domain mutations.
 
-## Runtime lifecycle
+## Execution lifecycle
 
-The scheduler is woken by relevant API changes and also polls as a fallback. On restart, running executions are recorded as interrupted and their tasks enter failure pause with workspace and session retained. Removing an Agent cancels its processes and requeues non-closed tasks without their Agent/session binding.
+Standard work runs on `projectboard/<project-key>/<task-number>` in a sibling `worktrees/<project-key>-<task-number>` directory. After implementation, a separate Agent invocation resumes the same session and merges with `--no-ff` in the main repository. Simple-conversation work executes directly in the main repository. Main-repository writers are serialized per project.
 
-Each task workspace is retained after closure until an authorized member explicitly cleans it. Cleanup validates that the target remains beneath the managed workspace directory.
+The scheduler is event-woken with polling fallback. Interrupted, invalid, dirty, or failed executions pause safely without automatic reset or stash. Standard worktrees remain after closure until an authorized member requests validated cleanup.
 
-Schema v6 is intentionally incompatible with earlier schemas; startup rejects old databases instead of migrating them.
+No module owns Git provider credentials: ProjectBoard does not configure providers, clone remotes, or automatically fetch, pull, or push.
+
+Schema v8 is intentionally incompatible with every earlier schema; startup rejects old databases instead of migrating them.
