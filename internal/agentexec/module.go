@@ -17,7 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/projectboard/projectboard/internal/security"
+	"github.com/projectboard/projectboard/internal/agentrequest"
+	"github.com/projectboard/projectboard/internal/knowledge"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
@@ -34,7 +35,10 @@ type Invocation struct {
 	Timeout                   time.Duration
 	PlanOnly                  bool
 }
-type Result struct{ ThreadID, Status, Message, Raw, CommandJSON string }
+type Result struct {
+	ThreadID, Status, Message, Raw, CommandJSON string
+	KnowledgeOperations                         []knowledge.Operation
+}
 type Runner interface {
 	Run(context.Context, Invocation) (Result, error)
 }
@@ -59,7 +63,7 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 	err := cmd.Run()
 	raw := stdout.String()
 	commandJSON, _ := json.Marshal(append([]string{command}, args...))
-	result := Result{Raw: raw, ThreadID: in.ThreadID, CommandJSON: string(commandJSON)}
+	result := Result{Raw: raw, CommandJSON: string(commandJSON)}
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
 	for scanner.Scan() {
@@ -69,15 +73,11 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 		}
 		switch event["type"] {
 		case "thread.started":
-			if v, ok := event["thread_id"].(string); ok {
-				result.ThreadID = v
-			}
+			result.ThreadID, _ = event["thread_id"].(string)
 		case "item.completed":
 			item, _ := event["item"].(map[string]any)
 			if item["type"] == "agent_message" {
-				if v, ok := item["text"].(string); ok {
-					result.Message = v
-				}
+				result.Message, _ = item["text"].(string)
 			}
 		case "turn.failed", "error":
 			if err == nil {
@@ -88,12 +88,15 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("codex exec: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	var envelope struct{ Status, Message string }
+	var envelope struct {
+		Status              string                `json:"status"`
+		Message             string                `json:"message"`
+		KnowledgeOperations []knowledge.Operation `json:"knowledgeOperations"`
+	}
 	if json.Unmarshal([]byte(result.Message), &envelope) != nil {
 		return result, errors.New("Codex returned invalid structured output")
 	}
-	result.Status = envelope.Status
-	result.Message = envelope.Message
+	result.Status, result.Message, result.KnowledgeOperations = envelope.Status, envelope.Message, envelope.KnowledgeOperations
 	if result.Status == "" || result.Message == "" {
 		return result, errors.New("Codex result is missing status or message")
 	}
@@ -101,11 +104,7 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 }
 
 func execArgs(in Invocation, schemaPath string) []string {
-	args := []string{"exec"}
-	if in.ThreadID != "" {
-		return append(args, "resume", in.ThreadID, "--json", "--output-schema", schemaPath, "-c", `sandbox_mode="danger-full-access"`, "-")
-	}
-	return append(args, "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, "-")
+	return []string{"exec", "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, "-"}
 }
 
 type Options struct {
@@ -117,6 +116,8 @@ type Options struct {
 type Module struct {
 	store       *store.Store
 	queue       *workqueue.Module
+	requests    *agentrequest.Module
+	knowledge   *knowledge.Module
 	dataDir     string
 	runner      Runner
 	credentials CredentialProvider
@@ -128,30 +129,29 @@ type Module struct {
 	mu          sync.Mutex
 	running     map[string]runControl
 }
-
 type runControl struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-func New(database *store.Store, queue *workqueue.Module, options ...Options) *Module {
-	var o Options
+func New(database *store.Store, queue *workqueue.Module, requests *agentrequest.Module, knowledgeModule *knowledge.Module, options ...Options) *Module {
+	var option Options
 	if len(options) > 0 {
-		o = options[0]
+		option = options[0]
 	}
-	if o.DataDir == "" {
-		o.DataDir = "./data"
+	if option.DataDir == "" {
+		option.DataDir = "./data"
 	}
-	if o.PollInterval <= 0 {
-		o.PollInterval = 5 * time.Second
+	if option.PollInterval <= 0 {
+		option.PollInterval = 5 * time.Second
 	}
-	if o.Runner == nil {
-		o.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(o.DataDir, "codex-result-schema.json")}
+	if option.Runner == nil {
+		option.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(option.DataDir, "codex-result-schema.json")}
 	}
-	return &Module{store: database, queue: queue, dataDir: o.DataDir, runner: o.Runner, credentials: o.Credentials, poll: o.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
+	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, runner: option.Runner, credentials: option.Credentials, poll: option.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
 }
 
-const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","paused","failed"]},"message":{"type":"string"}},"required":["status","message"],"additionalProperties":false}`
+const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","failed"]},"message":{"type":"string"},"knowledgeOperations":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"type":{"type":"string","enum":["create","update","move","delete"]},"nodeId":{"type":"string"},"parentId":{"type":"string"},"title":{"type":"string"},"markdown":{"type":"string"},"sortOrder":{"type":"integer"},"fileIds":{"type":"array","items":{"type":"string"}},"expectedVersion":{"type":"integer"}},"required":["type"],"additionalProperties":false}}},"required":["status","message"],"additionalProperties":false}`
 
 func (m *Module) Start() error {
 	if err := os.MkdirAll(filepath.Join(m.dataDir, "workspaces"), 0o700); err != nil {
@@ -162,25 +162,8 @@ func (m *Module) Start() error {
 			return err
 		}
 	}
-	type interrupted struct{ itemID, executionID string }
-	interruptedRuns := []interrupted{}
-	rows, queryErr := m.store.DB.Query(`SELECT w.id,COALESCE((SELECT e.id FROM agent_executions e WHERE e.work_item_id=w.id AND e.state='running' ORDER BY e.started_at DESC LIMIT 1),'') FROM work_items w WHERE w.agent_state='running'`)
-	if queryErr == nil {
-		for rows.Next() {
-			var run interrupted
-			if rows.Scan(&run.itemID, &run.executionID) == nil {
-				interruptedRuns = append(interruptedRuns, run)
-			}
-		}
-		rows.Close()
-	}
 	stamp := now()
-	_, _ = m.store.DB.Exec("UPDATE agent_executions SET state='failed',ended_at=?,error_message='ProjectBoard restarted while Codex was running' WHERE state='running'", stamp)
-	_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',resume_requested=0,version=version+1,updated_at=? WHERE agent_state='running'", stamp)
-	for _, run := range interruptedRuns {
-		raw, _ := json.Marshal(map[string]any{"message": "ProjectBoard restarted while local Codex was running", "executionId": run.executionID})
-		_, _ = m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,'agent_interrupted',stage,'system',NULL,?,version,? FROM work_items WHERE id=?", security.Token(18), string(raw), stamp, run.itemID)
-	}
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status='failed',ended_at=?,error_message='ProjectBoard restarted while Codex was running' WHERE status='running'", stamp)
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.wg.Add(1)
 	go m.loop()
@@ -203,6 +186,14 @@ func (m *Module) Wake() {
 	default:
 	}
 }
+func (m *Module) Cancel(requestID string) {
+	m.mu.Lock()
+	control, ok := m.running[requestID]
+	m.mu.Unlock()
+	if ok {
+		control.cancel()
+	}
+}
 func (m *Module) loop() {
 	defer m.wg.Done()
 	ticker := time.NewTicker(m.poll)
@@ -219,275 +210,298 @@ func (m *Module) loop() {
 }
 
 type claim struct {
-	ExecutionID, ItemID, AgentID, ProjectID, ProjectKey, Title, Description, Criteria, TargetBranch, ThreadID, Workspace string
-	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts                                                         string
-	Number, Attempt, Timeout                                                                                             int64
-	PlanOnly                                                                                                             bool
+	RequestID, Kind, ItemID, AgentID, ProjectID, ProjectKey, Title, Description, Criteria, TargetBranch, Workspace string
+	CustomPrompt                                                                                                   string
+	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts, KnowledgeSnapshot                                string
+	RequestNumber, ItemNumber, Timeout                                                                             int64
+	PauseAfterCompletion, PlanOnly                                                                                 bool
 }
 
 func (m *Module) schedule() {
 	for {
-		c, err := m.claim()
-		if err != nil || c == nil {
+		claimed, err := m.claim()
+		if err != nil || claimed == nil {
 			return
 		}
 		ctx, cancel := context.WithCancel(m.ctx)
 		control := runControl{cancel: cancel, done: make(chan struct{})}
 		m.mu.Lock()
-		m.running[c.ExecutionID] = control
+		m.running[claimed.RequestID] = control
 		m.mu.Unlock()
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			defer func() { m.mu.Lock(); delete(m.running, c.ExecutionID); close(control.done); m.mu.Unlock(); m.Wake() }()
-			m.execute(ctx, c)
+			defer func() {
+				m.mu.Lock()
+				delete(m.running, claimed.RequestID)
+				close(control.done)
+				m.mu.Unlock()
+				m.Wake()
+			}()
+			m.execute(ctx, claimed)
 		}()
 	}
 }
+
 func (m *Module) claim() (*claim, error) {
-	var c *claim
+	var claimed *claim
 	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
-		row := tx.QueryRow(`SELECT w.id,w.project_id,p.project_key,w.number,w.title,w.description_markdown,w.acceptance_criteria_markdown,w.target_branch,COALESCE(w.codex_thread_id,''),COALESCE(w.workspace_path,''),p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,
-		(SELECT COALESCE(MAX(e.attempt_number),0)+1 FROM agent_executions e WHERE e.work_item_id=w.id),CASE WHEN w.pause_after_plan=1 AND w.plan_pause_consumed=0 THEN 1 ELSE 0 END
-		FROM work_items w JOIN projects p ON p.id=w.project_id CROSS JOIN agents a
-		WHERE w.is_agent_task=1 AND w.blocked_at IS NULL AND w.stage IN('created','in_progress') AND w.agent_state='queued' AND a.status='active' AND a.revoked_at IS NULL
-		AND (SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')<a.max_concurrent_tasks
-		ORDER BY (CAST((SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,w.created_at,w.id LIMIT 1`)
-		var v claim
-		var plan int
-		if err := row.Scan(&v.ItemID, &v.ProjectID, &v.ProjectKey, &v.Number, &v.Title, &v.Description, &v.Criteria, &v.TargetBranch, &v.ThreadID, &v.Workspace, &v.AgentRules, &v.ValidationCommands, &v.ForbiddenPaths, &v.AgentPrompts, &v.AgentID, &v.Timeout, &v.Attempt, &plan); err != nil {
+		row := tx.QueryRow(`SELECT r.id,r.kind,r.project_id,p.project_key,r.number,COALESCE(r.source_work_item_id,''),COALESCE(w.number,0),COALESCE(w.title,r.title),COALESCE(w.description_markdown,''),COALESCE(w.acceptance_criteria_markdown,''),COALESCE(w.target_branch,p.default_target_branch),COALESCE(w.pause_after_completion,0),r.prompt_markdown,p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes
+			FROM agent_requests r JOIN projects p ON p.id=r.project_id LEFT JOIN work_items w ON w.id=r.source_work_item_id CROSS JOIN agents a
+			WHERE r.status='queued' AND a.status='active' AND a.revoked_at IS NULL
+			AND (w.id IS NULL OR w.blocked_at IS NULL)
+			AND (SELECT COUNT(*) FROM agent_requests active WHERE active.assigned_agent_id=a.id AND active.status='running')<a.max_concurrent_tasks
+			AND (r.kind NOT IN('task_knowledge','project_knowledge_compaction') OR NOT EXISTS(SELECT 1 FROM agent_requests k WHERE k.project_id=r.project_id AND k.status='running' AND k.kind IN('task_knowledge','project_knowledge_compaction')))
+			ORDER BY (CAST((SELECT COUNT(*) FROM agent_requests active WHERE active.assigned_agent_id=a.id AND active.status='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,r.created_at,r.id LIMIT 1`)
+		var value claim
+		var pause int
+		if err := row.Scan(&value.RequestID, &value.Kind, &value.ProjectID, &value.ProjectKey, &value.RequestNumber, &value.ItemID, &value.ItemNumber, &value.Title, &value.Description, &value.Criteria, &value.TargetBranch, &pause, &value.CustomPrompt, &value.AgentRules, &value.ValidationCommands, &value.ForbiddenPaths, &value.AgentPrompts, &value.AgentID, &value.Timeout); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
 			return err
 		}
-		v.PlanOnly = plan != 0
-		v.ExecutionID = security.Token(18)
+		value.PauseAfterCompletion = pause != 0
+		value.PlanOnly = value.Kind == "task_plan"
+		value.Workspace = filepath.Join(m.dataDir, "workspaces", safe(value.RequestID))
 		stamp := now()
-		result, err := tx.Exec("UPDATE work_items SET stage='in_progress',agent_state='running',assigned_agent_id=?,resume_requested=0,version=version+1,updated_at=? WHERE id=? AND agent_state='queued'", v.AgentID, stamp, v.ItemID)
+		result, err := tx.Exec("UPDATE agent_requests SET status='running',assigned_agent_id=?,started_at=?,workspace_path=? WHERE id=? AND status='queued'", value.AgentID, stamp, value.Workspace, value.RequestID)
 		if err != nil {
 			return err
 		}
-		if n, _ := result.RowsAffected(); n != 1 {
-			return nil
+		if count, _ := result.RowsAffected(); count == 1 {
+			claimed = &value
 		}
-		workspace := v.Workspace
-		if workspace == "" {
-			workspace = filepath.Join(m.dataDir, "workspaces", safe(v.ItemID))
-		}
-		v.Workspace = workspace
-		_, err = tx.Exec("INSERT INTO agent_executions(id,work_item_id,agent_id,attempt_number,state,prompt_markdown,workspace_path,started_at) VALUES(?,?,?,?,?,?,?,?)", v.ExecutionID, v.ItemID, v.AgentID, v.Attempt, "running", "pending", workspace, stamp)
-		if err == nil {
-			c = &v
-		}
-		return err
+		return nil
 	})
-	return c, err
+	return claimed, err
 }
 
-func safe(v string) string {
-	r := strings.NewReplacer("/", "-", "\\", "-", ":", "-")
-	return r.Replace(strings.ToLower(v))
+func safe(value string) string {
+	return strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(strings.ToLower(value))
 }
-func (m *Module) prepare(ctx context.Context, c *claim) error {
-	if _, err := os.Stat(filepath.Join(c.Workspace, ".git")); err == nil {
+func isKnowledgeKind(kind string) bool {
+	return kind == "task_knowledge" || kind == "project_knowledge_compaction"
+}
+func (m *Module) prepare(ctx context.Context, claimed *claim) error {
+	if isKnowledgeKind(claimed.Kind) {
+		if err := os.MkdirAll(claimed.Workspace, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(claimed.Workspace, "PROJECT_KNOWLEDGE.md"), []byte(claimed.KnowledgeSnapshot), 0o400)
+	}
+	if _, err := os.Stat(filepath.Join(claimed.Workspace, ".git")); err == nil {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(c.Workspace), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(claimed.Workspace), 0o700); err != nil {
 		return err
 	}
 	var cloneURL string
-	if err := m.store.DB.QueryRowContext(ctx, "SELECT COALESCE(g.clone_url,p.repository_url) FROM projects p LEFT JOIN project_repository_grants g ON g.project_id=p.id AND g.revoked_at IS NULL WHERE p.id=?", c.ProjectID).Scan(&cloneURL); err != nil {
+	if err := m.store.DB.QueryRowContext(ctx, "SELECT COALESCE(g.clone_url,p.repository_url) FROM projects p LEFT JOIN project_repository_grants g ON g.project_id=p.id AND g.revoked_at IS NULL WHERE p.id=?", claimed.ProjectID).Scan(&cloneURL); err != nil {
 		return err
 	}
-	cred, err := m.issue(ctx, c.ProjectID)
+	credential, err := m.issue(ctx, claimed.ProjectID)
 	if err != nil {
 		return err
 	}
-	if cred != nil && cred.Revoke != nil {
-		defer cred.Revoke(context.Background())
+	if credential != nil && credential.Revoke != nil {
+		defer credential.Revoke(context.Background())
 	}
-	// Let the remote select its default branch. The task's development branch is
-	// workflow metadata and may be renamed or created later; using it as a clone
-	// constraint makes workspace creation fail before the Agent can do any work.
-	args := cloneArgs(cloneURL, c.Workspace)
-	if err = git(ctx, "", cred, args...); err != nil {
+	if err = git(ctx, "", credential, cloneArgs(cloneURL, claimed.Workspace)...); err != nil {
 		return err
 	}
-	requestedBranch := strings.TrimSpace(c.TargetBranch)
+	requestedBranch := strings.TrimSpace(claimed.TargetBranch)
 	if requestedBranch != "" {
-		exists, existsErr := gitRefExists(ctx, c.Workspace, "refs/remotes/origin/"+requestedBranch)
+		exists, existsErr := gitRefExists(ctx, claimed.Workspace, "refs/remotes/origin/"+requestedBranch)
 		if existsErr != nil {
 			return existsErr
 		}
 		if exists {
-			if err = git(ctx, c.Workspace, nil, "switch", requestedBranch); err != nil {
+			if err = git(ctx, claimed.Workspace, nil, "switch", requestedBranch); err != nil {
 				return err
 			}
 		} else {
-			c.TargetBranch, err = gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
+			claimed.TargetBranch, err = gitOutput(ctx, claimed.Workspace, nil, "branch", "--show-current")
 			if err != nil {
 				return err
 			}
-			c.TargetBranch = strings.TrimSpace(c.TargetBranch)
+			claimed.TargetBranch = strings.TrimSpace(claimed.TargetBranch)
 		}
 	}
-	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(c.ProjectKey), c.Number)
-	return git(ctx, c.Workspace, nil, "switch", "-c", branch)
-}
-
-func cloneArgs(cloneURL, workspace string) []string {
-	return []string{"clone", cloneURL, workspace}
-}
-
-func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", ref)
-	cmd.Dir = dir
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("git show-ref --verify --quiet %s: %w", ref, err)
-}
-
-func git(ctx context.Context, dir string, cred *Credential, args ...string) error {
-	full := []string{}
-	cmd := exec.CommandContext(ctx, "git", append(full, args...)...)
-	cmd.Dir = dir
-	if cred != nil && cred.Token != "" {
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
-	}
-	out, err := cmd.CombinedOutput()
+	branch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(claimed.ProjectKey), claimed.ItemNumber)
+	exists, err := gitRefExists(ctx, claimed.Workspace, "refs/remotes/origin/"+branch)
 	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return err
 	}
-	return nil
-}
-func (m *Module) issue(ctx context.Context, projectID string) (*Credential, error) {
-	if m.credentials == nil {
-		return nil, nil
+	if exists {
+		return git(ctx, claimed.Workspace, nil, "switch", "-c", branch, "--track", "origin/"+branch)
 	}
-	return m.credentials.Issue(ctx, projectID)
+	return git(ctx, claimed.Workspace, nil, "switch", "-c", branch)
 }
 
-func (m *Module) prompt(ctx context.Context, c *claim) string {
-	item, _ := m.queue.Get(ctx, c.ItemID)
-	var b strings.Builder
-	fmt.Fprintf(&b, "You are the local Codex Agent for ProjectBoard task %s.\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nDevelopment branch: %s\n", c.ItemID, c.Title, c.Description, c.Criteria, c.TargetBranch)
-	b.WriteString("Default Git workflow: start from the development branch, do the task on the already-created ProjectBoard work branch, and after verification merge the work branch back into the development branch. Leave the branch that should be published checked out. If the task description or ProjectBoard conversation explicitly specifies a different branch or Git workflow, follow that explicit instruction instead.\n")
-	fmt.Fprintf(&b, "Project Agent rules:\n%s\nProject prompt segments (JSON):\n%s\nValidation commands (JSON):\n%s\nForbidden paths (JSON):\n%s\n", c.AgentRules, c.AgentPrompts, c.ValidationCommands, c.ForbiddenPaths)
-	if c.PlanOnly {
-		b.WriteString("Produce a concrete implementation plan only. Do not edit files. Return status planned.\n")
+func cloneArgs(cloneURL, workspace string) []string { return []string{"clone", cloneURL, workspace} }
+
+func (m *Module) prompt(ctx context.Context, claimed *claim) string {
+	var prompt strings.Builder
+	fmt.Fprintf(&prompt, "You are executing one immutable ProjectBoard Agent Request.\nRequest: %s\nType: %s\nProject: %s\n", claimed.RequestID, claimed.Kind, claimed.ProjectKey)
+	if claimed.ItemID != "" {
+		fmt.Fprintf(&prompt, "Task: %s\nTitle: %s\nDescription:\n%s\nAcceptance criteria:\n%s\nDevelopment branch: %s\n", claimed.ItemID, claimed.Title, claimed.Description, claimed.Criteria, claimed.TargetBranch)
+		prompt.WriteString("Default Git workflow: work on the already-created ProjectBoard branch, verify and commit, then let ProjectBoard push it. If the task conversation specifies a different workflow, follow that explicit instruction instead.\n")
+	}
+	fmt.Fprintf(&prompt, "Project Agent rules:\n%s\nProject prompt segments (JSON):\n%s\nValidation commands (JSON):\n%s\nForbidden paths (JSON):\n%s\n", claimed.AgentRules, claimed.AgentPrompts, claimed.ValidationCommands, claimed.ForbiddenPaths)
+	if strings.TrimSpace(claimed.CustomPrompt) != "" {
+		fmt.Fprintf(&prompt, "Request context:\n%s\n", claimed.CustomPrompt)
+	}
+	prompt.WriteString("The following project knowledge snapshot is read-only context. Do not edit the snapshot file directly.\n\n")
+	prompt.WriteString(claimed.KnowledgeSnapshot)
+	if claimed.PlanOnly {
+		prompt.WriteString("\nProduce a concrete implementation plan only. Do not edit files. Return status planned.\n")
+	} else if isKnowledgeKind(claimed.Kind) {
+		prompt.WriteString("\nReturn complete knowledgeOperations. Each update/move/delete must include the current expectedVersion. The server applies the entire list transactionally; patches and partial writes are not accepted. Locked nodes cannot be changed, but children may be created below them. Return status completed.\n")
 	} else {
-		b.WriteString("Implement and verify the task in this workspace, then commit all task changes on the current branch. Do not push; ProjectBoard will push the clean committed branch. Return completed only when the task is genuinely complete; otherwise return paused or failed.\n")
+		prompt.WriteString("\nImplement and verify the task, commit all task changes, and do not push. ProjectBoard will push the clean committed branch. Return completed only when genuinely complete.\n")
 	}
-	b.WriteString("Recent ProjectBoard conversation:\n")
-	for _, entry := range item.Conversation {
-		raw, _ := json.Marshal(entry)
-		b.Write(raw)
-		b.WriteByte('\n')
+	if claimed.ItemID != "" {
+		if item, err := m.queue.Get(ctx, claimed.ItemID); err == nil {
+			prompt.WriteString("Recent task conversation:\n")
+			for _, entry := range item.Conversation {
+				raw, _ := json.Marshal(entry)
+				prompt.Write(raw)
+				prompt.WriteByte('\n')
+			}
+		}
 	}
-	b.WriteString("Your final response must follow the supplied JSON schema. Put the user-facing Markdown in message.\n")
-	return b.String()
+	prompt.WriteString("Your final response must follow the supplied JSON schema. Put user-facing Markdown in message.\n")
+	return prompt.String()
 }
-func (m *Module) execute(parent context.Context, c *claim) {
-	ctx, cancel := context.WithTimeout(parent, time.Duration(c.Timeout)*time.Minute)
+
+func (m *Module) execute(parent context.Context, claimed *claim) {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(claimed.Timeout)*time.Minute)
 	defer cancel()
-	if err := m.prepare(ctx, c); err != nil {
-		m.recordResult(c, Result{ThreadID: c.ThreadID}, "failed", err)
-		m.fail(c, c.ThreadID, err)
-		return
-	}
-	prompt := m.prompt(ctx, c)
-	_, _ = m.store.DB.Exec("UPDATE agent_executions SET prompt_markdown=? WHERE id=?", prompt, c.ExecutionID)
-	_ = m.event(c, "agent_started", "Local Codex execution started")
-	result, err := m.runner.Run(ctx, Invocation{WorkDir: c.Workspace, Prompt: prompt, ThreadID: c.ThreadID, Timeout: time.Duration(c.Timeout) * time.Minute, PlanOnly: c.PlanOnly})
+	snapshot, err := m.knowledge.Snapshot(ctx, claimed.ProjectID)
 	if err != nil {
-		m.recordResult(c, result, "failed", err)
-		m.fail(c, result.ThreadID, err)
+		m.fail(claimed, Result{}, err)
 		return
 	}
-	m.recordResult(c, result, result.Status, nil)
-	m.finish(c, result)
+	claimed.KnowledgeSnapshot = snapshot
+	if err = m.prepare(ctx, claimed); err != nil {
+		m.fail(claimed, Result{}, err)
+		return
+	}
+	prompt := m.prompt(ctx, claimed)
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET prompt_markdown=? WHERE id=? AND status='running'", prompt, claimed.RequestID)
+	result, err := m.runner.Run(ctx, Invocation{WorkDir: claimed.Workspace, Prompt: prompt, Timeout: time.Duration(claimed.Timeout) * time.Minute, PlanOnly: claimed.PlanOnly})
+	if err != nil {
+		m.fail(claimed, result, err)
+		return
+	}
+	if !m.active(claimed.RequestID) {
+		return
+	}
+	if err = m.finish(claimed, result); err != nil {
+		m.fail(claimed, result, err)
+		return
+	}
+	m.record(claimed, result, "succeeded", nil)
+	if claimed.Kind == "task_knowledge" {
+		_, _ = m.requests.MaybeScheduleCompaction(context.Background(), claimed.ProjectID)
+		m.Wake()
+	}
 }
-func (m *Module) recordResult(c *claim, r Result, state string, runErr error) {
-	var msg any
+
+func (m *Module) finish(claimed *claim, result Result) error {
+	if result.Status == "failed" {
+		return errors.New("Agent returned failed status")
+	}
+	if isKnowledgeKind(claimed.Kind) {
+		if result.Status != "completed" {
+			return errors.New("knowledge request did not return completed status")
+		}
+		_, err := m.knowledge.Apply(context.Background(), knowledge.Actor{Type: "agent", ID: claimed.AgentID}, claimed.ProjectID, result.KnowledgeOperations)
+		return err
+	}
+	if claimed.ItemID == "" {
+		return errors.New("task Agent request has no source task")
+	}
+	item, err := m.queue.Get(context.Background(), claimed.ItemID)
+	if err != nil {
+		return err
+	}
+	if result.Message != "" {
+		item, err = m.queue.AddMessage(context.Background(), workqueue.Actor{Type: "agent", ID: claimed.AgentID}, item.ID, result.Message, item.Version)
+		if err != nil {
+			return err
+		}
+	}
+	if claimed.Kind == "task_plan" {
+		if result.Status != "planned" {
+			return errors.New("plan request did not return planned status")
+		}
+		return nil
+	}
+	if result.Status != "completed" {
+		return errors.New("task execution did not return completed status")
+	}
+	if err = m.push(context.Background(), claimed); err != nil {
+		return err
+	}
+	item, err = m.queue.Get(context.Background(), claimed.ItemID)
+	if err != nil {
+		return err
+	}
+	if item.Stage == "created" {
+		item, err = m.queue.MoveStage(context.Background(), workqueue.Actor{Type: "agent", ID: claimed.AgentID}, item.ID, item.Version, "in_progress", "Agent execution started")
+		if err != nil {
+			return err
+		}
+	}
+	if item.Stage == "in_progress" {
+		item, err = m.queue.MoveStage(context.Background(), workqueue.Actor{Type: "agent", ID: claimed.AgentID}, item.ID, item.Version, "completed", "Agent execution completed")
+		if err != nil {
+			return err
+		}
+	}
+	if !claimed.PauseAfterCompletion && item.Stage == "completed" {
+		_, err = m.queue.MoveStage(context.Background(), workqueue.Actor{Type: "agent", ID: claimed.AgentID}, item.ID, item.Version, "closed", "Agent execution auto-closed task")
+	}
+	return err
+}
+
+func (m *Module) record(claimed *claim, result Result, status string, runErr error) {
+	var errorMessage any
 	if runErr != nil {
-		msg = runErr.Error()
+		errorMessage = runErr.Error()
 	}
-	payload, _ := json.Marshal(map[string]any{"status": r.Status, "message": r.Message})
-	_, _ = m.store.DB.Exec("UPDATE agent_executions SET state=?,thread_id=?,command_json=?,result_json=?,output_jsonl=?,final_message=?,ended_at=?,error_message=? WHERE id=?", state, nullable(r.ThreadID), defaultJSON(r.CommandJSON), string(payload), r.Raw, nullable(r.Message), now(), msg, c.ExecutionID)
+	payload, _ := json.Marshal(map[string]any{"status": result.Status, "message": result.Message, "knowledgeOperations": result.KnowledgeOperations})
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status=?,thread_id=?,command_json=?,result_json=?,output_jsonl=?,final_message=?,ended_at=?,error_message=? WHERE id=? AND status='running'", status, nullable(result.ThreadID), defaultJSON(result.CommandJSON), string(payload), result.Raw, nullable(result.Message), now(), errorMessage, claimed.RequestID)
 }
-func (m *Module) fail(c *claim, threadID string, err error) {
-	if !m.active(c) {
+func (m *Module) fail(claimed *claim, result Result, err error) {
+	if !m.active(claimed.RequestID) {
 		return
 	}
-	_ = m.event(c, "agent_failed", err.Error())
-	_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',codex_thread_id=COALESCE(?,codex_thread_id),workspace_path=?,version=version+1,updated_at=? WHERE id=?", nullable(threadID), c.Workspace, now(), c.ItemID)
+	m.record(claimed, result, "failed", err)
 }
-func (m *Module) finish(c *claim, r Result) {
-	if !m.active(c) {
-		return
-	}
-	if r.Message != "" {
-		_ = m.agentMessage(c, r.Message)
-	}
-	stamp := now()
-	switch r.Status {
-	case "planned":
-		_ = m.event(c, "agent_plan_paused", "Agent completed the plan and is waiting for confirmation")
-		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_plan',plan_pause_consumed=1,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
-	case "completed":
-		var pending, pause int
-		_ = m.store.DB.QueryRow("SELECT resume_requested,pause_after_completion FROM work_items WHERE id=?", c.ItemID).Scan(&pending, &pause)
-		if pending != 0 {
-			_ = m.event(c, "agent_resumed", "New member messages arrived while Codex was running; continuing the session")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='queued',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
-			return
-		}
-		if err := m.push(context.Background(), c); err != nil {
-			m.recordResult(c, r, "failed", err)
-			m.fail(c, r.ThreadID, err)
-			return
-		}
-		if pause != 0 {
-			_ = m.event(c, "agent_completion_paused", "Agent completed the task and is waiting for human closure")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='completed',agent_state='paused_completion',completed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
-		} else {
-			_ = m.event(c, "agent_closed", "Agent completed and automatically closed the task")
-			_, _ = m.store.DB.Exec("UPDATE work_items SET stage='closed',agent_state='finished',completed_at=?,closed_at=?,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, stamp, r.ThreadID, c.Workspace, stamp, c.ItemID)
-		}
-	case "paused":
-		_ = m.event(c, "agent_paused", r.Message)
-		_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_failure',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", r.ThreadID, c.Workspace, stamp, c.ItemID)
-	default:
-		m.fail(c, r.ThreadID, errors.New("Agent returned failed status"))
-	}
-}
-func (m *Module) active(c *claim) bool {
+func (m *Module) active(requestID string) bool {
 	var count int
-	return m.store.DB.QueryRow("SELECT COUNT(*) FROM work_items WHERE id=? AND assigned_agent_id=? AND agent_state='running'", c.ItemID, c.AgentID).Scan(&count) == nil && count == 1
+	return m.store.DB.QueryRow("SELECT COUNT(*) FROM agent_requests WHERE id=? AND status='running'", requestID).Scan(&count) == nil && count == 1
 }
-func (m *Module) push(ctx context.Context, c *claim) error {
-	status, err := gitOutput(ctx, c.Workspace, nil, "status", "--porcelain")
+
+func (m *Module) push(ctx context.Context, claimed *claim) error {
+	status, err := gitOutput(ctx, claimed.Workspace, nil, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(status) != "" {
 		return errors.New("Codex completed with uncommitted workspace changes")
 	}
-	cred, err := m.issue(ctx, c.ProjectID)
+	credential, err := m.issue(ctx, claimed.ProjectID)
 	if err != nil {
 		return err
 	}
-	if cred != nil && cred.Revoke != nil {
-		defer cred.Revoke(context.Background())
+	if credential != nil && credential.Revoke != nil {
+		defer credential.Revoke(context.Background())
 	}
-	branch, err := gitOutput(ctx, c.Workspace, nil, "branch", "--show-current")
+	branch, err := gitOutput(ctx, claimed.Workspace, nil, "branch", "--show-current")
 	if err != nil {
 		return err
 	}
@@ -495,38 +509,21 @@ func (m *Module) push(ctx context.Context, c *claim) error {
 	if branch == "" {
 		return errors.New("Codex completed on a detached HEAD")
 	}
-	return git(ctx, c.Workspace, cred, "push", "-u", "origin", branch)
+	return git(ctx, claimed.Workspace, credential, "push", "-u", "origin", branch)
 }
 
-func gitOutput(ctx context.Context, dir string, cred *Credential, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	if cred != nil && cred.Token != "" {
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+cred.Token)
+func (m *Module) issue(ctx context.Context, projectID string) (*Credential, error) {
+	if m.credentials == nil {
+		return nil, nil
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return m.credentials.Issue(ctx, projectID)
 }
-func (m *Module) agentMessage(c *claim, message string) error {
-	raw, _ := json.Marshal(map[string]any{"markdown": message})
-	_, err := m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,'message',stage,'agent',?, ?,version,? FROM work_items WHERE id=?", security.Token(18), c.AgentID, string(raw), now(), c.ItemID)
-	return err
-}
-func (m *Module) event(c *claim, kind, message string) error {
-	raw, _ := json.Marshal(map[string]any{"message": message, "executionId": c.ExecutionID})
-	_, err := m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,?,stage,'system',NULL,?,version,? FROM work_items WHERE id=?", security.Token(18), kind, string(raw), now(), c.ItemID)
-	return err
-}
-
 func (m *Module) DeactivateAgent(ctx context.Context, agentID string) error {
 	var waits []<-chan struct{}
 	m.mu.Lock()
-	for executionID, control := range m.running {
-		var id string
-		if m.store.DB.QueryRow("SELECT agent_id FROM agent_executions WHERE id=?", executionID).Scan(&id) == nil && id == agentID {
+	for requestID, control := range m.running {
+		var assigned string
+		if m.store.DB.QueryRow("SELECT COALESCE(assigned_agent_id,'') FROM agent_requests WHERE id=?", requestID).Scan(&assigned) == nil && assigned == agentID {
 			control.cancel()
 			waits = append(waits, control.done)
 		}
@@ -535,8 +532,7 @@ func (m *Module) DeactivateAgent(ctx context.Context, agentID string) error {
 	if err := waitForRuns(ctx, waits); err != nil {
 		return err
 	}
-	stamp := now()
-	_, err := m.store.DB.ExecContext(ctx, "UPDATE work_items SET stage='created',agent_state='queued',assigned_agent_id=NULL,codex_thread_id=NULL,resume_requested=0,version=version+1,updated_at=? WHERE assigned_agent_id=? AND stage<>'closed'", stamp, agentID)
+	_, err := m.store.DB.ExecContext(ctx, "UPDATE agent_requests SET status='queued',assigned_agent_id=NULL,started_at=NULL,ended_at=NULL,error_message=NULL WHERE assigned_agent_id=? AND status='running'", agentID)
 	m.Wake()
 	return err
 }
@@ -552,7 +548,7 @@ func waitForRuns(ctx context.Context, waits []<-chan struct{}) error {
 }
 func (m *Module) CleanWorkspace(ctx context.Context, itemID string) error {
 	var stage, path string
-	if err := m.store.DB.QueryRowContext(ctx, "SELECT stage,COALESCE(workspace_path,'') FROM work_items WHERE id=?", itemID).Scan(&stage, &path); err != nil {
+	if err := m.store.DB.QueryRowContext(ctx, `SELECT w.stage,COALESCE((SELECT r.workspace_path FROM agent_requests r WHERE r.source_work_item_id=w.id AND r.workspace_path IS NOT NULL ORDER BY r.number DESC LIMIT 1),'') FROM work_items w WHERE w.id=?`, itemID).Scan(&stage, &path); err != nil {
 		return err
 	}
 	if stage != "closed" {
@@ -563,35 +559,73 @@ func (m *Module) CleanWorkspace(ctx context.Context, itemID string) error {
 	}
 	base, _ := filepath.Abs(filepath.Join(m.dataDir, "workspaces"))
 	target, _ := filepath.Abs(path)
-	rel, err := filepath.Rel(base, target)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+	relative, err := filepath.Rel(base, target)
+	if err != nil || relative == "." || strings.HasPrefix(relative, "..") || filepath.IsAbs(relative) {
 		return errors.New("workspace path is outside the managed directory")
 	}
 	if runtime.GOOS == "windows" {
 		target = filepath.Clean(target)
 	}
 	if err = os.RemoveAll(target); err == nil {
-		_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), itemID)
+		_, err = m.store.DB.ExecContext(ctx, "UPDATE agent_requests SET workspace_path=NULL WHERE source_work_item_id=? AND workspace_path=?", itemID, path)
 	}
 	return err
 }
+
+func gitRefExists(ctx context.Context, dir, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "show-ref", "--verify", "--quiet", ref)
+	cmd.Dir = dir
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git show-ref --verify --quiet %s: %w", ref, err)
+}
+func git(ctx context.Context, dir string, credential *Credential, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	if credential != nil && credential.Token != "" {
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+credential.Token)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+func gitOutput(ctx context.Context, dir string, credential *Credential, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	if credential != nil && credential.Token != "" {
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=credential.helper", "GIT_CONFIG_VALUE_1=!f() { echo username=x-access-token; echo password=$PROJECTBOARD_GIT_TOKEN; }; f", "PROJECTBOARD_GIT_TOKEN="+credential.Token)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return string(output), nil
+}
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
-func nullable(v string) any {
-	if strings.TrimSpace(v) == "" {
+func nullable(value string) any {
+	if strings.TrimSpace(value) == "" {
 		return nil
 	}
-	return v
+	return value
 }
-func defaultJSON(v string) string {
-	if strings.TrimSpace(v) == "" {
+func defaultJSON(value string) string {
+	if strings.TrimSpace(value) == "" {
 		return "[]"
 	}
-	return v
+	return value
 }
 func ParsePositive(raw string, fallback int) int {
-	v, err := strconv.Atoi(raw)
-	if err != nil || v <= 0 {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
 		return fallback
 	}
-	return v
+	return value
 }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/projectboard/projectboard/internal/agentexec"
+	"github.com/projectboard/projectboard/internal/agentrequest"
+	"github.com/projectboard/projectboard/internal/knowledge"
 	"github.com/projectboard/projectboard/internal/providers"
 	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
@@ -50,14 +53,16 @@ func (e *domainError) Error() string { return e.Message }
 
 type actor struct{ Type, ID, Role, Name, SessionID string }
 type Server struct {
-	store  *store.Store
-	queue  *workqueue.Module
-	config Config
-	static fs.FS
-	vault  *providers.Vault
-	git    *providers.GitConnector
-	gitMu  sync.RWMutex
-	exec   *agentexec.Module
+	store     *store.Store
+	queue     *workqueue.Module
+	config    Config
+	static    fs.FS
+	vault     *providers.Vault
+	git       *providers.GitConnector
+	gitMu     sync.RWMutex
+	exec      *agentexec.Module
+	requests  *agentrequest.Module
+	knowledge *knowledge.Module
 }
 
 type Application struct {
@@ -107,12 +112,28 @@ func New(config Config) (*Application, error) {
 		return nil, err
 	}
 	queue := workqueue.New(database)
-	s := &Server{store: database, queue: queue, config: config, static: static, vault: vault, git: providers.NewGitConnector(config.GitConnect)}
+	requests := agentrequest.New(database)
+	knowledgeModule := knowledge.New(database)
+	queue.SetOnClosed(func(ctx context.Context, tx *sql.Tx, event workqueue.ClosedEvent) error {
+		_, createErr := requests.CreateTx(ctx, tx, agentrequest.CreateInput{
+			ProjectID: event.WorkItem.ProjectID, Kind: "task_knowledge", SourceWorkItemID: event.WorkItem.ID,
+			Title: "整理任务知识：" + event.WorkItem.ID + " " + event.WorkItem.Title, CreatedByType: "system",
+		})
+		return createErr
+	})
+	queue.SetOnAgentRequested(func(ctx context.Context, tx *sql.Tx, event workqueue.AgentRequestedEvent) error {
+		_, createErr := requests.CreateTx(ctx, tx, agentrequest.CreateInput{
+			ProjectID: event.ProjectID, Kind: event.Kind, SourceWorkItemID: event.WorkItemID,
+			Title: "处理任务：" + event.WorkItemID + " " + event.Title, CreatedByType: "system",
+		})
+		return createErr
+	})
+	s := &Server{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, config: config, static: static, vault: vault, git: providers.NewGitConnector(config.GitConnect)}
 	if err = s.reloadGitConnector(); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("load web-managed Git provider settings: %w", err)
 	}
-	s.exec = agentexec.New(database, queue, agentexec.Options{DataDir: config.DataDir, Credentials: &localCredentialProvider{server: s}})
+	s.exec = agentexec.New(database, queue, requests, knowledgeModule, agentexec.Options{DataDir: config.DataDir, Credentials: &localCredentialProvider{server: s}})
 	if err = s.exec.Start(); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("start local Agent executor: %w", err)
@@ -174,6 +195,23 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/git/connection-flows/{id}/complete", s.handle(s.completeGitConnection))
 	mux.HandleFunc("POST /api/git/connection-flows/{id}/cancel", s.handle(s.cancelGitConnection))
 	mux.HandleFunc("GET /api/work-items", s.handle(s.listWorkItems))
+	mux.HandleFunc("GET /api/agent-requests", s.handle(s.listAgentRequests))
+	mux.HandleFunc("GET /api/agent-requests/{id}", s.handle(s.getAgentRequest))
+	mux.HandleFunc("POST /api/agent-requests/{id}/cancel", s.handle(s.cancelAgentRequest))
+	mux.HandleFunc("POST /api/agent-requests/{id}/retry", s.handle(s.retryAgentRequest))
+	mux.HandleFunc("POST /api/agent-requests/{id}/approve-plan", s.handle(s.approveAgentPlan))
+	mux.HandleFunc("POST /api/work-items/{id}/agent-request", s.handle(s.requestAgentForTask))
+	mux.HandleFunc("GET /api/projects/{id}/knowledge", s.handle(s.listKnowledge))
+	mux.HandleFunc("POST /api/projects/{id}/knowledge", s.handle(s.createKnowledgeNode))
+	mux.HandleFunc("GET /api/knowledge/nodes/{id}", s.handle(s.getKnowledgeNode))
+	mux.HandleFunc("PATCH /api/knowledge/nodes/{id}", s.handle(s.updateKnowledgeNode))
+	mux.HandleFunc("DELETE /api/knowledge/nodes/{id}", s.handle(s.deleteKnowledgeNode))
+	mux.HandleFunc("POST /api/knowledge/nodes/{id}/move", s.handle(s.moveKnowledgeNode))
+	mux.HandleFunc("POST /api/knowledge/nodes/{id}/lock", s.handle(s.lockKnowledgeNode))
+	mux.HandleFunc("GET /api/knowledge/nodes/{id}/revisions", s.handle(s.knowledgeRevisions))
+	mux.HandleFunc("POST /api/knowledge/nodes/{id}/restore", s.handle(s.restoreKnowledgeNode))
+	mux.HandleFunc("POST /api/projects/{id}/knowledge/files", s.handle(s.uploadKnowledgeFile))
+	mux.HandleFunc("GET /api/knowledge/files/{id}", s.handle(s.downloadKnowledgeFile))
 	mux.HandleFunc("POST /api/work-items", s.handle(s.createWorkItem))
 	mux.HandleFunc("GET /api/work-items/{id}", s.handle(s.getWorkItem))
 	mux.HandleFunc("PATCH /api/work-items/{id}", s.handle(s.updateWorkItem))
@@ -432,7 +470,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.repository_url,p.remote_name,p.default_target_branch,p.allowed_target_branches_json,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.allow_subtasks,p.agent_prompts_json,p.config_version FROM projects p`
+	query := `SELECT p.id,p.project_key,p.name,p.description_markdown,p.archived_at,p.repository_url,p.remote_name,p.default_target_branch,p.allowed_target_branches_json,p.validation_commands_json,p.forbidden_paths_json,p.agent_rules_markdown,p.allow_subtasks,p.agent_prompts_json,p.knowledge_compaction_days,p.knowledge_compaction_request_count,p.config_version FROM projects p`
 	args := []any{}
 	if a.Role != "administrator" {
 		query += " JOIN project_memberships m ON m.project_id=p.id WHERE m.user_id=?"
@@ -527,7 +565,13 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		cleanPrompts = append(cleanPrompts, prompt)
 	}
 	promptsRaw, _ := json.Marshal(cleanPrompts)
-	_, err := s.store.DB.Exec("UPDATE projects SET name=?,repository_url=?,default_target_branch=?,allowed_target_branches_json=?,allow_subtasks=?,agent_prompts_json=?,config_version=config_version+1,updated_at=? WHERE id=?", name, repo, branch, string(allowedRaw), boolInt(boolValue(in, "allowSubtasks", current["allowSubtasks"])), string(promptsRaw), now(), id)
+	compactionDays := intValue(in, "knowledgeCompactionDays", current["knowledgeCompactionDays"])
+	compactionCount := intValue(in, "knowledgeCompactionRequestCount", current["knowledgeCompactionRequestCount"])
+	if compactionDays < 0 || compactionCount < 0 {
+		writeError(w, &domainError{422, "INVALID_COMPACTION_POLICY", "Knowledge compaction thresholds cannot be negative", nil})
+		return
+	}
+	_, err := s.store.DB.Exec("UPDATE projects SET name=?,repository_url=?,default_target_branch=?,allowed_target_branches_json=?,allow_subtasks=?,agent_prompts_json=?,knowledge_compaction_days=?,knowledge_compaction_request_count=?,config_version=config_version+1,updated_at=? WHERE id=?", name, repo, branch, string(allowedRaw), boolInt(boolValue(in, "allowSubtasks", current["allowSubtasks"])), string(promptsRaw), compactionDays, compactionCount, now(), id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -536,7 +580,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, project)
 }
 func (s *Server) project(id string) (map[string]any, error) {
-	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,repository_url,remote_name,default_target_branch,allowed_target_branches_json,validation_commands_json,forbidden_paths_json,agent_rules_markdown,allow_subtasks,agent_prompts_json,config_version FROM projects WHERE id=?`, id)
+	rows, err := s.store.DB.Query(`SELECT id,project_key,name,description_markdown,archived_at,repository_url,remote_name,default_target_branch,allowed_target_branches_json,validation_commands_json,forbidden_paths_json,agent_rules_markdown,allow_subtasks,agent_prompts_json,knowledge_compaction_days,knowledge_compaction_request_count,config_version FROM projects WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -931,7 +975,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,
-		(SELECT COUNT(*) FROM agent_executions e WHERE e.agent_id=a.id AND e.state='running')
+		(SELECT COUNT(*) FROM agent_requests r WHERE r.assigned_agent_id=a.id AND r.status='running')
 		FROM agents a WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`)
 	if err != nil {
 		writeError(w, err)
@@ -1768,6 +1812,403 @@ func (s *Server) listWorkItems(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+func (s *Server) listAgentRequests(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.URL.Query().Get("projectId")
+	if !s.canView(projectID, a) {
+		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
+		return
+	}
+	requests, err := s.requests.List(r.Context(), projectID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if s.requireDeveloper(projectID, a) != nil {
+		for index := range requests {
+			redactAgentRequest(&requests[index])
+		}
+	}
+	writeJSON(w, 200, requests)
+}
+func (s *Server) getAgentRequest(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	request, err := s.requests.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !s.canView(request.ProjectID, a) {
+		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
+		return
+	}
+	if s.requireDeveloper(request.ProjectID, a) != nil {
+		redactAgentRequest(request)
+	}
+	writeJSON(w, 200, request)
+}
+func redactAgentRequest(request *agentrequest.Request) {
+	request.OutputJSONL = ""
+	request.PromptMarkdown = ""
+	request.CommandJSON = ""
+	request.WorkspacePath = nil
+	request.ThreadID = nil
+}
+func (s *Server) cancelAgentRequest(w http.ResponseWriter, r *http.Request) {
+	s.changeAgentRequest(w, r, false)
+}
+func (s *Server) retryAgentRequest(w http.ResponseWriter, r *http.Request) {
+	s.changeAgentRequest(w, r, true)
+}
+func (s *Server) approveAgentPlan(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	plan, err := s.requests.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(plan.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	request, err := s.requests.ApprovePlan(r.Context(), plan.ID, a.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.exec.Wake()
+	writeJSON(w, 201, request)
+}
+func (s *Server) requestAgentForTask(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	item, err := s.queue.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(item.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	if item.Stage == "closed" {
+		writeError(w, &domainError{409, "TERMINAL", "Closed work items are read-only", nil})
+		return
+	}
+	var in struct {
+		PlanFirst bool `json:"planFirst"`
+	}
+	decode(r, &in)
+	kind := "task_execution"
+	if in.PlanFirst {
+		kind = "task_plan"
+	}
+	request, err := s.requests.Create(r.Context(), agentrequest.CreateInput{ProjectID: item.ProjectID, Kind: kind, SourceWorkItemID: item.ID, Title: "处理任务：" + item.ID + " " + item.Title, CreatedByType: "system"})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.exec.Wake()
+	writeJSON(w, 201, request)
+}
+func (s *Server) changeAgentRequest(w http.ResponseWriter, r *http.Request, retry bool) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	request, err := s.requests.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err = s.requireDeveloper(request.ProjectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	if retry {
+		request, err = s.requests.Retry(r.Context(), request.ID, a.ID)
+	} else {
+		requestID := request.ID
+		request, err = s.requests.Cancel(r.Context(), requestID)
+		if err == nil {
+			s.exec.Cancel(requestID)
+		}
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.exec.Wake()
+	writeJSON(w, 200, request)
+}
+func (s *Server) listKnowledge(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.PathValue("id")
+	if !s.canView(projectID, a) {
+		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
+		return
+	}
+	nodes, err := s.knowledge.List(r.Context(), projectID, r.URL.Query().Get("query"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, nodes)
+}
+func (s *Server) createKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.PathValue("id")
+	if err := s.requireDeveloper(projectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	var in struct {
+		ParentID  string   `json:"parentId"`
+		Title     string   `json:"title"`
+		Markdown  string   `json:"markdown"`
+		SortOrder int      `json:"sortOrder"`
+		FileIDs   []string `json:"fileIds"`
+	}
+	decode(r, &in)
+	node, err := s.knowledge.Create(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.CreateInput{ProjectID: projectID, ParentID: in.ParentID, Title: in.Title, Markdown: in.Markdown, SortOrder: in.SortOrder, FileIDs: in.FileIDs})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 201, node)
+}
+func (s *Server) knowledgeNode(w http.ResponseWriter, r *http.Request, developer bool) (actor, *knowledge.Node, bool) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return actor{}, nil, false
+	}
+	node, err := s.knowledge.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return actor{}, nil, false
+	}
+	if developer {
+		err = s.requireDeveloper(node.ProjectID, a)
+	} else if !s.canView(node.ProjectID, a) {
+		err = &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil}
+	}
+	if err != nil {
+		writeError(w, err)
+		return actor{}, nil, false
+	}
+	return a, node, true
+}
+func (s *Server) getKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	_, node, ok := s.knowledgeNode(w, r, false)
+	if ok {
+		writeJSON(w, 200, node)
+	}
+}
+func (s *Server) updateKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, node, ok := s.knowledgeNode(w, r, true)
+	if !ok {
+		return
+	}
+	var in struct {
+		ExpectedVersion int64    `json:"expectedVersion"`
+		Title           string   `json:"title"`
+		Markdown        string   `json:"markdown"`
+		FileIDs         []string `json:"fileIds"`
+	}
+	decode(r, &in)
+	node, err := s.knowledge.Update(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.UpdateInput{ID: node.ID, ExpectedVersion: in.ExpectedVersion, Title: in.Title, Markdown: in.Markdown, FileIDs: in.FileIDs})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, node)
+}
+func (s *Server) moveKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, node, ok := s.knowledgeNode(w, r, true)
+	if !ok {
+		return
+	}
+	var in struct {
+		ExpectedVersion int64  `json:"expectedVersion"`
+		ParentID        string `json:"parentId"`
+		SortOrder       int    `json:"sortOrder"`
+	}
+	decode(r, &in)
+	node, err := s.knowledge.Move(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, node.ID, in.ExpectedVersion, in.ParentID, in.SortOrder)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, node)
+}
+func (s *Server) deleteKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, node, ok := s.knowledgeNode(w, r, true)
+	if !ok {
+		return
+	}
+	expectedVersion, err := strconv.ParseInt(r.URL.Query().Get("expectedVersion"), 10, 64)
+	if err != nil {
+		writeError(w, &domainError{422, "VALIDATION_ERROR", "expectedVersion is required", nil})
+		return
+	}
+	if err = s.knowledge.Delete(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, node.ID, expectedVersion); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+func (s *Server) lockKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, node, ok := s.knowledgeNode(w, r, true)
+	if !ok {
+		return
+	}
+	var in struct {
+		ExpectedVersion int64 `json:"expectedVersion"`
+		Locked          bool  `json:"locked"`
+	}
+	decode(r, &in)
+	node, err := s.knowledge.SetLock(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, node.ID, in.ExpectedVersion, in.Locked)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, node)
+}
+func (s *Server) knowledgeRevisions(w http.ResponseWriter, r *http.Request) {
+	_, node, ok := s.knowledgeNode(w, r, false)
+	if !ok {
+		return
+	}
+	revisions, err := s.knowledge.Revisions(r.Context(), node.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, revisions)
+}
+func (s *Server) restoreKnowledgeNode(w http.ResponseWriter, r *http.Request) {
+	a, node, ok := s.knowledgeNode(w, r, true)
+	if !ok {
+		return
+	}
+	var in struct {
+		ExpectedVersion int64 `json:"expectedVersion"`
+		RevisionVersion int64 `json:"revisionVersion"`
+	}
+	decode(r, &in)
+	node, err := s.knowledge.Restore(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, node.ID, in.ExpectedVersion, in.RevisionVersion)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, 200, node)
+}
+func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	projectID := r.PathValue("id")
+	if err := s.requireDeveloper(projectID, a); err != nil {
+		writeError(w, err)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
+	if err := r.ParseMultipartForm(25 << 20); err != nil {
+		writeError(w, &domainError{413, "KNOWLEDGE_FILE_TOO_LARGE", "File must be 25 MB or smaller", nil})
+		return
+	}
+	input, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, &domainError{422, "FILE_REQUIRED", "Choose a file to upload", nil})
+		return
+	}
+	defer input.Close()
+	content, err := io.ReadAll(input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(content) == 0 {
+		writeError(w, &domainError{422, "EMPTY_FILE", "Empty files are not supported", nil})
+		return
+	}
+	name := filepath.Base(strings.TrimSpace(header.Filename))
+	if name == "." || name == "" {
+		name = "knowledge-file"
+	}
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		mimeType = http.DetectContentType(content)
+	}
+	digest := sha256.Sum256(content)
+	digestText := hex.EncodeToString(digest[:])
+	storageKey := digestText
+	directory := filepath.Join(s.config.DataDir, "knowledge-files")
+	if err = os.MkdirAll(directory, 0o700); err != nil {
+		writeError(w, err)
+		return
+	}
+	path := filepath.Join(directory, storageKey)
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		if err = os.WriteFile(path, content, 0o600); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	file, created, err := s.knowledge.RegisterFile(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.File{ProjectID: projectID, OriginalName: name, MIME: mimeType, Size: int64(len(content)), SHA256: digestText, StorageKey: storageKey})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, file)
+}
+func (s *Server) downloadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	file, err := s.knowledge.File(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if !s.canView(file.ProjectID, a) {
+		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
+		return
+	}
+	w.Header().Set("Content-Type", file.MIME)
+	w.Header().Set("Content-Length", fmt.Sprint(file.Size))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox")
+	disposition := "attachment"
+	if attachmentCanPreviewInline(file.MIME, file.OriginalName) {
+		disposition = "inline"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, file.OriginalName))
+	http.ServeFile(w, r, filepath.Join(s.config.DataDir, "knowledge-files", filepath.Base(file.StorageKey)))
+}
 func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -2026,11 +2467,17 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeError(w http.ResponseWriter, err error) {
 	var de *domainError
 	var we *workqueue.Error
+	var are *agentrequest.Error
+	var ke *knowledge.Error
 	switch {
 	case errors.As(err, &de):
 		writeJSON(w, de.Status, map[string]any{"error": map[string]any{"code": de.Code, "message": de.Message, "details": de.Details}})
 	case errors.As(err, &we):
 		writeJSON(w, we.Status, map[string]any{"error": map[string]any{"code": we.Code, "message": we.Message}})
+	case errors.As(err, &are):
+		writeJSON(w, are.Status, map[string]any{"error": map[string]any{"code": are.Code, "message": are.Message}})
+	case errors.As(err, &ke):
+		writeJSON(w, ke.Status, map[string]any{"error": map[string]any{"code": ke.Code, "message": ke.Message}})
 	case errors.Is(err, sql.ErrNoRows):
 		writeJSON(w, 404, map[string]any{"error": map[string]any{"code": "NOT_FOUND", "message": "Not found"}})
 	default:
@@ -2060,9 +2507,9 @@ type rowScanner interface{ Scan(...any) error }
 func scanProject(row rowScanner) map[string]any {
 	var id, key, name, description, repo, remote, branch, allowed, validations, forbidden, rules, prompts string
 	var archived *string
-	var allowSubtasks int
+	var allowSubtasks, compactionDays, compactionCount int
 	var version int64
-	if row.Scan(&id, &key, &name, &description, &archived, &repo, &remote, &branch, &allowed, &validations, &forbidden, &rules, &allowSubtasks, &prompts, &version) != nil {
+	if row.Scan(&id, &key, &name, &description, &archived, &repo, &remote, &branch, &allowed, &validations, &forbidden, &rules, &allowSubtasks, &prompts, &compactionDays, &compactionCount, &version) != nil {
 		return map[string]any{}
 	}
 	var allowedV, validationsV, forbiddenV any
@@ -2071,7 +2518,7 @@ func scanProject(row rowScanner) map[string]any {
 	_ = json.Unmarshal([]byte(validations), &validationsV)
 	_ = json.Unmarshal([]byte(forbidden), &forbiddenV)
 	_ = json.Unmarshal([]byte(prompts), &promptValues)
-	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "repositoryUrl": repo, "remoteName": remote, "defaultTargetBranch": branch, "allowedTargetBranches": allowedV, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "allowSubtasks": allowSubtasks != 0, "agentPrompts": promptValues, "configVersion": version}
+	return map[string]any{"id": id, "key": key, "name": name, "descriptionMarkdown": description, "archivedAt": archived, "repositoryUrl": repo, "remoteName": remote, "defaultTargetBranch": branch, "allowedTargetBranches": allowedV, "validationCommands": validationsV, "forbiddenPaths": forbiddenV, "agentRulesMarkdown": rules, "allowSubtasks": allowSubtasks != 0, "agentPrompts": promptValues, "knowledgeCompactionDays": compactionDays, "knowledgeCompactionRequestCount": compactionCount, "configVersion": version}
 }
 func stringValue(m map[string]any, key string, fallback any) string {
 	if value, ok := m[key].(string); ok {
@@ -2092,6 +2539,21 @@ func boolValue(m map[string]any, key string, fallback any) bool {
 	}
 	value, _ := fallback.(bool)
 	return value
+}
+func intValue(m map[string]any, key string, fallback any) int {
+	if value, ok := m[key].(float64); ok {
+		return int(value)
+	}
+	switch value := fallback.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
 }
 func boolInt(value bool) int {
 	if value {

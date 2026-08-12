@@ -33,7 +33,7 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 
 	for _, table := range []string{
 		"system_settings", "provider_authorizations", "git_provider_settings",
-		"project_repository_grants", "agents", "agent_executions", "work_items",
+		"project_repository_grants", "agents", "agent_requests", "knowledge_nodes", "knowledge_node_revisions", "knowledge_files", "work_items",
 	} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
@@ -43,7 +43,7 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 	for _, table := range []string{
 		"agent_ssh_keys", "agent_ssh_sessions", "leases", "assignments",
 		"runner_runs", "runner_devices", "runner_status", "discussion_conclusions",
-		"execution_attempts", "validation_runs", "acceptance_attempts", "agent_project_grants",
+		"execution_attempts", "validation_runs", "acceptance_attempts", "agent_project_grants", "agent_executions",
 	} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 0 {
@@ -52,7 +52,7 @@ func TestOpenCreatesOnlyLocalExecutorSchema(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesGlobalAgentConfiguration(t *testing.T) {
+func TestOpenRejectsSchemaBeforeAgentRequests(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v6.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -68,20 +68,9 @@ func TestOpenMigratesGlobalAgentConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer migrated.Close()
-	var version, grants int
-	if err = migrated.DB.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if err = migrated.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_project_grants'").Scan(&grants); err != nil {
-		t.Fatal(err)
-	}
-	if version != SchemaVersion || grants != 0 {
-		t.Fatalf("migration left schema version %d and %d project-grant tables", version, grants)
+	_, err = Open(path)
+	if err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("expected schema 6 to be rejected, got %v", err)
 	}
 }
 
