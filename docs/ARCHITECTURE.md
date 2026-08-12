@@ -3,30 +3,39 @@
 ```mermaid
 flowchart LR
   H["Human web client"] --> A["Session and CSRF protected API"]
-  A --> Q["Task state and conversation"]
-  S["Built-in scheduler"] --> Q
-  S --> C["Local codex CLI"]
-  C --> R["Server-local Git repository"]
-  R --> W["Standard task worktrees"]
-  Q --> D[("SQLite WAL, schema v8")]
+  A --> T["Task queue"]
+  A --> K["Knowledge tree"]
+  T --> R["One-shot Agent requests"]
+  R --> S["Built-in scheduler"]
+  S --> C["Fresh local codex exec"]
+  C --> P["Server-local Git repository"]
+  P --> W["Standard task worktrees"]
+  S --> K
+  T --> D[("SQLite WAL · schema v9")]
+  R --> D
+  K --> D
 ```
 
 ## Module boundaries
 
-`internal/projectrepo` validates immutable absolute project paths, initializes repositories and baseline commits, manages task worktrees, and exposes safe Git operations.
+- `internal/projectrepo` validates immutable absolute project paths, initializes repositories and baseline commits, manages task worktrees, and exposes safe local Git operations.
+- `internal/workqueue` owns task creation, workflow transitions, blocking and conversation. It emits transactional hooks when a task requests Agent work or reaches `closed`.
+- `internal/agentrequest` owns the immutable one-shot request lifecycle, retry lineage, plan approval and project compaction policy.
+- `internal/agentexec` claims queued requests, accounts for Agent capacity, prepares local repositories or worktrees, invokes Codex, records raw evidence, applies results and cleans managed worktrees.
+- `internal/knowledge` owns the project tree, optimistic versions, Agent locks, revisions, immutable project files, keyword search, read-only snapshots and transactional structured operations.
+- `internal/server` owns authorization, HTTP transport and the embedded UI. It validates project paths and target branches before domain mutations.
 
-`internal/workqueue` owns task creation, workflow-specific transitions, blocking, conversation writes, and explicit Agent review actions.
+## Invariants
 
-`internal/agentexec` owns tag-aware scheduling, capacity accounting, atomic claim, project-level main-repository serialization, Codex session continuity, structured result validation, merge execution evidence, and safe worktree cleanup.
+1. There is no generic Agent-request creation API. Task actions, plan approval, closure, retry and compaction policy create known request types.
+2. A retry is a new request and a fresh Codex session. Terminal request rows never return to `queued`.
+3. Closing a task and creating its `task_knowledge` request share one SQLite transaction.
+4. Knowledge operations are complete node operations, never patches; the whole operation list succeeds or rolls back.
+5. Agent locks apply to the selected knowledge node. Humans may still modify it, and children may be created below it.
+6. Project knowledge maintenance is serialized. At most one task or global knowledge request runs for a project at a time.
+7. Standard work runs on `projectboard/<project-key>/<task-number>` in a sibling `worktrees/<project-key>-<task-number>` directory. Simple-conversation and merge work run in the project repository.
+8. ProjectBoard does not configure Git providers and does not automatically fetch, pull or push.
 
-`internal/server` owns the human API and embedded UI. It validates project paths and target branches before domain mutations.
+The scheduler is event-woken with polling fallback. Interrupted, invalid, dirty or failed requests become failed and their task is paused safely. Standard worktrees remain after closure until an authorized member requests validated cleanup.
 
-## Execution lifecycle
-
-Standard work runs on `projectboard/<project-key>/<task-number>` in a sibling `worktrees/<project-key>-<task-number>` directory. After implementation, a separate Agent invocation resumes the same session and merges with `--no-ff` in the main repository. Simple-conversation work executes directly in the main repository. Main-repository writers are serialized per project.
-
-The scheduler is event-woken with polling fallback. Interrupted, invalid, dirty, or failed executions pause safely without automatic reset or stash. Standard worktrees remain after closure until an authorized member requests validated cleanup.
-
-No module owns Git provider credentials: ProjectBoard does not configure providers, clone remotes, or automatically fetch, pull, or push.
-
-Schema v8 is intentionally incompatible with every earlier schema; startup rejects old databases instead of migrating them.
+Schema v9 intentionally rejects every earlier schema rather than attempting an unsafe migration.

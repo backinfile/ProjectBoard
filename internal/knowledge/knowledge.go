@@ -1,0 +1,620 @@
+package knowledge
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/projectboard/projectboard/internal/security"
+	"github.com/projectboard/projectboard/internal/store"
+)
+
+type Actor struct{ Type, ID string }
+
+type Error struct {
+	Status        int
+	Code, Message string
+}
+
+func (e *Error) Error() string { return e.Message }
+func IsCode(err error, code string) bool {
+	var target *Error
+	return errors.As(err, &target) && target.Code == code
+}
+
+type Node struct {
+	ID              string   `json:"id"`
+	ProjectID       string   `json:"projectId"`
+	ParentID        *string  `json:"parentId"`
+	Title           string   `json:"title"`
+	Markdown        string   `json:"markdown"`
+	SortOrder       int      `json:"sortOrder"`
+	LockedForAgents bool     `json:"lockedForAgents"`
+	Version         int64    `json:"version"`
+	FileIDs         []string `json:"fileIds"`
+	CreatedByType   string   `json:"createdByType"`
+	CreatedByID     *string  `json:"createdById,omitempty"`
+	CreatedAt       string   `json:"createdAt"`
+	UpdatedByType   string   `json:"updatedByType"`
+	UpdatedByID     *string  `json:"updatedById,omitempty"`
+	UpdatedAt       string   `json:"updatedAt"`
+}
+
+type Revision struct {
+	Version         int64    `json:"version"`
+	ParentID        *string  `json:"parentId"`
+	Title           string   `json:"title"`
+	Markdown        string   `json:"markdown"`
+	SortOrder       int      `json:"sortOrder"`
+	LockedForAgents bool     `json:"lockedForAgents"`
+	FileIDs         []string `json:"fileIds"`
+	ActorType       string   `json:"actorType"`
+	ActorID         *string  `json:"actorId,omitempty"`
+	Reason          string   `json:"reason"`
+	CreatedAt       string   `json:"createdAt"`
+}
+
+type File struct {
+	ID           string  `json:"id"`
+	ProjectID    string  `json:"projectId"`
+	OriginalName string  `json:"originalName"`
+	MIME         string  `json:"mime"`
+	Size         int64   `json:"size"`
+	SHA256       string  `json:"sha256"`
+	StorageKey   string  `json:"-"`
+	UploaderType string  `json:"uploaderType"`
+	UploaderID   *string `json:"uploaderId,omitempty"`
+	CreatedAt    string  `json:"createdAt"`
+}
+
+type CreateInput struct {
+	ProjectID, ParentID, Title, Markdown string
+	SortOrder                            int
+	FileIDs                              []string
+}
+
+type UpdateInput struct {
+	ID              string
+	ExpectedVersion int64
+	Title, Markdown string
+	FileIDs         []string
+}
+
+type Operation struct {
+	Type            string   `json:"type"`
+	NodeID          string   `json:"nodeId,omitempty"`
+	ParentID        string   `json:"parentId,omitempty"`
+	Title           string   `json:"title,omitempty"`
+	Markdown        string   `json:"markdown,omitempty"`
+	SortOrder       int      `json:"sortOrder,omitempty"`
+	FileIDs         []string `json:"fileIds,omitempty"`
+	ExpectedVersion int64    `json:"expectedVersion,omitempty"`
+}
+
+type Module struct {
+	store *store.Store
+	now   func() time.Time
+}
+
+func New(s *store.Store) *Module { return &Module{store: s, now: time.Now} }
+
+func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Node, error) {
+	if strings.TrimSpace(in.ProjectID) == "" || strings.TrimSpace(in.Title) == "" {
+		return nil, &Error{422, "VALIDATION_ERROR", "Project and title are required"}
+	}
+	id := security.Token(18)
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		return m.createTx(ctx, tx, actor, id, in)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, id)
+}
+
+func (m *Module) Update(ctx context.Context, actor Actor, in UpdateInput) (*Node, error) {
+	if strings.TrimSpace(in.Title) == "" {
+		return nil, &Error{422, "VALIDATION_ERROR", "Title is required"}
+	}
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		return m.updateTx(ctx, tx, actor, in)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, in.ID)
+}
+
+func (m *Module) Move(ctx context.Context, actor Actor, id string, expectedVersion int64, parentID string, sortOrder int) (*Node, error) {
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		return m.moveTx(ctx, tx, actor, id, expectedVersion, parentID, sortOrder)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, id)
+}
+
+func (m *Module) Delete(ctx context.Context, actor Actor, id string, expectedVersion int64) error {
+	return m.store.Write(ctx, func(tx *sql.Tx) error {
+		return m.deleteTx(ctx, tx, actor, id, expectedVersion)
+	})
+}
+
+func (m *Module) Apply(ctx context.Context, actor Actor, projectID string, operations []Operation) ([]Node, error) {
+	if len(operations) > 100 {
+		return nil, &Error{422, "INVALID_OPERATIONS", "Provide no more than 100 knowledge operations"}
+	}
+	touched := []string{}
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		for _, operation := range operations {
+			if operation.NodeID != "" {
+				var owner string
+				if err := tx.QueryRowContext(ctx, "SELECT project_id FROM knowledge_nodes WHERE id=?", operation.NodeID).Scan(&owner); err != nil || owner != projectID {
+					return &Error{422, "INVALID_NODE", "Knowledge operation node must belong to the request project"}
+				}
+			}
+			switch operation.Type {
+			case "create":
+				newID := security.Token(18)
+				if err := m.createTx(ctx, tx, actor, newID, CreateInput{ProjectID: projectID, ParentID: operation.ParentID, Title: operation.Title, Markdown: operation.Markdown, SortOrder: operation.SortOrder, FileIDs: operation.FileIDs}); err != nil {
+					return err
+				}
+				touched = append(touched, newID)
+			case "update":
+				if err := m.updateTx(ctx, tx, actor, UpdateInput{ID: operation.NodeID, ExpectedVersion: operation.ExpectedVersion, Title: operation.Title, Markdown: operation.Markdown, FileIDs: operation.FileIDs}); err != nil {
+					return err
+				}
+				touched = append(touched, operation.NodeID)
+			case "move":
+				if err := m.moveTx(ctx, tx, actor, operation.NodeID, operation.ExpectedVersion, operation.ParentID, operation.SortOrder); err != nil {
+					return err
+				}
+				touched = append(touched, operation.NodeID)
+			case "delete":
+				if err := m.deleteTx(ctx, tx, actor, operation.NodeID, operation.ExpectedVersion); err != nil {
+					return err
+				}
+			default:
+				return &Error{422, "INVALID_OPERATION", "Unknown knowledge operation: " + operation.Type}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := []Node{}
+	for _, id := range touched {
+		if node, getErr := m.Get(ctx, id); getErr == nil {
+			out = append(out, *node)
+		}
+	}
+	return out, nil
+}
+
+func (m *Module) SetLock(ctx context.Context, actor Actor, id string, expectedVersion int64, locked bool) (*Node, error) {
+	if actor.Type != "human" {
+		return nil, &Error{403, "HUMAN_REQUIRED", "Only members can change Agent locks"}
+	}
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		current, err := getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if current.Version != expectedVersion {
+			return &Error{409, "VERSION_CONFLICT", "Knowledge node version changed"}
+		}
+		stamp := m.timestamp()
+		_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET locked_for_agents=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, boolInt(locked), actor.Type, nullable(actor.ID), stamp, id)
+		if err != nil {
+			return err
+		}
+		return saveRevision(ctx, tx, id, actor, "lock changed", stamp)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, id)
+}
+
+func (m *Module) Restore(ctx context.Context, actor Actor, id string, expectedVersion, revisionVersion int64) (*Node, error) {
+	err := m.store.Write(ctx, func(tx *sql.Tx) error {
+		current, err := getTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if err = canMutate(actor, current, expectedVersion); err != nil {
+			return err
+		}
+		var revision Revision
+		var locked int
+		var filesJSON string
+		err = tx.QueryRowContext(ctx, `SELECT parent_id,title,markdown,sort_order,locked_for_agents,file_ids_json FROM knowledge_node_revisions WHERE node_id=? AND version=?`, id, revisionVersion).Scan(&revision.ParentID, &revision.Title, &revision.Markdown, &revision.SortOrder, &locked, &filesJSON)
+		if err != nil {
+			return err
+		}
+		revision.LockedForAgents = locked != 0
+		_ = json.Unmarshal([]byte(filesJSON), &revision.FileIDs)
+		if err = validateFiles(ctx, tx, current.ProjectID, revision.FileIDs); err != nil {
+			return err
+		}
+		stamp := m.timestamp()
+		_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET parent_id=?,title=?,markdown=?,sort_order=?,locked_for_agents=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, revision.ParentID, revision.Title, revision.Markdown, revision.SortOrder, boolInt(revision.LockedForAgents), actor.Type, nullable(actor.ID), stamp, id)
+		if err != nil {
+			return err
+		}
+		if err = replaceFiles(ctx, tx, id, revision.FileIDs, stamp); err != nil {
+			return err
+		}
+		return saveRevision(ctx, tx, id, actor, "restored revision", stamp)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return m.Get(ctx, id)
+}
+
+func (m *Module) Get(ctx context.Context, id string) (*Node, error) {
+	node, err := scanNode(m.store.DB.QueryRowContext(ctx, nodeSelect+" WHERE id=? AND deleted_at IS NULL", id))
+	if err == sql.ErrNoRows {
+		return nil, &Error{404, "NOT_FOUND", "Knowledge node not found"}
+	}
+	if err != nil {
+		return nil, err
+	}
+	node.FileIDs, err = fileIDs(ctx, m.store.DB, id)
+	return node, err
+}
+
+func (m *Module) List(ctx context.Context, projectID, query string) ([]Node, error) {
+	statement := nodeSelect + " WHERE project_id=? AND deleted_at IS NULL"
+	args := []any{projectID}
+	if strings.TrimSpace(query) != "" {
+		statement += " AND (title LIKE ? OR markdown LIKE ?)"
+		like := "%" + strings.TrimSpace(query) + "%"
+		args = append(args, like, like)
+	}
+	statement += " ORDER BY parent_id,sort_order,title,id"
+	rows, err := m.store.DB.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Node{}
+	for rows.Next() {
+		node, scanErr := scanNode(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, *node)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range out {
+		out[index].FileIDs, err = fileIDs(ctx, m.store.DB, out[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (m *Module) Snapshot(ctx context.Context, projectID string) (string, error) {
+	nodes, err := m.List(ctx, projectID, "")
+	if err != nil {
+		return "", err
+	}
+	byID := map[string]Node{}
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	var pathFor func(Node, map[string]bool) string
+	pathFor = func(node Node, seen map[string]bool) string {
+		if seen[node.ID] || node.ParentID == nil {
+			return node.Title
+		}
+		seen[node.ID] = true
+		parent, ok := byID[*node.ParentID]
+		if !ok {
+			return node.Title
+		}
+		return pathFor(parent, seen) + "/" + node.Title
+	}
+	sort.Slice(nodes, func(i, j int) bool {
+		return pathFor(nodes[i], map[string]bool{}) < pathFor(nodes[j], map[string]bool{})
+	})
+	var snapshot strings.Builder
+	snapshot.WriteString("# Project knowledge snapshot\n\n")
+	for _, node := range nodes {
+		fmt.Fprintf(&snapshot, "## %s\nnode_id: %s\nversion: %d\nlocked_for_agents: %t\n", pathFor(node, map[string]bool{}), node.ID, node.Version, node.LockedForAgents)
+		if len(node.FileIDs) > 0 {
+			fmt.Fprintf(&snapshot, "file_ids: %s\n", strings.Join(node.FileIDs, ", "))
+		}
+		snapshot.WriteString("\n" + node.Markdown + "\n\n")
+	}
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT id,original_name,mime,size,sha256 FROM knowledge_files WHERE project_id=? ORDER BY created_at,id`, projectID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	snapshot.WriteString("# Project file manifest\n\n")
+	for rows.Next() {
+		var id, name, mime, sha string
+		var size int64
+		if err = rows.Scan(&id, &name, &mime, &size, &sha); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&snapshot, "- %s | %s | %s | %d bytes | sha256:%s\n", id, name, mime, size, sha)
+	}
+	return snapshot.String(), rows.Err()
+}
+
+func (m *Module) Revisions(ctx context.Context, id string) ([]Revision, error) {
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT version,parent_id,title,markdown,sort_order,locked_for_agents,file_ids_json,actor_type,actor_id,reason,created_at FROM knowledge_node_revisions WHERE node_id=? ORDER BY version DESC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Revision{}
+	for rows.Next() {
+		var revision Revision
+		var locked int
+		var filesJSON string
+		if err = rows.Scan(&revision.Version, &revision.ParentID, &revision.Title, &revision.Markdown, &revision.SortOrder, &locked, &filesJSON, &revision.ActorType, &revision.ActorID, &revision.Reason, &revision.CreatedAt); err != nil {
+			return nil, err
+		}
+		revision.LockedForAgents = locked != 0
+		_ = json.Unmarshal([]byte(filesJSON), &revision.FileIDs)
+		out = append(out, revision)
+	}
+	return out, rows.Err()
+}
+
+func (m *Module) RegisterFile(ctx context.Context, actor Actor, file File) (*File, bool, error) {
+	if file.ProjectID == "" || file.OriginalName == "" || file.SHA256 == "" || file.StorageKey == "" || file.Size <= 0 || file.Size > 25<<20 {
+		return nil, false, &Error{422, "INVALID_FILE", "Knowledge file must be non-empty and no larger than 25 MB"}
+	}
+	file.ID = security.Token(18)
+	file.UploaderType = actor.Type
+	file.CreatedAt = m.timestamp()
+	result, err := m.store.DB.ExecContext(ctx, `INSERT OR IGNORE INTO knowledge_files(id,project_id,original_name,mime,size,sha256,storage_key,uploader_type,uploader_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, file.ID, file.ProjectID, file.OriginalName, file.MIME, file.Size, file.SHA256, file.StorageKey, actor.Type, nullable(actor.ID), file.CreatedAt)
+	if err != nil {
+		return nil, false, err
+	}
+	created, _ := result.RowsAffected()
+	stored, err := m.fileBySHA(ctx, file.ProjectID, file.SHA256)
+	return stored, created > 0, err
+}
+
+func (m *Module) File(ctx context.Context, id string) (*File, error) {
+	return scanFile(m.store.DB.QueryRowContext(ctx, `SELECT id,project_id,original_name,mime,size,sha256,storage_key,uploader_type,uploader_id,created_at FROM knowledge_files WHERE id=?`, id))
+}
+
+func (m *Module) fileBySHA(ctx context.Context, projectID, sha string) (*File, error) {
+	return scanFile(m.store.DB.QueryRowContext(ctx, `SELECT id,project_id,original_name,mime,size,sha256,storage_key,uploader_type,uploader_id,created_at FROM knowledge_files WHERE project_id=? AND sha256=?`, projectID, sha))
+}
+
+func scanFile(row scanner) (*File, error) {
+	var file File
+	err := row.Scan(&file.ID, &file.ProjectID, &file.OriginalName, &file.MIME, &file.Size, &file.SHA256, &file.StorageKey, &file.UploaderType, &file.UploaderID, &file.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, &Error{404, "NOT_FOUND", "Knowledge file not found"}
+	}
+	return &file, err
+}
+
+func (m *Module) createTx(ctx context.Context, tx *sql.Tx, actor Actor, id string, in CreateInput) error {
+	if strings.TrimSpace(in.ProjectID) == "" || strings.TrimSpace(in.Title) == "" {
+		return &Error{422, "VALIDATION_ERROR", "Project and title are required"}
+	}
+	if in.ParentID != "" {
+		var projectID string
+		if err := tx.QueryRowContext(ctx, "SELECT project_id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL", in.ParentID).Scan(&projectID); err != nil || projectID != in.ProjectID {
+			return &Error{422, "INVALID_PARENT", "Parent must be an active node in the same project"}
+		}
+	}
+	if err := validateFiles(ctx, tx, in.ProjectID, in.FileIDs); err != nil {
+		return err
+	}
+	stamp := m.timestamp()
+	_, err := tx.ExecContext(ctx, `INSERT INTO knowledge_nodes(id,project_id,parent_id,title,markdown,sort_order,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, in.ProjectID, nullable(in.ParentID), strings.TrimSpace(in.Title), in.Markdown, in.SortOrder, actor.Type, nullable(actor.ID), stamp, actor.Type, nullable(actor.ID), stamp)
+	if err != nil {
+		return err
+	}
+	if err = replaceFiles(ctx, tx, id, in.FileIDs, stamp); err != nil {
+		return err
+	}
+	return saveRevision(ctx, tx, id, actor, "created", stamp)
+}
+
+func (m *Module) updateTx(ctx context.Context, tx *sql.Tx, actor Actor, in UpdateInput) error {
+	if strings.TrimSpace(in.Title) == "" {
+		return &Error{422, "VALIDATION_ERROR", "Title is required"}
+	}
+	current, err := getTx(ctx, tx, in.ID)
+	if err != nil {
+		return err
+	}
+	if err = canMutate(actor, current, in.ExpectedVersion); err != nil {
+		return err
+	}
+	if err = validateFiles(ctx, tx, current.ProjectID, in.FileIDs); err != nil {
+		return err
+	}
+	stamp := m.timestamp()
+	_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET title=?,markdown=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, strings.TrimSpace(in.Title), in.Markdown, actor.Type, nullable(actor.ID), stamp, in.ID)
+	if err != nil {
+		return err
+	}
+	if err = replaceFiles(ctx, tx, in.ID, in.FileIDs, stamp); err != nil {
+		return err
+	}
+	return saveRevision(ctx, tx, in.ID, actor, "updated", stamp)
+}
+
+func (m *Module) moveTx(ctx context.Context, tx *sql.Tx, actor Actor, id string, expectedVersion int64, parentID string, sortOrder int) error {
+	current, err := getTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if err = canMutate(actor, current, expectedVersion); err != nil {
+		return err
+	}
+	if parentID == id {
+		return &Error{422, "INVALID_PARENT", "A node cannot be its own parent"}
+	}
+	if parentID != "" {
+		var owner string
+		if err = tx.QueryRowContext(ctx, "SELECT project_id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL", parentID).Scan(&owner); err != nil || owner != current.ProjectID {
+			return &Error{422, "INVALID_PARENT", "Parent must be an active node in the same project"}
+		}
+		var cycle int
+		if err = tx.QueryRowContext(ctx, `WITH RECURSIVE descendants(id) AS (SELECT id FROM knowledge_nodes WHERE parent_id=? AND deleted_at IS NULL UNION ALL SELECT n.id FROM knowledge_nodes n JOIN descendants d ON n.parent_id=d.id WHERE n.deleted_at IS NULL) SELECT COUNT(*) FROM descendants WHERE id=?`, id, parentID).Scan(&cycle); err != nil {
+			return err
+		}
+		if cycle > 0 {
+			return &Error{422, "INVALID_PARENT", "A node cannot move below its descendant"}
+		}
+	}
+	stamp := m.timestamp()
+	_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET parent_id=?,sort_order=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, nullable(parentID), sortOrder, actor.Type, nullable(actor.ID), stamp, id)
+	if err != nil {
+		return err
+	}
+	return saveRevision(ctx, tx, id, actor, "moved", stamp)
+}
+
+func (m *Module) deleteTx(ctx context.Context, tx *sql.Tx, actor Actor, id string, expectedVersion int64) error {
+	current, err := getTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if err = canMutate(actor, current, expectedVersion); err != nil {
+		return err
+	}
+	if actor.Type == "agent" {
+		var locked int
+		err = tx.QueryRowContext(ctx, `WITH RECURSIVE subtree(id,locked) AS (SELECT id,locked_for_agents FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL UNION ALL SELECT n.id,n.locked_for_agents FROM knowledge_nodes n JOIN subtree s ON n.parent_id=s.id WHERE n.deleted_at IS NULL) SELECT COALESCE(SUM(locked),0) FROM subtree`, id).Scan(&locked)
+		if err != nil {
+			return err
+		}
+		if locked > 0 {
+			return &Error{409, "NODE_LOCKED", "A locked knowledge node exists in the deleted subtree"}
+		}
+	}
+	stamp := m.timestamp()
+	_, err = tx.ExecContext(ctx, `WITH RECURSIVE subtree(id) AS (SELECT id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL UNION ALL SELECT n.id FROM knowledge_nodes n JOIN subtree s ON n.parent_id=s.id WHERE n.deleted_at IS NULL) UPDATE knowledge_nodes SET deleted_at=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id IN (SELECT id FROM subtree)`, id, stamp, actor.Type, nullable(actor.ID), stamp)
+	return err
+}
+
+func (m *Module) timestamp() string { return m.now().UTC().Format(time.RFC3339Nano) }
+
+const nodeSelect = `SELECT id,project_id,parent_id,title,markdown,sort_order,locked_for_agents,version,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at FROM knowledge_nodes`
+
+type scanner interface{ Scan(...any) error }
+
+func scanNode(row scanner) (*Node, error) {
+	var node Node
+	var locked int
+	err := row.Scan(&node.ID, &node.ProjectID, &node.ParentID, &node.Title, &node.Markdown, &node.SortOrder, &locked, &node.Version, &node.CreatedByType, &node.CreatedByID, &node.CreatedAt, &node.UpdatedByType, &node.UpdatedByID, &node.UpdatedAt)
+	node.LockedForAgents = locked != 0
+	return &node, err
+}
+
+func getTx(ctx context.Context, tx *sql.Tx, id string) (*Node, error) {
+	node, err := scanNode(tx.QueryRowContext(ctx, nodeSelect+" WHERE id=? AND deleted_at IS NULL", id))
+	if err == sql.ErrNoRows {
+		return nil, &Error{404, "NOT_FOUND", "Knowledge node not found"}
+	}
+	return node, err
+}
+
+func canMutate(actor Actor, node *Node, expectedVersion int64) error {
+	if node.Version != expectedVersion {
+		return &Error{409, "VERSION_CONFLICT", "Knowledge node version changed"}
+	}
+	if actor.Type == "agent" && node.LockedForAgents {
+		return &Error{409, "NODE_LOCKED", "Knowledge node is locked for Agents"}
+	}
+	return nil
+}
+
+func saveRevision(ctx context.Context, tx *sql.Tx, id string, actor Actor, reason, stamp string) error {
+	node, err := getTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	files, err := fileIDs(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	encoded, _ := json.Marshal(files)
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_node_revisions(id,node_id,version,parent_id,title,markdown,sort_order,locked_for_agents,file_ids_json,actor_type,actor_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, security.Token(18), id, node.Version, node.ParentID, node.Title, node.Markdown, node.SortOrder, boolInt(node.LockedForAgents), string(encoded), actor.Type, nullable(actor.ID), reason, stamp)
+	return err
+}
+
+func replaceFiles(ctx context.Context, tx *sql.Tx, nodeID string, ids []string, stamp string) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM knowledge_node_files WHERE node_id=?", nodeID); err != nil {
+		return err
+	}
+	for index, id := range ids {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO knowledge_node_files(node_id,file_id,sort_order,created_at) VALUES(?,?,?,?)", nodeID, id, index, stamp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateFiles(ctx context.Context, tx *sql.Tx, projectID string, ids []string) error {
+	for _, id := range ids {
+		var one int
+		if err := tx.QueryRowContext(ctx, "SELECT 1 FROM knowledge_files WHERE id=? AND project_id=?", id, projectID).Scan(&one); err != nil {
+			return &Error{422, "INVALID_FILE", "Knowledge file must belong to the same project"}
+		}
+	}
+	return nil
+}
+
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func fileIDs(ctx context.Context, db queryer, nodeID string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT file_id FROM knowledge_node_files WHERE node_id=? ORDER BY sort_order,file_id", nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func nullable(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

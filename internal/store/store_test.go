@@ -32,7 +32,8 @@ func TestOpenCreatesOnlyLocalProjectSchema(t *testing.T) {
 	defer database.Close()
 
 	for _, table := range []string{
-		"system_settings", "projects", "agents", "agent_executions", "work_items",
+		"system_settings", "projects", "agents", "agent_executions", "agent_requests",
+		"knowledge_nodes", "knowledge_node_revisions", "knowledge_files", "work_items",
 	} {
 		var count int
 		if err = database.DB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count); err != nil || count != 1 {
@@ -55,13 +56,13 @@ func TestOpenCreatesOnlyLocalProjectSchema(t *testing.T) {
 }
 
 func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "v7.db")
+	path := filepath.Join(t.TempDir(), "v8.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = database.Exec(`CREATE TABLE schema_metadata(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL);
-		INSERT INTO schema_metadata VALUES(1,7,CURRENT_TIMESTAMP);`); err != nil {
+		INSERT INTO schema_metadata VALUES(1,8,CURRENT_TIMESTAMP);`); err != nil {
 		t.Fatal(err)
 	}
 	if err = database.Close(); err != nil {
@@ -69,7 +70,7 @@ func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
 	}
 
 	if _, err = Open(path); err == nil || !strings.Contains(err.Error(), "incompatible") {
-		t.Fatalf("expected schema 7 to be rejected, got %v", err)
+		t.Fatalf("expected schema 8 to be rejected, got %v", err)
 	}
 }
 

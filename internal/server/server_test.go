@@ -297,6 +297,85 @@ func TestHumanCanCompleteTheRequiredWorkItemFlow(t *testing.T) {
 	if conversation, ok := item["conversation"].([]any); !ok || len(conversation) < 4 {
 		t.Fatalf("conversation = %#v, want recorded lifecycle", item["conversation"])
 	}
+	requests := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agent-requests?projectId="+project["id"].(string), csrf, nil)
+	if len(requests) != 1 || requests[0]["kind"] != "task_knowledge" || requests[0]["sourceWorkItemId"] != "CORE-1" || requests[0]["status"] != "queued" {
+		t.Fatalf("agent requests = %#v, want one queued task knowledge request", requests)
+	}
+}
+
+func TestAgentTaskCreatesOneShotRequestAndRetryCreatesANewRequest(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "agent", "name": "Agent", "projectPath": filepath.Join(t.TempDir(), "agent")})
+	item := requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{
+		"projectId": project["id"], "title": "Plan this", "isAgentTask": true, "pauseAfterPlan": true,
+	})
+	if item["agent_state"] != "idle" {
+		t.Fatalf("task retained legacy execution state: %#v", item)
+	}
+	requests := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agent-requests?projectId="+project["id"].(string), csrf, nil)
+	if len(requests) != 1 || requests[0]["kind"] != "task_plan" || requests[0]["sourceWorkItemId"] != "AGENT-1" {
+		t.Fatalf("initial requests = %#v", requests)
+	}
+	originalID := requests[0]["id"].(string)
+	cancelled := requestJSON(t, client, http.MethodPost, host.URL+"/api/agent-requests/"+originalID+"/cancel", csrf, map[string]any{})
+	if cancelled["status"] != "cancelled" {
+		t.Fatalf("cancelled request = %#v", cancelled)
+	}
+	retried := requestJSON(t, client, http.MethodPost, host.URL+"/api/agent-requests/"+originalID+"/retry", csrf, map[string]any{})
+	if retried["id"] == originalID || retried["retryOfId"] != originalID || retried["status"] != "queued" {
+		t.Fatalf("retried request = %#v", retried)
+	}
+}
+
+func TestProjectKnowledgeTreeSupportsSearchLocksAndHistory(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "kb", "name": "Knowledge", "projectPath": filepath.Join(t.TempDir(), "knowledge")})
+	root := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"title": "Architecture", "markdown": "System overview"})
+	child := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"parentId": root["id"], "title": "API", "markdown": "HTTP contract"})
+	file := uploadMultipart(t, client, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge/files", csrf, "reference.md", []byte("immutable reference"))
+	duplicate := uploadMultipart(t, client, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge/files", csrf, "renamed.md", []byte("immutable reference"))
+	if duplicate["id"] != file["id"] {
+		t.Fatalf("project file dedup failed: first=%#v duplicate=%#v", file, duplicate)
+	}
+	root = requestJSON(t, client, http.MethodPatch, host.URL+"/api/knowledge/nodes/"+root["id"].(string), csrf, map[string]any{"expectedVersion": root["version"], "title": "Architecture", "markdown": "System overview", "fileIds": []string{file["id"].(string)}})
+	found := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge?query=HTTP", csrf, nil)
+	if len(found) != 1 || found[0]["id"] != child["id"] {
+		t.Fatalf("knowledge search = %#v", found)
+	}
+	locked := requestJSON(t, client, http.MethodPost, host.URL+"/api/knowledge/nodes/"+root["id"].(string)+"/lock", csrf, map[string]any{"expectedVersion": root["version"], "locked": true})
+	if locked["lockedForAgents"] != true {
+		t.Fatalf("locked node = %#v", locked)
+	}
+	updated := requestJSON(t, client, http.MethodPatch, host.URL+"/api/knowledge/nodes/"+root["id"].(string), csrf, map[string]any{"expectedVersion": locked["version"], "title": "Architecture", "markdown": "Human edits remain allowed"})
+	revisions := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/knowledge/nodes/"+root["id"].(string)+"/revisions", csrf, nil)
+	if updated["version"] != float64(4) || len(revisions) != 4 {
+		t.Fatalf("updated=%#v revisions=%#v", updated, revisions)
+	}
+	viewer := requestJSON(t, client, http.MethodPost, host.URL+"/api/users", csrf, map[string]any{"username": "knowledge-viewer", "displayName": "Knowledge Viewer", "systemRole": "user"})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/members", csrf, map[string]any{"userId": viewer["id"], "role": "viewer"})
+	viewerJar, _ := cookiejar.New(nil)
+	viewerClient := &http.Client{Jar: viewerJar}
+	viewerLogin := requestJSON(t, viewerClient, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "knowledge-viewer", "password": viewer["temporaryPassword"]})
+	viewerCSRF := viewerLogin["csrfToken"].(string)
+	visible := requestJSONArray(t, viewerClient, http.MethodGet, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", "", nil)
+	if len(visible) != 2 {
+		t.Fatalf("viewer knowledge = %#v", visible)
+	}
+	requestErrorCode(t, viewerClient, http.MethodPatch, host.URL+"/api/knowledge/nodes/"+root["id"].(string), viewerCSRF, map[string]any{"expectedVersion": updated["version"], "title": "Denied", "markdown": "Denied"}, http.StatusForbidden, "DEVELOPER_REQUIRED")
 }
 
 func TestWorkItemFollowersCriteriaAndNotifications(t *testing.T) {
@@ -386,6 +465,34 @@ func requestJSONArray(t *testing.T, client *http.Client, method, endpoint, csrf 
 	_ = json.NewDecoder(response.Body).Decode(&value)
 	if response.StatusCode >= 300 {
 		t.Fatalf("%s %s = %d", method, endpoint, response.StatusCode)
+	}
+	return value
+}
+
+func uploadMultipart(t *testing.T, client *http.Client, endpoint, csrf, name string, content []byte) map[string]any {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	request, _ := http.NewRequest(http.MethodPost, endpoint, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var value map[string]any
+	_ = json.NewDecoder(response.Body).Decode(&value)
+	if response.StatusCode >= 300 {
+		t.Fatalf("POST %s = %d %#v", endpoint, response.StatusCode, value)
 	}
 	return value
 }

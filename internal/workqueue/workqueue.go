@@ -64,11 +64,29 @@ type WorkItem struct {
 }
 
 type Module struct {
-	store *store.Store
-	now   func() time.Time
+	store            *store.Store
+	now              func() time.Time
+	onClosed         func(context.Context, *sql.Tx, ClosedEvent) error
+	onAgentRequested func(context.Context, *sql.Tx, AgentRequestedEvent) error
 }
 
-func New(s *store.Store) *Module   { return &Module{store: s, now: time.Now} }
+type ClosedEvent struct {
+	WorkItem WorkItem
+	Actor    Actor
+}
+
+type AgentRequestedEvent struct {
+	ProjectID, WorkItemID, Title, Kind string
+	Actor                              Actor
+}
+
+func New(s *store.Store) *Module { return &Module{store: s, now: time.Now} }
+func (m *Module) SetOnClosed(hook func(context.Context, *sql.Tx, ClosedEvent) error) {
+	m.onClosed = hook
+}
+func (m *Module) SetOnAgentRequested(hook func(context.Context, *sql.Tx, AgentRequestedEvent) error) {
+	m.onAgentRequested = hook
+}
 func timestamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 func id() string                   { return security.Token(18) }
 func boolInt(v bool) int {
@@ -128,9 +146,6 @@ func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Work
 		itemID = fmt.Sprintf("%s-%d", strings.ToUpper(key), number)
 		stamp := timestamp(m.now())
 		agentState := "idle"
-		if in.IsAgentTask {
-			agentState = "queued"
-		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO work_items(id,project_id,number,parent_id,title,description_markdown,acceptance_criteria_markdown,priority,stage,workflow_type,target_branch,assignee_kind,assignee_id,is_agent_task,pause_after_plan,pause_before_completion,agent_state,created_by_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, in.ProjectID, number, nullable(in.ParentID), in.Title, in.DescriptionMarkdown, in.AcceptanceCriteriaMarkdown, in.Priority, "created", in.WorkflowType, branch, nullable(in.AssigneeKind), nullable(in.AssigneeID), boolInt(in.IsAgentTask), boolInt(in.PauseAfterPlan), boolInt(in.PauseBeforeCompletion), agentState, nullable(in.CreatedByUserID), stamp, stamp)
 		if err != nil {
 			return err
@@ -151,7 +166,17 @@ func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Work
 				return err
 			}
 		}
-		return timeline(ctx, tx, itemID, "stage_transition", "created", actor, map[string]any{"from": nil, "to": "created"}, 1)
+		if err = timeline(ctx, tx, itemID, "stage_transition", "created", actor, map[string]any{"from": nil, "to": "created"}, 1); err != nil {
+			return err
+		}
+		if in.IsAgentTask && m.onAgentRequested != nil {
+			kind := "task_execution"
+			if in.PauseAfterPlan {
+				kind = "task_plan"
+			}
+			return m.onAgentRequested(ctx, tx, AgentRequestedEvent{ProjectID: in.ProjectID, WorkItemID: itemID, Title: in.Title, Kind: kind, Actor: actor})
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -187,7 +212,7 @@ func (m *Module) Get(ctx context.Context, itemID string) (*WorkItem, error) {
 			entry["payload"] = payload
 		}
 	}
-	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,attempt_number,state,thread_id,command_json,result_json,final_message,workspace_path,started_at,ended_at,error_message FROM agent_executions WHERE work_item_id=? ORDER BY attempt_number", itemID)
+	w.Executions = readMaps(ctx, m.store.DB, "SELECT id,number attempt_number,status state,thread_id,command_json,result_json,final_message,workspace_path,started_at,ended_at,error_message FROM agent_requests WHERE source_work_item_id=? ORDER BY number", itemID)
 	w.Attachments = readMaps(ctx, m.store.DB, "SELECT id,entry_id,original_name,mime,size,created_at FROM attachments WHERE work_item_id=? ORDER BY created_at,id", itemID)
 	w.FollowerIDs = []string{}
 	rows, _ := m.store.DB.QueryContext(ctx, "SELECT user_id FROM work_item_followers WHERE work_item_id=? ORDER BY created_at,user_id", itemID)
@@ -267,7 +292,7 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 		}
 		if in.Configure {
 			var executionCount int
-			if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_executions WHERE work_item_id=?", itemID).Scan(&executionCount); err != nil {
+			if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM agent_requests WHERE source_work_item_id=? AND status IN('queued','running')", itemID).Scan(&executionCount); err != nil {
 				return err
 			}
 			if current.AssignedAgentID != nil || executionCount > 0 {
@@ -288,13 +313,7 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 				}
 			}
 		}
-		state := current.AgentState
-		if isAgent && state == "idle" {
-			state = "queued"
-		}
-		if !isAgent {
-			state = "idle"
-		}
+		state := "idle"
 		_, err = tx.ExecContext(ctx, "UPDATE work_items SET title=?,description_markdown=?,acceptance_criteria_markdown=?,priority=?,target_branch=?,assignee_kind=?,assignee_id=?,is_agent_task=?,pause_after_plan=?,pause_before_completion=?,agent_state=?,version=version+1,updated_at=? WHERE id=?", title, desc, criteria, priority, branch, kind, idv, boolInt(isAgent), boolInt(pap), boolInt(pbc), state, stamp, itemID)
 		if err != nil {
 			return err
@@ -323,7 +342,17 @@ func (m *Module) Update(ctx context.Context, actor Actor, itemID string, in Upda
 				}
 			}
 		}
-		return timeline(ctx, tx, itemID, "work_item_updated", current.Stage, actor, map[string]any{"isAgentTask": isAgent}, current.Version+1)
+		if err = timeline(ctx, tx, itemID, "work_item_updated", current.Stage, actor, map[string]any{"isAgentTask": isAgent}, current.Version+1); err != nil {
+			return err
+		}
+		if in.Configure && isAgent && !current.IsAgentTask && m.onAgentRequested != nil {
+			requestKind := "task_execution"
+			if pap {
+				requestKind = "task_plan"
+			}
+			return m.onAgentRequested(ctx, tx, AgentRequestedEvent{ProjectID: current.ProjectID, WorkItemID: current.ID, Title: title, Kind: requestKind, Actor: actor})
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -405,7 +434,16 @@ func (m *Module) MoveStage(ctx context.Context, actor Actor, itemID string, vers
 		if err != nil {
 			return err
 		}
-		return timeline(ctx, tx, itemID, "stage_transition", target, actor, map[string]any{"from": current.Stage, "to": target, "noteMarkdown": note}, version+1)
+		if err = timeline(ctx, tx, itemID, "stage_transition", target, actor, map[string]any{"from": current.Stage, "to": target, "noteMarkdown": note}, version+1); err != nil {
+			return err
+		}
+		if target == "closed" && m.onClosed != nil {
+			current.Stage = target
+			current.Version++
+			current.ClosedAt = &stamp
+			return m.onClosed(ctx, tx, ClosedEvent{WorkItem: *current, Actor: actor})
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -446,6 +484,9 @@ func (m *Module) AddMessageWithResume(ctx context.Context, actor Actor, itemID, 
 			_, err = tx.ExecContext(ctx, "UPDATE work_items SET resume_requested=1,agent_state='queued',stage=CASE WHEN stage='completed' THEN 'in_progress' ELSE stage END,completed_at=CASE WHEN stage='completed' THEN NULL ELSE completed_at END,version=version+1,updated_at=? WHERE id=?", stamp, itemID)
 			if err == nil {
 				err = timeline(ctx, tx, itemID, "agent_resumed", "in_progress", Actor{Type: "system"}, map[string]any{"message": "A member requested the Agent to continue"}, current.Version+1)
+			}
+			if err == nil && m.onAgentRequested != nil {
+				err = m.onAgentRequested(ctx, tx, AgentRequestedEvent{ProjectID: current.ProjectID, WorkItemID: current.ID, Title: current.Title, Kind: "task_execution", Actor: actor})
 			}
 		}
 		return err
@@ -514,7 +555,13 @@ func (m *Module) AgentAction(ctx context.Context, actor Actor, itemID string, ex
 		if err != nil {
 			return err
 		}
-		return timeline(ctx, tx, itemID, "agent_action", stage, actor, map[string]any{"action": action}, current.Version+1)
+		if err = timeline(ctx, tx, itemID, "agent_action", stage, actor, map[string]any{"action": action}, current.Version+1); err != nil {
+			return err
+		}
+		if state == "queued" && m.onAgentRequested != nil {
+			return m.onAgentRequested(ctx, tx, AgentRequestedEvent{ProjectID: current.ProjectID, WorkItemID: current.ID, Title: current.Title, Kind: "task_execution", Actor: actor})
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
