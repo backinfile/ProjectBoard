@@ -1962,3 +1962,13 @@
   .agent-ops-row,
   .agent-ops-arrow { transition: none; }
 }
+/* Local paths and workflow controls must stay readable at narrow widths. */
+.path-value {
+  max-width: min(70vw, 72ch);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.workflow-field {
+  margin-block: 20px 4px;
+}

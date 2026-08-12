@@ -38,13 +38,9 @@ func Open(file string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("read database schema version: %w", err)
 		}
-		if version > SchemaVersion {
+		if version != SchemaVersion {
 			db.Close()
-			return nil, fmt.Errorf("unsupported database schema version %d", version)
-		}
-		if err = migrate(db, version); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("migrate database schema: %w", err)
+			return nil, fmt.Errorf("database schema %d is incompatible with this release; create a new data directory", version)
 		}
 	}
 	if _, err = db.Exec(schema); err != nil {
@@ -54,29 +50,7 @@ func Open(file string) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
-const SchemaVersion = 7
-
-func migrate(db *sql.DB, version int) error {
-	if version == SchemaVersion {
-		return nil
-	}
-	if version == 6 {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err = tx.Exec("DROP TABLE IF EXISTS agent_project_grants"); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if _, err = tx.Exec("UPDATE schema_metadata SET version=7 WHERE id=1"); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		return tx.Commit()
-	}
-	return fmt.Errorf("database schema %d is incompatible with this release; create a new data directory", version)
-}
+const SchemaVersion = 8
 
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -94,24 +68,16 @@ func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, created_at TEXT NOT NULL);
-INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,7,CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,8,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, system_role TEXT NOT NULL CHECK(system_role IN('administrator','user')), status TEXT NOT NULL DEFAULT 'active', must_change_password INTEGER NOT NULL DEFAULT 0, disabled_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_active_at TEXT);
 CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, user_agent TEXT, ip TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_attempts(id TEXT PRIMARY KEY, username TEXT NOT NULL, ip TEXT NOT NULL, succeeded INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS login_attempt_window ON login_attempts(username,ip,created_at);
-CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project_key TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL, description_markdown TEXT NOT NULL DEFAULT '', archived_at TEXT, repository_url TEXT NOT NULL, remote_name TEXT NOT NULL DEFAULT 'origin', default_target_branch TEXT NOT NULL DEFAULT 'main', allowed_target_branches_json TEXT NOT NULL DEFAULT '["main"]', validation_commands_json TEXT NOT NULL DEFAULT '[]', forbidden_paths_json TEXT NOT NULL DEFAULT '[]', agent_rules_markdown TEXT NOT NULL DEFAULT '', allow_subtasks INTEGER NOT NULL DEFAULT 1, agent_prompts_json TEXT NOT NULL DEFAULT '[]', config_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, project_key TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL, description_markdown TEXT NOT NULL DEFAULT '', archived_at TEXT, project_path TEXT NOT NULL UNIQUE COLLATE NOCASE, default_target_branch TEXT NOT NULL DEFAULT 'main', validation_commands_json TEXT NOT NULL DEFAULT '[]', forbidden_paths_json TEXT NOT NULL DEFAULT '[]', agent_rules_markdown TEXT NOT NULL DEFAULT '', allow_subtasks INTEGER NOT NULL DEFAULT 1, agent_prompts_json TEXT NOT NULL DEFAULT '[]', config_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS project_memberships(project_id TEXT NOT NULL REFERENCES projects(id), user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL CHECK(role IN('developer','viewer')), created_at TEXT NOT NULL, PRIMARY KEY(project_id,user_id));
-CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, purpose TEXT NOT NULL, runtime_type TEXT NOT NULL DEFAULT 'local_codex_cli' CHECK(runtime_type='local_codex_cli'), max_concurrent_tasks INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrent_tasks>0), turn_timeout_minutes INTEGER NOT NULL DEFAULT 120 CHECK(turn_timeout_minutes>0), status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT);
-CREATE TABLE IF NOT EXISTS provider_authorizations(id TEXT PRIMARY KEY, provider TEXT NOT NULL CHECK(provider='github'), name TEXT NOT NULL, base_url TEXT NOT NULL, app_id TEXT, installation_id TEXT, encrypted_secret TEXT NOT NULL, webhook_secret TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS git_provider_settings(provider TEXT PRIMARY KEY CHECK(provider='github'), encrypted_config TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS git_provider_setup_flows(id TEXT PRIMARY KEY, provider TEXT NOT NULL CHECK(provider='github'), user_id TEXT NOT NULL REFERENCES users(id), public_url TEXT NOT NULL, state_hash TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT, error_message TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS provider_authorization_metadata(authorization_id TEXT PRIMARY KEY REFERENCES provider_authorizations(id), credential_kind TEXT NOT NULL, external_account TEXT, permissions_json TEXT NOT NULL, webhook_status TEXT NOT NULL, webhook_url TEXT, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS provider_authorization_repositories(authorization_id TEXT NOT NULL REFERENCES provider_authorizations(id), repository_id TEXT NOT NULL, repository_name TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, web_url TEXT, can_write INTEGER NOT NULL, verified_at TEXT NOT NULL, PRIMARY KEY(authorization_id,repository_id));
-CREATE TABLE IF NOT EXISTS git_connection_flows(id TEXT PRIMARY KEY, provider TEXT NOT NULL CHECK(provider='github'), project_id TEXT NOT NULL REFERENCES projects(id), user_id TEXT NOT NULL REFERENCES users(id), state_hash TEXT NOT NULL, nonce_hash TEXT NOT NULL, sealed_verifier TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT, error_message TEXT, authorization_id TEXT REFERENCES provider_authorizations(id), repositories_json TEXT, matched_repository_id TEXT, permissions_json TEXT, webhook_status TEXT, webhook_url TEXT, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS project_repository_grants(id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE REFERENCES projects(id), authorization_id TEXT NOT NULL REFERENCES provider_authorizations(id), repository_id TEXT NOT NULL, repository_name TEXT NOT NULL, clone_url TEXT NOT NULL, default_branch TEXT NOT NULL, access_level TEXT NOT NULL, approved_by TEXT NOT NULL, approved_at TEXT NOT NULL, revoked_at TEXT);
-CREATE TABLE IF NOT EXISTS project_commit_sync_state(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,last_synced_at TEXT NOT NULL,updated_by_type TEXT NOT NULL,updated_by_id TEXT);
-CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, description_markdown TEXT NOT NULL, acceptance_criteria_markdown TEXT NOT NULL, priority TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN('created','in_progress','completed','closed')), target_branch TEXT NOT NULL, assignee_kind TEXT, assignee_id TEXT, is_agent_task INTEGER NOT NULL DEFAULT 0, pause_after_plan INTEGER NOT NULL DEFAULT 0, pause_after_completion INTEGER NOT NULL DEFAULT 0, plan_pause_consumed INTEGER NOT NULL DEFAULT 0, agent_state TEXT NOT NULL DEFAULT 'idle' CHECK(agent_state IN('idle','queued','running','paused_plan','paused_completion','paused_failure','finished')), assigned_agent_id TEXT REFERENCES agents(id), codex_thread_id TEXT, workspace_path TEXT, resume_requested INTEGER NOT NULL DEFAULT 0, blocked_at TEXT, blocked_reason TEXT, version INTEGER NOT NULL DEFAULT 1, created_by_user_id TEXT REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, closed_at TEXT, UNIQUE(project_id,number));
+CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, purpose TEXT NOT NULL, runtime_type TEXT NOT NULL DEFAULT 'local_codex_cli' CHECK(runtime_type='local_codex_cli'), max_concurrent_tasks INTEGER NOT NULL DEFAULT 1 CHECK(max_concurrent_tasks>0), turn_timeout_minutes INTEGER NOT NULL DEFAULT 120 CHECK(turn_timeout_minutes>0), accept_tags_json TEXT NOT NULL DEFAULT '[]', reject_tags_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, revoked_at TEXT);
+CREATE TABLE IF NOT EXISTS work_items(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, parent_id TEXT REFERENCES work_items(id), title TEXT NOT NULL, description_markdown TEXT NOT NULL, acceptance_criteria_markdown TEXT NOT NULL, priority TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN('created','in_progress','completed','closed')), workflow_type TEXT NOT NULL DEFAULT 'standard' CHECK(workflow_type IN('standard','simple_conversation')), target_branch TEXT NOT NULL, assignee_kind TEXT, assignee_id TEXT, is_agent_task INTEGER NOT NULL DEFAULT 0, pause_after_plan INTEGER NOT NULL DEFAULT 0, pause_before_completion INTEGER NOT NULL DEFAULT 0, plan_pause_consumed INTEGER NOT NULL DEFAULT 0, agent_phase TEXT NOT NULL DEFAULT 'work' CHECK(agent_phase IN('work','merge','merge_review','close_review')), agent_state TEXT NOT NULL DEFAULT 'idle' CHECK(agent_state IN('idle','queued','running','paused_plan','paused_completion','paused_failure','finished')), assigned_agent_id TEXT REFERENCES agents(id), codex_thread_id TEXT, workspace_path TEXT, base_commit_sha TEXT, resume_requested INTEGER NOT NULL DEFAULT 0, blocked_at TEXT, blocked_reason TEXT, version INTEGER NOT NULL DEFAULT 1, created_by_user_id TEXT REFERENCES users(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, closed_at TEXT, UNIQUE(project_id,number));
 CREATE TABLE IF NOT EXISTS work_item_followers(work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,PRIMARY KEY(work_item_id,user_id));
 CREATE INDEX IF NOT EXISTS work_item_followers_user ON work_item_followers(user_id,work_item_id);
 CREATE TABLE IF NOT EXISTS work_item_tags(work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,tag TEXT NOT NULL COLLATE NOCASE,created_at TEXT NOT NULL,PRIMARY KEY(work_item_id,tag));
@@ -128,5 +94,4 @@ CREATE TABLE IF NOT EXISTS decomposition_proposals(id TEXT PRIMARY KEY, work_ite
 CREATE TABLE IF NOT EXISTS activity_events(id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), actor_type TEXT NOT NULL, actor_id TEXT, event_type TEXT NOT NULL, object_type TEXT NOT NULL, object_id TEXT NOT NULL, source TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS activity_project_time ON activity_events(project_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS idempotency_records(scope TEXT NOT NULL, request_id TEXT NOT NULL, response_json TEXT NOT NULL, status_code INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(scope,request_id));
-CREATE TABLE IF NOT EXISTS webhook_deliveries(provider TEXT NOT NULL, delivery_id TEXT NOT NULL, received_at TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(provider,delivery_id));
 `

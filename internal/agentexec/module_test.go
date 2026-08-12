@@ -2,12 +2,12 @@ package agentexec
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/projectboard/projectboard/internal/projectrepo"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
@@ -15,14 +15,6 @@ import (
 type fakeRunner struct {
 	results chan Result
 	calls   chan Invocation
-}
-
-func TestCloneArgsUseRemoteDefaultBranch(t *testing.T) {
-	args := cloneArgs("https://github.com/acme/repo.git", `C:\work\PB-1`)
-	want := []string{"clone", "https://github.com/acme/repo.git", `C:\work\PB-1`}
-	if strings.Join(args, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("clone args = %#v, want %#v", args, want)
-	}
 }
 
 func TestExecArgsAllowTaskAgentToCommit(t *testing.T) {
@@ -44,6 +36,117 @@ func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
 	return <-f.results, nil
 }
 
+func TestAgentTagRulesRejectBeforeAcceptAndReevaluateEveryClaim(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	projectPath := filepath.Join(dir, "source")
+	if _, err = projectrepo.Prepare(t.Context(), projectPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", projectPath, stamp, stamp)
+	_, _ = db.DB.Exec("INSERT INTO agents(id,name,purpose,accept_tags_json,reject_tags_json,created_at) VALUES('a','Frontend','UI','[\"frontend\"]','[\"blocked\"]',?)", stamp)
+	queue := workqueue.New(db)
+	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Tagged", IsAgentTask: true, Tags: []string{"frontend", "blocked"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := New(db, queue, Options{DataDir: dir})
+	claim, err := module.claim()
+	if err != nil || claim != nil {
+		t.Fatalf("rejected task was claimed: claim=%+v err=%v", claim, err)
+	}
+	item, err = queue.Update(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, item.ID, workqueue.UpdateInput{ExpectedVersion: item.Version, Configure: true, IsAgentTask: true, Tags: []string{"frontend"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err = module.claim()
+	if err != nil || claim == nil || claim.AgentID != "a" {
+		t.Fatalf("accepted task was not claimed: claim=%+v err=%v", claim, err)
+	}
+}
+
+func TestCompletedStandardTaskCanBeClaimedForMerge(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	projectPath := filepath.Join(dir, "source")
+	if _, err = projectrepo.Prepare(t.Context(), projectPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", projectPath, stamp, stamp)
+	_, _ = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp)
+	queue := workqueue.New(db)
+	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Merge me", IsAgentTask: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec("UPDATE work_items SET stage='completed',agent_phase='merge',agent_state='queued',completed_at=? WHERE id=?", stamp, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := New(db, queue, Options{DataDir: dir}).claim()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim == nil || claim.ItemID != item.ID || claim.Phase != "merge" || claim.Workspace != projectPath {
+		t.Fatalf("merge claim = %+v", claim)
+	}
+}
+
+func TestStandardCompletionEntersCompletedStageAndQueuesSeparateMerge(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	projectPath := filepath.Join(dir, "source")
+	if _, err = projectrepo.Prepare(t.Context(), projectPath); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", projectPath, stamp, stamp)
+	_, _ = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp)
+	queue := workqueue.New(db)
+	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Complete then merge", IsAgentTask: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := New(db, queue, Options{DataDir: dir})
+	workClaim, err := module.claim()
+	if err != nil || workClaim == nil {
+		t.Fatalf("work claim = %+v, err = %v", workClaim, err)
+	}
+	if err = module.prepare(t.Context(), workClaim); err != nil {
+		t.Fatal(err)
+	}
+	result := Result{ThreadID: "thread-1", Status: "completed", Message: "Ready"}
+	module.recordResult(workClaim, result, result.Status, nil)
+	module.finish(workClaim, result)
+	item, err = queue.Get(t.Context(), item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Stage != "completed" || item.AgentPhase != "merge" || item.AgentState != "queued" || item.CompletedAt == nil {
+		t.Fatalf("completed item = %+v", item)
+	}
+	mergeClaim, err := module.claim()
+	if err != nil || mergeClaim == nil {
+		t.Fatalf("merge claim = %+v, err = %v", mergeClaim, err)
+	}
+	if mergeClaim.Phase != "merge" || mergeClaim.ThreadID != "thread-1" || mergeClaim.Workspace != projectPath {
+		t.Fatalf("separate merge claim = %+v", mergeClaim)
+	}
+}
+
 func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "test.db"))
@@ -52,7 +155,11 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project','',?,?)", stamp, stamp)
+	projectPath := filepath.Join(dir, "source")
+	if _, err = projectrepo.Prepare(t.Context(), projectPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", projectPath, stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +170,6 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	queue := workqueue.New(db)
 	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Plan me", IsAgentTask: true, PauseAfterPlan: true})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.MkdirAll(filepath.Join(dir, "workspaces", "pb-1", ".git"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{results: make(chan Result, 2), calls: make(chan Invocation, 2)}
@@ -81,14 +185,8 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 		if !call.PlanOnly {
 			t.Fatal("first turn was not plan-only")
 		}
-		if !strings.Contains(call.Prompt, "Development branch: main") {
-			t.Fatalf("prompt does not identify the development branch: %s", call.Prompt)
-		}
-		if !strings.Contains(call.Prompt, "merge the work branch back into the development branch") {
-			t.Fatalf("prompt does not explain the default branch workflow: %s", call.Prompt)
-		}
-		if !strings.Contains(call.Prompt, "explicit instruction instead") {
-			t.Fatalf("prompt does not give explicit task instructions precedence: %s", call.Prompt)
+		if !strings.Contains(call.Prompt, "Target branch: main") || !strings.Contains(call.Prompt, "Workflow: standard") {
+			t.Fatalf("prompt does not identify the local workflow: %s", call.Prompt)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent did not receive task")
@@ -130,8 +228,8 @@ func TestWorkspacePreparationFailureReleasesAgentCapacity(t *testing.T) {
 	}
 	defer db.Close()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	missingRepository := "file:///" + filepath.ToSlash(filepath.Join(dir, "missing.git"))
-	if _, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,repository_url,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", missingRepository, stamp, stamp); err != nil {
+	missingRepository := filepath.Join(dir, "missing")
+	if _, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project',?,?,?)", missingRepository, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp); err != nil {

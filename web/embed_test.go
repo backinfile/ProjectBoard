@@ -221,11 +221,15 @@ func TestLocalAgentWorkflowIsEmbedded(t *testing.T) {
 		"local_codex_cli",
 		"maxConcurrentTasks",
 		"turnTimeoutMinutes",
+		"acceptTags",
+		"rejectTags",
 		"isAgentTask",
 		"pauseAfterPlan",
-		"pauseAfterCompletion",
-		"resumeAgent",
-		"continueAgent",
+		"pauseBeforeCompletion",
+		"workflowType",
+		"simple_conversation",
+		"confirm_merge",
+		"confirm_close",
 		"['created','in_progress','completed','closed']",
 	} {
 		if !strings.Contains(source, marker) {
