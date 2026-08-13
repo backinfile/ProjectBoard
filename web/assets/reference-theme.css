@@ -16,6 +16,7 @@ FORM: Reference-led Operate redesign, pinned to the local ScriptBoard interface 
   --line-soft: #e8eaf0;
   --signal: #2563eb;
   --signal-ink: #fff;
+  --signal-soft: #e9edfb;
   --danger: #b84646;
   --health: #2f8065;
   --muted: #747986;
@@ -1305,22 +1306,213 @@ body {
 .chat-composer {
   grid-template-columns: minmax(0,1fr) 42px auto;
   padding-block: 10px;
+/* Product identity and workspace switcher */
+.mast {
+  display: flex;
   align-items: center;
+  gap: 12px;
+  padding-inline: 16px 12px;
 }
-.chat-composer .composer-main { padding: 7px 11px 6px; border: 1px solid #d7dce5; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(35,42,57,.05); }
-.chat-composer textarea { min-height: 30px; padding: 3px 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
-.chat-composer textarea:focus { border: 0; box-shadow: none; outline: none; }
-.composer-hint { display: block; color: #959ba7; font-size: 8px; }
-.composer-send { min-height: 42px; }
 
-.project-sync-stamp { margin-left: auto; padding-left: 20px; border-left: 1px solid #dde1e8; }
-.project-sync-stamp span,.project-sync-stamp strong { display: block; }
-.project-sync-stamp span { color: #858b97; font-size: 9px; }
-.project-sync-stamp strong { margin-top: 4px; font-size: 11px; }
+.product-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 
-@media (max-width: 760px) {
-  .config-grid,.mode-grid { grid-template-columns: 1fr; }
-  .project-sync-stamp { width: 100%; margin: 8px 0 0; padding: 12px 0 0; border-left: 0; border-top: 1px solid #dde1e8; }
+.product-brand-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  line-height: 1.1;
+}
+
+.product-brand-copy strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: -.025em;
+}
+
+.product-brand-copy small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.project-switch {
+  grid-template-columns: 34px minmax(0, 1fr) 24px;
+  min-height: 66px;
+  margin: 0 0 14px;
+  padding: 9px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 5px 18px rgba(23, 25, 31, .045);
+  text-align: left;
+}
+
+.project-switch:hover {
+  border-color: var(--line-strong);
+  background: var(--subtle);
+  box-shadow: 0 7px 22px rgba(23, 25, 31, .07);
+}
+
+.project-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--signal) 54%, transparent);
+  outline-offset: 2px;
+}
+
+.project-switch-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.project-switch-copy small,
+.project-switch-copy strong,
+.project-switch-copy > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-switch-copy small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.project-switch-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.project-switch-copy > span {
+  color: var(--muted);
+  font: 8px/1.25 var(--mono);
+}
+
+.project-switch-action {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.project-switch-action .icon {
+  width: 13px;
+  height: 13px;
+  transform: rotate(90deg);
+}
+
+/* Notifications are read-only rows; navigation is an explicit action. */
+.notification-row {
+  grid-template-columns: 34px minmax(0, 1fr) 8px auto;
+  cursor: default;
+}
+
+.notification-row:hover {
+  background: transparent;
+}
+
+.notification-copy {
+  min-width: 0;
+}
+
+.notification-unread {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+}
+
+.notification-task-link {
+  min-width: 104px;
+  justify-content: center;
+}
+
+.notification-task-link .icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* On task detail, only the conversation stream owns vertical scrolling. */
+@media (min-width: 921px) {
+  .workspace:has(.task-detail-page-head) {
+    height: 100svh;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .task-detail-page-head {
+    flex: 0 0 auto;
+  }
+
+  .task-detail-page-content {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 0;
+  }
+
+  .task-detail-page-content .task-detail-grid {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .task-detail-page-content .task-conversation {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .task-detail-page-content .task-thread {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: #c4c9d2 transparent;
+  }
+
+  .task-detail-page-content .task-thread::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .task-detail-page-content .task-thread::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: #c4c9d2;
+    background-clip: padding-box;
+  }
+
+  .task-detail-page-content .task-composer {
+    position: static;
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .product-brand-copy small {
+    display: none;
+  }
+
+  .notification-row {
+    grid-template-columns: 30px minmax(0, 1fr) 7px;
+    align-items: start;
+  }
+
+  .notification-task-link {
+    grid-column: 2 / -1;
+    width: max-content;
+    min-width: 0;
+    margin-top: 4px;
+  }
 }
 
 /* Queue relationships, messages, settings hub, and conversation workspace */
@@ -3860,6 +4052,570 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   grid-template-columns: minmax(0, 1fr) 42px auto;
 }
 
+/* Variant A task workflow alignment */
+.task-detail-shell {
+  min-height: calc(100svh - 54px);
+  background: var(--canvas);
+}
+
+.task-detail-header {
+  padding: 18px 32px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.task-detail-header .back-link {
+  margin-bottom: 16px;
+}
+
+.task-detail-kicker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-soft);
+  font: 10px/1.4 var(--mono);
+}
+
+.task-detail-kicker > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 4px var(--signal-soft);
+}
+
+.task-detail-title-row {
+  margin: 12px 0 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 28px;
+}
+
+.task-detail-title-row > div:first-child {
+  min-width: 0;
+}
+
+.task-detail-title-row h1 {
+  max-width: 820px;
+  margin: 0;
+  font: 760 clamp(28px, 3vw, 39px)/1.08 var(--display);
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+
+.task-detail-title-row p {
+  margin: 9px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.task-detail-actions {
+  margin-left: auto;
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+.task-workflow-scroll {
+  margin: 0 -32px;
+  padding: 12px 32px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.task-workflow-track {
+  min-width: 660px;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+}
+
+.task-workflow-step {
+  position: relative;
+  min-height: 49px;
+  padding: 0 12px 11px 0;
+  border-top: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+
+.task-workflow-step:last-child {
+  border-top-color: transparent;
+}
+
+.task-workflow-node {
+  position: absolute;
+  top: -5px;
+  left: 0;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.task-workflow-step strong {
+  display: block;
+  margin-top: 13px;
+  font-size: 11px;
+}
+
+.task-workflow-step.done {
+  border-top-color: var(--health);
+  color: var(--health);
+}
+
+.task-workflow-step.done .task-workflow-node {
+  border-color: var(--health);
+  background: var(--health);
+}
+
+.task-workflow-step.active {
+  border-top-color: var(--signal);
+  color: var(--signal);
+}
+
+.task-workflow-step.active .task-workflow-node {
+  border-color: var(--signal);
+  background: var(--signal);
+  box-shadow: 0 0 0 4px var(--signal-soft);
+}
+
+.task-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  align-items: stretch;
+}
+
+.task-conversation {
+  min-width: 0;
+  min-height: calc(100svh - 300px);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+}
+
+.task-thread {
+  flex: 1;
+  padding: 24px 28px 156px;
+}
+
+.task-description-entry {
+  max-width: 820px;
+  margin-bottom: 24px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 11px;
+}
+
+.task-description-entry > .entry-avatar {
+  position: static;
+  inset: auto;
+}
+
+.task-description-entry > div {
+  padding: 12px 14px;
+  border-radius: 3px 12px 12px 12px;
+  background: var(--subtle);
+}
+
+.task-description-entry strong {
+  font-size: 12px;
+}
+
+.task-description-entry p {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.task-timeline {
+  max-width: 820px;
+}
+
+.task-timeline .chat-message {
+  margin-bottom: 22px;
+}
+
+.task-timeline .chat-system-event {
+  margin: 26px 0;
+  padding: 11px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  justify-content: flex-start;
+}
+
+.task-composer {
+  position: sticky;
+  z-index: 5;
+  bottom: 0;
+  margin-top: -126px;
+  padding: 14px 28px 20px;
+  background: linear-gradient(0deg, var(--surface) 72%, rgba(255,255,255,0));
+}
+
+.task-composer-box {
+  max-width: 900px;
+  margin: 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 16px 36px rgba(34,40,54,.12);
+  overflow: hidden;
+}
+
+.task-composer-box:focus-within {
+  border-color: var(--signal);
+  box-shadow: 0 16px 36px rgba(34,40,54,.12), 0 0 0 3px var(--signal-soft);
+}
+
+.task-composer textarea {
+  width: 100%;
+  min-height: 70px;
+  max-height: 180px;
+  padding: 15px 16px 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: 0;
+  resize: vertical;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.task-composer textarea:focus {
+  border: 0;
+  box-shadow: none;
+  outline: 0;
+}
+
+.task-composer-tools {
+  min-height: 44px;
+  padding: 5px 7px 7px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-composer-tools > span {
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.tool-button,
+.task-composer-send {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.tool-button {
+  background: transparent;
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.tool-button:hover {
+  background: var(--subtle);
+  color: var(--ink);
+}
+
+.tool-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.task-composer-send {
+  margin-left: auto;
+  background: var(--signal);
+  color: #fff;
+}
+
+.task-inspector {
+  padding: 22px;
+  border-left: 1px solid var(--line);
+  background: var(--subtle);
+}
+
+.task-inspector h2 {
+  margin: 0 0 16px;
+  font-size: 14px;
+}
+
+.task-inspector dl {
+  margin: 0;
+}
+
+.task-inspector dl > div {
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 95px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.task-inspector dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.task-inspector dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.task-inspector section {
+  margin-top: 24px;
+}
+
+.task-inspector h3 {
+  margin: 0 0 9px;
+  font-size: 12px;
+}
+
+.task-inspector ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-inspector li {
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 7px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.task-inspector li .icon {
+  width: 14px;
+  color: var(--health);
+}
+
+.task-inspector-actions {
+  margin-top: 24px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.drawer.task-workflow-drawer {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.task-workflow-drawer .drawer-head {
+  position: static;
+  min-height: 70px;
+  margin: 0;
+  padding: 0 22px;
+  flex: none;
+}
+
+.task-workflow-drawer .drawer-head h2 {
+  font-size: 20px;
+}
+
+.task-workflow-drawer .drawer-head p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.task-config-form,
+.stage-change-form {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.task-drawer-body {
+  min-height: 0;
+  padding: 24px 22px;
+  overflow: auto;
+}
+
+.task-config-section {
+  margin-bottom: 28px;
+}
+
+.task-config-section h3 {
+  margin: 0 0 13px;
+  font-size: 13px;
+}
+
+.task-config-section .field {
+  margin-bottom: 13px;
+}
+
+.task-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 13px;
+}
+
+.task-section-note {
+  margin: -5px 0 13px;
+  color: var(--ink-soft);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.task-inherit-note,
+.task-stage-impact {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--signal-soft);
+  color: var(--signal-ink);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.task-drawer-footer {
+  min-height: 68px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--line);
+  background: rgba(255,255,255,.98);
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.stage-change-form .stage-change-grid {
+  grid-template-columns: 1fr 28px 1fr;
+  padding: 0 0 22px;
+  border: 0;
+  background: transparent;
+}
+
+.stage-change-form .stage-change-grid > div,
+.stage-change-form .stage-change-grid > label {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+.stage-change-form .stage-change-grid > label {
+  border-color: var(--signal);
+  background: var(--signal-soft);
+}
+
+.stage-change-form .stage-change-grid > i {
+  color: var(--signal);
+  transform: none;
+}
+
+.stage-evidence-list {
+  border-top: 1px solid var(--line);
+}
+
+.stage-evidence-list > div {
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.stage-evidence-list .icon {
+  color: var(--line-strong);
+}
+
+.stage-evidence-list > .complete .icon {
+  color: var(--health);
+}
+
+@media (max-width: 920px) {
+  .task-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .task-inspector {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .task-detail-header {
+    padding: 20px 16px 0;
+  }
+
+  .task-detail-title-row {
+    display: block;
+  }
+
+  .task-detail-title-row h1 {
+    font-size: 27px;
+  }
+
+  .task-detail-actions {
+    margin-top: 16px;
+  }
+
+  .task-detail-actions .button {
+    flex: 1;
+  }
+
+  .task-workflow-scroll {
+    margin: 0 -16px;
+    padding: 12px 16px 0;
+  }
+
+  .task-workflow-track {
+    grid-template-columns: repeat(6, 110px);
+  }
+
+  .task-thread,
+  .task-composer {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .task-composer-tools > span {
+    display: none;
+  }
+
+  .task-config-grid,
+  .stage-change-form .stage-change-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-change-form .stage-change-grid > i {
+    transform: rotate(90deg);
+  }
+
+  .task-drawer-body,
+  .task-drawer-footer,
+  .task-workflow-drawer .drawer-head {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}
+
 @media (max-width: 620px) {
   .project-settings-tabs {
     gap: 20px;
@@ -5722,4 +6478,1097 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   .managed-project-git > header { grid-template-columns: 42px minmax(0, 1fr); }
   .managed-project-git > header > .badge { grid-column: 2; justify-self: start; }
   .managed-project-git > .button { width: 100%; }
+/* Full Variant A workflow surface alignment */
+.mast,
+.rail {
+  width: 220px;
+}
+
+.mast {
+  height: 66px;
+  padding: 0 22px;
+}
+
+.mast .brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.rail {
+  inset-block-start: 66px;
+  padding: 8px 14px 18px;
+}
+
+.workspace {
+  margin-left: 220px;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .rail-primary [data-page="members"],
+.workspace-grid:has(.workflow-context-chrome) .rail-primary [data-page="agents"],
+.workspace-grid:has(.workflow-context-chrome) .rail-bottom {
+  display: none;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .project-switch {
+  grid-template-columns: 34px minmax(0, 1fr);
+  margin-bottom: 22px;
+  border-color: var(--line);
+  border-radius: 10px;
+  background: var(--subtle);
+}
+
+.workspace-grid:has(.workflow-context-chrome) .project-switch > .icon {
+  display: none;
+}
+
+.shell:has(.workflow-context-chrome) .mast-actions {
+  display: none;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .rail-foot {
+  margin-top: auto;
+}
+
+.workspace-grid:has(.workflow-context-chrome) .nav button.active::before {
+  display: none;
+}
+
+.workflow-context-chrome {
+  position: relative;
+  z-index: 9;
+}
+
+.workflow-context-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  height: 56px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(238, 240, 244, .92);
+  backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+}
+
+.workflow-context-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.workflow-context-crumb button {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.workflow-context-crumb button:hover {
+  color: var(--ink);
+}
+
+.workflow-context-crumb strong {
+  color: var(--ink);
+}
+
+.workflow-context-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workflow-context-actions .icon-button,
+.workflow-context-actions .button {
+  min-height: 36px;
+}
+
+.workflow-context-actions .icon-button {
+  width: 36px;
+}
+
+.workflow-context-tabs {
+  height: 48px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--raised);
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.workflow-context-tabs button {
+  position: relative;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workflow-context-tabs button.active {
+  color: var(--signal);
+  font-weight: 700;
+}
+
+.workflow-context-tabs button.active::after {
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  background: var(--signal);
+  content: "";
+}
+
+.task-detail-shell {
+  min-height: calc(100svh - 104px);
+  background: var(--canvas);
+}
+
+.task-detail-header {
+  padding: 26px 32px 0;
+  background: var(--raised);
+}
+
+.task-detail-title-row {
+  margin: 11px 0 24px;
+}
+
+.task-detail-title-row h1 {
+  max-width: 760px;
+  font-size: clamp(25px, 3vw, 39px);
+  line-height: 1.1;
+}
+
+.task-workflow-scroll {
+  margin: 0 -32px;
+  padding: 0 32px;
+  overflow: visible;
+}
+
+.task-workflow-track {
+  min-width: 0;
+}
+
+.task-workflow-step {
+  min-height: 48px;
+  padding: 0 12px 11px 0;
+  border-top: 0;
+}
+
+.task-workflow-step::before {
+  content: none;
+}
+
+.task-workflow-step::after {
+  position: absolute;
+  z-index: 0;
+  top: 5px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--line);
+  content: "";
+}
+
+.task-workflow-step:last-child::after {
+  background: transparent;
+}
+
+.task-workflow-node {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--raised);
+}
+
+.task-workflow-step.done .task-workflow-node {
+  border-color: var(--health);
+  background: var(--health);
+}
+
+.task-workflow-step.done::after {
+  background: var(--health);
+}
+
+.task-workflow-step.active .task-workflow-node {
+  border-color: var(--signal);
+  background: var(--raised);
+  box-shadow: 0 0 0 4px var(--signal-soft);
+}
+
+.task-workflow-step.active::after {
+  background: var(--signal);
+}
+
+.task-workflow-step strong {
+  margin-top: 17px;
+}
+
+.task-description-entry {
+  margin-bottom: 22px;
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.task-description-entry > .entry-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: #eceef2;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.task-description-entry > div {
+  padding: 0;
+  background: transparent;
+}
+
+.task-description-entry header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.task-description-entry header strong {
+  font-size: 12px;
+}
+
+.task-description-entry header span {
+  color: var(--muted);
+  font: 9px/1 var(--mono);
+}
+
+.task-description-entry p {
+  margin-top: 7px;
+  padding: 12px 14px;
+  border-radius: 3px 12px 12px 12px;
+  background: #f7f8fa;
+}
+
+.task-conversation {
+  background: var(--raised);
+}
+
+.task-composer {
+  background: linear-gradient(0deg, var(--raised) 72%, rgba(255,255,255,0));
+}
+
+.task-inspector {
+  background: #f7f8fa;
+}
+
+.task-inspector dl > div {
+  grid-template-columns: 95px 1fr;
+}
+
+.project-settings-shell {
+  min-height: calc(100svh - 104px);
+  padding: 36px 34px 80px;
+  background: var(--canvas);
+}
+
+.project-settings-head {
+  margin: 0;
+  padding: 0 0 24px;
+  border-bottom: 1px solid var(--line-strong);
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.project-settings-head > div {
+  min-width: 0;
+}
+
+.project-settings-head h1 {
+  margin: 0;
+  font: 760 clamp(30px, 3vw, 36px)/1.08 var(--display);
+  letter-spacing: -.035em;
+}
+
+.project-settings-head p {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.project-settings-head .button {
+  margin-left: auto;
+}
+
+.project-settings-shell > .content.project-settings-page {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}
+
+.project-settings-tabs {
+  gap: 22px;
+  padding-top: 46px;
+}
+
+.project-settings-tabs button {
+  padding: 0 2px 15px;
+  font-size: 11px;
+}
+
+.project-settings-tabs button::after {
+  background: var(--signal);
+}
+
+.project-settings-tabs button.active {
+  color: var(--signal);
+}
+
+.project-settings-panel {
+  padding: 30px 0 0;
+}
+
+.project-policy-form,
+.project-repository-panel,
+.project-entity-panel {
+  gap: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.project-policy-form > section,
+.project-repository-panel > *,
+.project-entity-panel > * {
+  background: transparent;
+}
+
+.project-policy-form > section {
+  padding: 26px 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.project-policy-form > section:first-child {
+  padding-top: 0;
+}
+
+.project-policy-form > section > header,
+.project-entity-panel > header {
+  margin-bottom: 16px;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 26px;
+}
+
+.project-policy-form h2,
+.project-entity-panel h2 {
+  font-size: 17px;
+}
+
+.project-policy-form > .button {
+  display: none;
+}
+
+.project-policy-row {
+  min-height: 88px;
+}
+
+.project-policy-row strong {
+  font-size: 12px;
+}
+
+.project-policy-row small {
+  max-width: 76ch;
+  font-size: 10px;
+}
+
+.project-setting-action {
+  min-height: 82px;
+}
+
+.project-repository-panel > .project-setting-action,
+.project-repository-panel > .simple-setting-rows,
+.project-repository-panel > .project-panel-actions,
+.project-entity-panel > header,
+.project-entity-row {
+  padding-right: 0;
+  padding-left: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.project-entity-panel > header {
+  padding-top: 0;
+  padding-bottom: 22px;
+}
+
+.project-prompt-form {
+  min-height: calc(100svh - 76px);
+}
+
+.project-action-form {
+  min-height: calc(100svh - 76px);
+}
+
+.project-prompt-items {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.project-prompt-item {
+  min-height: 62px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 10px;
+}
+
+.project-prompt-item > span {
+  color: var(--signal);
+  font: 650 10px/1 var(--mono);
+}
+
+.project-prompt-item p,
+.project-prompt-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.project-prompt-empty {
+  padding: 20px 0;
+  color: var(--ink-soft);
+}
+
+.project-prompt-add {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.project-prompt-add textarea {
+  min-height: 96px;
+}
+
+@media (max-width: 920px) {
+  .shell:has(.workflow-context-chrome) {
+    display: grid;
+    grid-template-rows: 58px 1fr;
+  }
+
+  .shell:has(.workflow-context-chrome) .mast {
+    position: sticky;
+    top: 0;
+    z-index: 32;
+    width: auto;
+    height: 58px;
+    padding: 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell:has(.workflow-context-chrome) .mast .brand span:last-child {
+    display: inline;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail {
+    position: fixed;
+    z-index: 33;
+    top: 0;
+    right: 14px;
+    bottom: auto;
+    left: 154px;
+    width: auto;
+    height: 58px;
+    padding: 9px 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .shell:has(.workflow-context-chrome) .project-switch,
+  .shell:has(.workflow-context-chrome) .rail-foot {
+    display: none;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary button {
+    width: 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .shell:has(.workflow-context-chrome) .rail-primary button span {
+    display: none;
+  }
+
+  .shell:has(.workflow-context-chrome) .workspace {
+    margin-left: 0;
+    min-height: calc(100svh - 58px);
+  }
+
+  .workflow-context-topbar {
+    top: 58px;
+  }
+
+  .workflow-context-tabs {
+    position: sticky;
+    top: 114px;
+    z-index: 8;
+  }
+}
+
+@media (max-width: 640px) {
+  .workflow-context-topbar {
+    padding: 0 14px;
+  }
+
+  .workflow-context-crumb > span {
+    display: none;
+  }
+
+  .workflow-context-tabs {
+    padding: 0 10px;
+  }
+
+  .workflow-context-actions .button {
+    min-width: 36px;
+    padding-inline: 8px;
+    font-size: 10px;
+  }
+
+  .task-detail-header {
+    padding: 20px 16px 0;
+  }
+
+  .task-workflow-scroll {
+    max-width: calc(100% + 32px);
+    margin: 0 -16px;
+    padding: 8px 16px 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .task-workflow-track {
+    grid-template-columns: repeat(6, 110px);
+    min-width: 660px;
+  }
+
+  .project-settings-shell {
+    padding: 28px 16px 72px;
+  }
+
+  .project-settings-head {
+    display: block;
+  }
+
+  .project-settings-head .button {
+    margin: 18px 0 0;
+  }
+
+  .project-policy-form > section > header,
+  .project-entity-panel > header {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .project-prompt-add {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Unified task configuration and settings surfaces */
+.task-config-form { gap: 16px; }
+.config-section {
+  padding: 18px;
+  border: 1px solid #dfe3ea;
+  border-radius: 14px;
+  background: linear-gradient(145deg,#fff,#f8f9fb);
+}
+.config-section > header { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; }
+.config-section > header > .icon { width: 30px; height: 30px; padding: 7px; border-radius: 8px; background: #edf2ff; color: var(--signal); }
+.config-section h3 { margin: 0; font-size: 13px; }
+.config-section header p { margin: 3px 0 0; color: #7c8290; font-size: 10px; line-height: 1.45; }
+.config-grid,.mode-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.mode-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.follower-chips { min-height: 42px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.follower-chips > span { padding: 5px 6px; border: 1px solid #dce1e9; border-radius: 999px; background: #fff; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; }
+.follower-chips > small { color: #858b97; }
+.follower-chips button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: #f1f3f6; display: grid; place-items: center; cursor: pointer; }
+.follower-chips button .icon { width: 12px; }
+.follower-picker { margin: 8px 0; }
+.follower-picker select { width: 100%; }
+.config-save { width: 100%; min-height: 44px; }
+
+.chat-composer {
+  grid-template-columns: minmax(0,1fr) 42px auto;
+  padding-block: 10px;
+  align-items: center;
+}
+.chat-composer .composer-main { padding: 7px 11px 6px; border: 1px solid #d7dce5; border-radius: 12px; background: #fff; box-shadow: 0 8px 24px rgba(35,42,57,.05); }
+.chat-composer textarea { min-height: 30px; padding: 3px 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
+.chat-composer textarea:focus { border: 0; box-shadow: none; outline: none; }
+.composer-hint { display: block; color: #959ba7; font-size: 8px; }
+.composer-send { min-height: 42px; }
+
+.project-sync-stamp { margin-left: auto; padding-left: 20px; border-left: 1px solid #dde1e8; }
+.project-sync-stamp span,.project-sync-stamp strong { display: block; }
+.project-sync-stamp span { color: #858b97; font-size: 9px; }
+.project-sync-stamp strong { margin-top: 4px; font-size: 11px; }
+
+@media (max-width: 760px) {
+  .config-grid,.mode-grid { grid-template-columns: 1fr; }
+  .project-sync-stamp { width: 100%; margin: 8px 0 0; padding: 12px 0 0; border-left: 0; border-top: 1px solid #dde1e8; }
+}
+
+/* Keep queue and other non-workflow pages inside the mobile viewport. */
+@media (max-width: 920px) {
+  .shell {
+    display: grid;
+    grid-template-rows: 58px 1fr;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .shell .mast {
+    position: sticky;
+    top: 0;
+    z-index: 32;
+    width: 100%;
+    height: 58px;
+    padding: 0 14px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell .workspace-grid,
+  .shell .workspace {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .shell .rail {
+    position: sticky;
+    inset: auto;
+    top: 58px;
+    z-index: 20;
+    width: 100%;
+    height: auto;
+    padding: 8px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell .workspace {
+    margin-left: 0;
+    min-height: calc(100svh - 116px);
+  }
+}
+
+/* Task details and project settings use the shared project page architecture. */
+.task-detail-page-head .task-detail-back {
+  margin: 0 0 18px;
+  padding: 0;
+}
+
+.task-detail-page-head .page-title {
+  align-items: flex-start;
+}
+
+.task-detail-page-head .task-workflow-scroll {
+  width: 100%;
+  max-width: 100%;
+  margin: 28px 0 -26px;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.task-detail-page-content {
+  padding-top: 28px;
+}
+
+.task-detail-page-content .task-detail-grid {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.task-detail-page-content .task-conversation {
+  background: transparent;
+}
+
+.task-detail-page-content .task-thread {
+  padding-left: 0;
+}
+
+.task-detail-page-content .task-composer {
+  padding-left: 0;
+  background: linear-gradient(0deg, var(--canvas) 72%, rgba(244,245,247,0));
+}
+
+.project-settings-page .project-settings-tabs {
+  gap: 28px;
+  padding-top: 0;
+}
+
+.project-settings-page .project-settings-panel {
+  padding-top: 30px;
+}
+
+@media (max-width: 620px) {
+  .task-detail-page-head .page-actions {
+    width: 100%;
+  }
+
+  .task-detail-page-head .page-actions .button {
+    flex: 1 1 0;
+  }
+
+  .task-detail-page-head .task-workflow-scroll {
+    max-width: calc(100% + 30px);
+    margin: 22px -15px -16px;
+    padding: 0 15px;
+  }
+
+  .task-detail-page-content {
+    padding-top: 18px;
+  }
+
+  .task-detail-page-content .task-thread,
+  .task-detail-page-content .task-composer {
+    padding-right: 0;
+    padding-left: 0;
+  }
+}
+
+/* Unified page architecture for every project and administration tab. */
+.workspace {
+  --app-page-gutter: clamp(28px, 4.5vw, 56px);
+}
+
+.app-page-head {
+  margin: 0;
+  padding: 40px var(--app-page-gutter) 24px;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+}
+
+.app-page-head .page-title {
+  align-items: flex-start;
+  gap: 28px;
+}
+
+.app-page-head .page-title > div:first-child {
+  min-width: 0;
+}
+
+.app-page-head .page-title h1 {
+  max-width: 920px;
+  font-size: clamp(32px, 3vw, 42px);
+  line-height: 1.04;
+}
+
+.app-page-head .page-title p {
+  max-width: 72ch;
+  margin-top: 9px;
+}
+
+.app-page-head .page-actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.app-page-tabs {
+  min-height: 52px;
+  padding: 0 var(--app-page-gutter);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: stretch;
+  gap: 24px;
+  overflow-x: auto;
+  background: rgba(255,255,255,.42);
+  scrollbar-width: none;
+}
+
+.app-page-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.app-page-tab {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 52px;
+  padding: 0 1px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.app-page-tab::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--signal);
+  content: "";
+  opacity: 0;
+  transform: scaleX(.4);
+  transition: opacity .16s ease, transform .2s cubic-bezier(.2,.8,.2,1);
+}
+
+.app-page-tab:hover,
+.app-page-tab.active {
+  color: var(--ink);
+}
+
+.app-page-tab.active {
+  font-weight: 700;
+}
+
+.app-page-tab.active::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.app-page-tab > span {
+  margin-left: 5px;
+  color: #969ba5;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.app-page-content {
+  padding: 26px var(--app-page-gutter) 80px;
+}
+
+.app-page-toolbar {
+  min-height: 56px;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.app-page-toolbar .search {
+  flex: 1 1 360px;
+  max-width: none;
+}
+
+.app-list-surface {
+  width: 100%;
+  border-top: 1px solid var(--line);
+}
+
+.queue-page-content {
+  padding-top: 20px;
+}
+
+.queue-page-content .queue-content {
+  padding: 0;
+}
+
+.queue-page-content .queue-group {
+  margin: 0;
+}
+
+.queue-page-content .queue-group + .queue-group {
+  margin-top: 26px;
+}
+
+.queue-page-content .group-label {
+  padding-inline: 0;
+}
+
+.queue-count {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.table-row {
+  min-height: 66px;
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.notification-page {
+  padding-top: 26px;
+}
+
+.notification-summary {
+  min-height: 44px;
+  padding: 0 8px 14px;
+  align-items: center;
+}
+
+.notification-summary strong {
+  font: 700 18px var(--display);
+  letter-spacing: -.02em;
+}
+
+.notification-row {
+  min-height: 72px;
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+.project-settings-page .project-settings-panel {
+  padding: 0 0 72px;
+}
+
+.settings-grid,
+.simple-settings-page,
+.project-settings-page,
+.notification-page {
+  max-width: none;
+  margin: 0;
+}
+
+.management-empty,
+.queue-empty,
+.simple-empty-setting {
+  min-height: 320px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.management-empty p,
+.queue-empty p,
+.simple-empty-setting p {
+  max-width: 54ch;
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 620px) {
+  .workspace {
+    --app-page-gutter: 15px;
+  }
+
+  .app-page-head {
+    padding-top: 26px;
+    padding-bottom: 18px;
+  }
+
+  .app-page-head .page-title {
+    display: block;
+  }
+
+  .app-page-head .page-title h1 {
+    font-size: 30px;
+  }
+
+  .app-page-head .page-actions {
+    width: 100%;
+    margin: 16px 0 0;
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .app-page-tabs {
+    min-height: 48px;
+    gap: 20px;
+  }
+
+  .app-page-tab {
+    min-height: 48px;
+  }
+
+  .app-page-content {
+    padding-top: 18px;
+    padding-bottom: 60px;
+  }
+
+  .app-page-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .app-page-toolbar .search {
+    flex-basis: 100%;
+  }
+
+  .app-page-toolbar .button {
+    flex: 1 1 auto;
+  }
+
+  .queue-count {
+    width: 100%;
+    margin: 2px 0 0;
+    text-align: right;
+  }
+
+  .management-empty,
+  .queue-empty,
+  .simple-empty-setting {
+    min-height: 240px;
+  }
+}
+
+/* Final interaction ownership overrides (kept last to win legacy layers). */
+.notification-row {
+  grid-template-columns: 34px minmax(0, 1fr) 8px auto;
+}
+
+.notification-row > .notification-task-link {
+  grid-column: 4;
+  min-width: 104px;
+}
+
+@media (min-width: 921px) {
+  .task-detail-page-content.app-page-content {
+    padding-bottom: 0;
+  }
+
+  .task-detail-page-content .task-inspector {
+    height: 100%;
+    min-height: 0;
+    align-self: stretch;
+    border-left: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 620px) {
+  .notification-row {
+    grid-template-columns: 30px minmax(0, 1fr) 7px;
+  }
+
+  .notification-row > .notification-task-link {
+    grid-column: 2 / -1;
+    width: max-content;
+    min-width: 0;
+  }
 }

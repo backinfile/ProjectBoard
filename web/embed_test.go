@@ -99,7 +99,7 @@ func TestTranslationCatalogsStayInSync(t *testing.T) {
 	}
 }
 
-func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
+func TestQueueAndTaskUseSharedPageStructure(t *testing.T) {
 	app, err := Files.ReadFile("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -108,12 +108,12 @@ func TestQueueAndTaskUsePrototypeStructure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"queue-page-head", "queue-tabs", "work-main", "task-page-header", "task-meta-strip", "phase-band", "conversation-stream", "conversation-entry", "task-preview", "child-list"} {
+	for _, marker := range []string{"app-page-head", "app-page-tabs", "app-page-toolbar", "app-page-content", "work-main", "task-workflow-track", "task-conversation", "task-preview", "child-list"} {
 		if !strings.Contains(string(app), marker) {
-			t.Errorf("task UI is missing prototype structure %q", marker)
+			t.Errorf("task UI is missing shared structure %q", marker)
 		}
 		if !strings.Contains(string(css), "."+marker) {
-			t.Errorf("task UI is missing prototype styling for %q", marker)
+			t.Errorf("task UI is missing shared styling for %q", marker)
 		}
 	}
 	if !strings.Contains(string(app), "data-queue-stage") {
@@ -553,6 +553,68 @@ func TestFinalUIOnlyExposesSupportedLocalAgentWorkflow(t *testing.T) {
 	agentManagement := app[agentManagementStart : agentManagementStart+agentManagementEnd]
 	if strings.Contains(agentManagement, "disableForProject") {
 		t.Error("organization Agent toggle is labelled as a project-scoped action")
+	}
+}
+
+func TestTaskWorkflowUsesSharedProjectPageStructure(t *testing.T) {
+	app, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := Files.ReadFile("assets/reference-theme.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	appSource := string(app)
+	cssSource := string(css)
+	for _, marker := range []string{
+		"task-workflow-track",
+		"task-conversation",
+		"task-inspector",
+		"task-composer-box",
+		"task-drawer-body",
+		"task-drawer-footer",
+		"stage-evidence-list",
+		"project-prompt-form",
+		"project-action-form",
+	} {
+		if !strings.Contains(appSource, marker) {
+			t.Errorf("task workflow is missing structure %q", marker)
+		}
+		if !strings.Contains(cssSource, "."+marker) {
+			t.Errorf("task workflow is missing styling for %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`class="page-head task-detail-page-head"`,
+		`class="content task-detail-page-content"`,
+		`header(t('projectSettings')`,
+		`project-settings-page`,
+	} {
+		if !strings.Contains(appSource, marker) {
+			t.Errorf("task workflow is missing shared project page structure %q", marker)
+		}
+	}
+	for _, legacy := range []string{
+		`workflowContextChrome('task'`,
+		`workflowContextChrome('settings'`,
+		`class="task-detail-shell"`,
+		`className='project-settings-shell'`,
+	} {
+		if strings.Contains(appSource, legacy) {
+			t.Errorf("task workflow still renders prototype-only structure %q", legacy)
+		}
+	}
+	for _, copy := range []string{"executionContext", "projectSettingsDescription"} {
+		if !strings.Contains(appSource, copy) {
+			t.Errorf("task workflow is missing required copy %q", copy)
+		}
+	}
+	if strings.Contains(appSource, "$('.context-message')?.remove()") {
+		t.Error("task rendering still removes the task description after rendering")
+	}
+	if strings.Contains(cssSource, ".task-workflow-track { display: none; }") {
+		t.Error("the six-stage workflow must remain reachable on narrow screens")
 	}
 }
 
