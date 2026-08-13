@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/projectboard/projectboard/internal/agentrequest"
 	"github.com/projectboard/projectboard/internal/knowledge"
 	"github.com/projectboard/projectboard/internal/projectrepo"
+	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
 	"github.com/projectboard/projectboard/internal/workqueue"
 )
@@ -27,6 +30,8 @@ type Invocation struct {
 	WorkDir, Prompt, ThreadID string
 	Timeout                   time.Duration
 	PlanOnly                  bool
+	OnOutput                  func([]byte)
+	OnActivity                func()
 }
 type Result struct {
 	ThreadID, Status, Message, Raw, CommandJSON string
@@ -46,16 +51,20 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 	if command == "" {
 		command = "codex"
 	}
-	args := execArgs(in, r.SchemaPath)
+	args, stdin := execInput(in, r.SchemaPath, runtime.GOOS)
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = in.WorkDir
-	cmd.Stdin = strings.NewReader(in.Prompt)
+	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	cmd.Stdout = activityWriter{writer: &stdout, output: in.OnOutput, activity: in.OnActivity}
+	cmd.Stderr = activityWriter{writer: &stderr, activity: in.OnActivity}
+	err := runAgentCommand(cmd)
 	raw := stdout.String()
-	commandJSON, _ := json.Marshal(append([]string{command}, args...))
+	recordedArgs := append([]string(nil), args...)
+	if runtime.GOOS == "windows" && len(recordedArgs) > 0 {
+		recordedArgs[len(recordedArgs)-1] = "<prompt>"
+	}
+	commandJSON, _ := json.Marshal(append([]string{command}, recordedArgs...))
 	result := Result{Raw: raw, CommandJSON: string(commandJSON)}
 	scanner := bufio.NewScanner(strings.NewReader(raw))
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
@@ -97,13 +106,44 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 }
 
 func execArgs(in Invocation, schemaPath string) []string {
-	return []string{"exec", "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, "-"}
+	return execArgsWithPrompt(in, schemaPath, "-")
+}
+
+type activityWriter struct {
+	writer   io.Writer
+	output   func([]byte)
+	activity func()
+}
+
+func (w activityWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		if w.activity != nil {
+			w.activity()
+		}
+		if w.output != nil {
+			w.output(append([]byte(nil), p[:n]...))
+		}
+	}
+	return n, err
+}
+
+func execInput(in Invocation, schemaPath, goos string) ([]string, io.Reader) {
+	if goos == "windows" {
+		return execArgsWithPrompt(in, schemaPath, in.Prompt), nil
+	}
+	return execArgs(in, schemaPath), strings.NewReader(in.Prompt)
+}
+
+func execArgsWithPrompt(in Invocation, schemaPath, promptArg string) []string {
+	return []string{"exec", "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, promptArg}
 }
 
 type Options struct {
 	DataDir      string
 	Runner       Runner
 	PollInterval time.Duration
+	StallTimeout time.Duration
 }
 type Module struct {
 	store     *store.Store
@@ -113,17 +153,26 @@ type Module struct {
 	dataDir   string
 	runner    Runner
 	poll      time.Duration
+	stall     time.Duration
 	wake      chan struct{}
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	mu        sync.Mutex
-	running   map[string]runControl
+	repoMu    sync.Mutex
+	running   map[string]*runControl
 }
 type runControl struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	itemID       string
+	cancel       context.CancelCauseFunc
+	done         chan struct{}
+	lastActivity time.Time
 }
+
+var (
+	errWorkItemBlocked  = errors.New("work item blocked by a member")
+	errExecutionStalled = errors.New("Codex produced no activity before the stall timeout")
+)
 
 func New(database *store.Store, queue *workqueue.Module, requests *agentrequest.Module, knowledgeModule *knowledge.Module, options ...Options) *Module {
 	var option Options
@@ -136,13 +185,16 @@ func New(database *store.Store, queue *workqueue.Module, requests *agentrequest.
 	if option.PollInterval <= 0 {
 		option.PollInterval = 5 * time.Second
 	}
+	if option.StallTimeout <= 0 {
+		option.StallTimeout = 10 * time.Minute
+	}
 	if option.Runner == nil {
 		option.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(option.DataDir, "codex-result-schema.json")}
 	}
-	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, runner: option.Runner, poll: option.PollInterval, wake: make(chan struct{}, 1), running: map[string]runControl{}}
+	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, runner: option.Runner, poll: option.PollInterval, stall: option.StallTimeout, wake: make(chan struct{}, 1), running: map[string]*runControl{}}
 }
 
-const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","failed"]},"message":{"type":"string"},"knowledgeOperations":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"type":{"type":"string","enum":["create","update","move","delete"]},"nodeId":{"type":"string"},"parentId":{"type":"string"},"title":{"type":"string"},"markdown":{"type":"string"},"sortOrder":{"type":"integer"},"fileIds":{"type":"array","items":{"type":"string"}},"expectedVersion":{"type":"integer"}},"required":["type"],"additionalProperties":false}}},"required":["status","message"],"additionalProperties":false}`
+const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","failed"]},"message":{"type":"string"},"knowledgeOperations":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"type":{"type":"string","enum":["create","update","move","delete"]},"nodeId":{"type":"string"},"parentId":{"type":"string"},"title":{"type":"string"},"markdown":{"type":"string"},"sortOrder":{"type":"integer"},"expectedVersion":{"type":"integer"}},"required":["type"],"additionalProperties":false}}},"required":["status","message"],"additionalProperties":false}`
 
 func (m *Module) Start() error {
 	if err := os.MkdirAll(filepath.Join(m.dataDir, "workspaces"), 0o700); err != nil {
@@ -153,8 +205,32 @@ func (m *Module) Start() error {
 			return err
 		}
 	}
+	type interruptedRequest struct{ requestID, itemID string }
+	interrupted := []interruptedRequest{}
+	rows, err := m.store.DB.Query("SELECT id,COALESCE(source_work_item_id,'') FROM agent_requests WHERE status='running'")
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var value interruptedRequest
+		if err = rows.Scan(&value.requestID, &value.itemID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		interrupted = append(interrupted, value)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
 	stamp := now()
-	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status='failed',ended_at=?,error_message='ProjectBoard restarted while Codex was running' WHERE status='running'", stamp)
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status='failed',ended_at=?,error_message='ProjectBoard restarted; a new retry was queued' WHERE status='running'", stamp)
+	for _, value := range interrupted {
+		_, _ = m.requests.Retry(context.Background(), value.requestID, "")
+		if value.itemID != "" {
+			_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state='queued',resume_requested=1,version=version+1,updated_at=? WHERE id=? AND stage<>'closed'", stamp, value.itemID)
+			_ = m.event(&claim{RequestID: value.requestID, ItemID: value.itemID}, "agent_restart_queued", "ProjectBoard restarted; a fresh Agent request was queued automatically")
+		}
+	}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.wg.Add(1)
 	go m.loop()
@@ -166,7 +242,7 @@ func (m *Module) Close() {
 	}
 	m.mu.Lock()
 	for _, control := range m.running {
-		control.cancel()
+		control.cancel(context.Canceled)
 	}
 	m.mu.Unlock()
 	m.wg.Wait()
@@ -182,7 +258,7 @@ func (m *Module) Cancel(requestID string) {
 	control, ok := m.running[requestID]
 	m.mu.Unlock()
 	if ok {
-		control.cancel()
+		control.cancel(context.Canceled)
 	}
 }
 func (m *Module) loop() {
@@ -190,6 +266,7 @@ func (m *Module) loop() {
 	ticker := time.NewTicker(m.poll)
 	defer ticker.Stop()
 	for {
+		m.inspectStalled()
 		m.schedule()
 		select {
 		case <-m.ctx.Done():
@@ -214,8 +291,8 @@ func (m *Module) schedule() {
 		if err != nil || claimed == nil {
 			return
 		}
-		ctx, cancel := context.WithCancel(m.ctx)
-		control := runControl{cancel: cancel, done: make(chan struct{})}
+		ctx, cancel := context.WithCancelCause(m.ctx)
+		control := &runControl{itemID: claimed.ItemID, cancel: cancel, done: make(chan struct{})}
 		m.mu.Lock()
 		m.running[claimed.RequestID] = control
 		m.mu.Unlock()
@@ -234,6 +311,33 @@ func (m *Module) schedule() {
 	}
 }
 
+func (m *Module) inspectStalled() {
+	cutoff := time.Now().Add(-m.stall)
+	m.mu.Lock()
+	for _, control := range m.running {
+		if !control.lastActivity.IsZero() && control.lastActivity.Before(cutoff) {
+			control.cancel(errExecutionStalled)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *Module) noteActivity(requestID string) {
+	m.mu.Lock()
+	if control := m.running[requestID]; control != nil {
+		control.lastActivity = time.Now()
+	}
+	m.mu.Unlock()
+}
+
+func (m *Module) appendOutput(requestID string, chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
+	m.noteActivity(requestID)
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET output_jsonl=output_jsonl||? WHERE id=? AND status='running'", string(chunk), requestID)
+}
+
 func (m *Module) claim() (*claim, error) {
 	var claimed *claim
 	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
@@ -243,6 +347,16 @@ func (m *Module) claim() (*claim, error) {
 			AND (w.id IS NULL OR w.blocked_at IS NULL)
 			AND (SELECT COUNT(*) FROM agent_requests active WHERE active.assigned_agent_id=a.id AND active.status='running')<a.max_concurrent_tasks
 			AND (r.kind NOT IN('task_knowledge','project_knowledge_compaction') OR NOT EXISTS(SELECT 1 FROM agent_requests k WHERE k.project_id=r.project_id AND k.status='running' AND k.kind IN('task_knowledge','project_knowledge_compaction')))
+			AND (r.kind NOT IN('task_plan','task_execution') OR NOT EXISTS (
+				SELECT 1 FROM work_item_tags wt JOIN json_each(a.reject_tags_json) rejected
+				WHERE wt.work_item_id=w.id AND lower(wt.tag)=lower(CAST(rejected.value AS TEXT))))
+			AND (r.kind NOT IN('task_plan','task_execution') OR json_array_length(a.accept_tags_json)=0 OR EXISTS (
+				SELECT 1 FROM work_item_tags wt JOIN json_each(a.accept_tags_json) accepted
+				WHERE wt.work_item_id=w.id AND lower(wt.tag)=lower(CAST(accepted.value AS TEXT))))
+			AND (r.kind NOT IN('task_plan','task_execution') OR (w.workflow_type='standard' AND w.agent_phase<>'merge') OR NOT EXISTS (
+				SELECT 1 FROM agent_requests active JOIN work_items active_work ON active_work.id=active.source_work_item_id
+				WHERE active.project_id=r.project_id AND active.status='running'
+				AND (active_work.workflow_type='simple_conversation' OR active_work.agent_phase='merge')))
 			ORDER BY (CAST((SELECT COUNT(*) FROM agent_requests active WHERE active.assigned_agent_id=a.id AND active.status='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,r.created_at,r.id LIMIT 1`)
 		var value claim
 		var pause int
@@ -291,6 +405,8 @@ func (m *Module) prepare(ctx context.Context, claimed *claim) error {
 		return os.WriteFile(filepath.Join(claimed.Workspace, "PROJECT_KNOWLEDGE.md"), []byte(claimed.KnowledgeSnapshot), 0o400)
 	}
 	if claimed.WorkflowType == "simple_conversation" || claimed.Phase == "merge" {
+		m.repoMu.Lock()
+		defer m.repoMu.Unlock()
 		status, err := projectrepo.Status(ctx, claimed.ProjectPath)
 		if err != nil || status != "" {
 			if err == nil {
@@ -311,7 +427,9 @@ func (m *Module) prepare(ctx context.Context, claimed *claim) error {
 		_, err = m.store.DB.ExecContext(ctx, "UPDATE work_items SET workspace_path=? WHERE id=?", claimed.Workspace, claimed.ItemID)
 		return err
 	}
+	m.repoMu.Lock()
 	workspace, err := projectrepo.EnsureWorktree(ctx, claimed.ProjectPath, claimed.ProjectKey, claimed.ItemNumber, claimed.TargetBranch)
+	m.repoMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -376,8 +494,22 @@ func (m *Module) execute(parent context.Context, claimed *claim) {
 	}
 	prompt := m.prompt(ctx, claimed)
 	_, _ = m.store.DB.Exec("UPDATE agent_requests SET prompt_markdown=? WHERE id=? AND status='running'", prompt, claimed.RequestID)
-	result, err := m.runner.Run(ctx, Invocation{WorkDir: claimed.Workspace, Prompt: prompt, Timeout: time.Duration(claimed.Timeout) * time.Minute, PlanOnly: claimed.PlanOnly})
+	_ = m.event(claimed, "agent_started", "Local Codex execution started")
+	m.noteActivity(claimed.RequestID)
+	result, err := m.runner.Run(ctx, Invocation{
+		WorkDir: claimed.Workspace, Prompt: prompt, Timeout: time.Duration(claimed.Timeout) * time.Minute, PlanOnly: claimed.PlanOnly,
+		OnOutput:   func(chunk []byte) { m.appendOutput(claimed.RequestID, chunk) },
+		OnActivity: func() { m.noteActivity(claimed.RequestID) },
+	})
 	if err != nil {
+		switch context.Cause(parent) {
+		case errWorkItemBlocked:
+			m.interrupt(claimed, result, "Agent execution stopped because the task was blocked", true)
+			return
+		case errExecutionStalled:
+			m.interrupt(claimed, result, fmt.Sprintf("Codex produced no output or activity for %s; execution was stopped automatically", m.stall), false)
+			return
+		}
 		m.fail(claimed, result, err)
 		return
 	}
@@ -393,6 +525,24 @@ func (m *Module) execute(parent context.Context, claimed *claim) {
 		_, _ = m.requests.MaybeScheduleCompaction(context.Background(), claimed.ProjectID)
 		m.Wake()
 	}
+}
+
+func (m *Module) interrupt(claimed *claim, result Result, message string, requeue bool) {
+	if !m.active(claimed.RequestID) {
+		return
+	}
+	m.record(claimed, result, "failed", errors.New(message))
+	if claimed.ItemID == "" {
+		return
+	}
+	state := "paused_failure"
+	if requeue {
+		state = "queued"
+		_, _ = m.requests.Retry(context.Background(), claimed.RequestID, "")
+		m.Wake()
+	}
+	_, _ = m.store.DB.Exec("UPDATE work_items SET agent_state=?,codex_thread_id=COALESCE(?,codex_thread_id),workspace_path=?,version=version+1,updated_at=? WHERE id=? AND stage<>'closed'", state, nullable(result.ThreadID), claimed.Workspace, now(), claimed.ItemID)
+	_ = m.event(claimed, map[bool]string{true: "agent_interrupted", false: "agent_stalled"}[requeue], message)
 }
 
 func (m *Module) finish(claimed *claim, result Result) error {
@@ -424,6 +574,9 @@ func (m *Module) finish(claimed *claim, result Result) error {
 			return errors.New("plan request did not return planned status")
 		}
 		_, err = m.store.DB.Exec("UPDATE work_items SET agent_state='paused_plan',plan_pause_consumed=1,codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", nullable(result.ThreadID), claimed.Workspace, now(), claimed.ItemID)
+		if err == nil {
+			_ = m.event(claimed, "agent_plan_paused", "Agent completed the plan and is waiting for confirmation")
+		}
 		return err
 	}
 	if result.Status != "completed" {
@@ -449,6 +602,9 @@ func (m *Module) finish(claimed *claim, result Result) error {
 	if claimed.WorkflowType == "simple_conversation" {
 		if claimed.PauseBeforeCompletion {
 			_, err = m.store.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='close_review',agent_state='paused_completion',codex_thread_id=?,workspace_path=NULL,version=version+1,updated_at=? WHERE id=?", now(), nullable(result.ThreadID), now(), claimed.ItemID)
+			if err == nil {
+				_ = m.event(claimed, "agent_completion_paused", "Agent completed its work and is waiting for confirmation")
+			}
 			return err
 		}
 		return m.closeTask(claimed)
@@ -456,6 +612,9 @@ func (m *Module) finish(claimed *claim, result Result) error {
 	stamp := now()
 	if claimed.PauseBeforeCompletion {
 		_, err = m.store.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='merge_review',agent_state='paused_completion',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, nullable(result.ThreadID), claimed.Workspace, stamp, claimed.ItemID)
+		if err == nil {
+			_ = m.event(claimed, "agent_completion_paused", "Agent completed implementation and is waiting for merge approval")
+		}
 		return err
 	}
 	_, err = m.store.DB.Exec("UPDATE work_items SET stage='completed',completed_at=?,agent_phase='merge',agent_state='idle',codex_thread_id=?,workspace_path=?,version=version+1,updated_at=? WHERE id=?", stamp, nullable(result.ThreadID), claimed.Workspace, stamp, claimed.ItemID)
@@ -494,7 +653,7 @@ func (m *Module) record(claimed *claim, result Result, status string, runErr err
 		errorMessage = runErr.Error()
 	}
 	payload, _ := json.Marshal(map[string]any{"status": result.Status, "message": result.Message, "knowledgeOperations": result.KnowledgeOperations})
-	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status=?,thread_id=?,command_json=?,result_json=?,output_jsonl=?,final_message=?,ended_at=?,error_message=? WHERE id=? AND status='running'", status, nullable(result.ThreadID), defaultJSON(result.CommandJSON), string(payload), result.Raw, nullable(result.Message), now(), errorMessage, claimed.RequestID)
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status=?,thread_id=?,command_json=?,result_json=?,output_jsonl=CASE WHEN ?='' THEN output_jsonl ELSE ? END,final_message=?,ended_at=?,error_message=? WHERE id=? AND status='running'", status, nullable(result.ThreadID), defaultJSON(result.CommandJSON), string(payload), result.Raw, result.Raw, nullable(result.Message), now(), errorMessage, claimed.RequestID)
 }
 func (m *Module) fail(claimed *claim, result Result, err error) {
 	if !m.active(claimed.RequestID) {
@@ -510,13 +669,79 @@ func (m *Module) active(requestID string) bool {
 	return m.store.DB.QueryRow("SELECT COUNT(*) FROM agent_requests WHERE id=? AND status='running'", requestID).Scan(&count) == nil && count == 1
 }
 
+func (m *Module) event(claimed *claim, kind, message string) error {
+	if claimed.ItemID == "" {
+		return nil
+	}
+	raw, _ := json.Marshal(map[string]any{"message": message, "requestId": claimed.RequestID})
+	if _, err := m.store.DB.Exec("INSERT INTO conversation_entries(id,work_item_id,kind,stage,author_type,author_id,payload_json,related_version,created_at) SELECT ?,id,?,stage,'system',NULL,?,version,? FROM work_items WHERE id=?", security.Token(18), kind, string(raw), now(), claimed.ItemID); err != nil {
+		return err
+	}
+	return m.notifyAgentEvent(claimed.ItemID, kind)
+}
+
+func agentEventNotification(kind string) (string, string, bool) {
+	switch kind {
+	case "agent_started":
+		return "Agent 已开始执行", "本地 Codex Agent 已开始执行任务。", true
+	case "agent_plan_paused":
+		return "Agent 计划等待确认", "Agent 已完成计划，正在等待成员确认继续。", true
+	case "agent_completion_paused":
+		return "Agent 已完成任务", "Agent 已完成任务，正在等待成员验收。", true
+	case "agent_stalled":
+		return "Agent 执行已自动停止", "Codex 长时间没有活动，本次执行已停止并释放容量。", true
+	case "agent_interrupted":
+		return "Agent 执行已中断", "任务被阻塞，本地 Agent 执行已停止。", true
+	case "agent_restart_queued":
+		return "Agent 已自动恢复排队", "ProjectBoard 服务重启后已创建新的 Agent 重试需求。", true
+	default:
+		return "", "", false
+	}
+}
+
+func (m *Module) notifyAgentEvent(itemID, kind string) error {
+	title, body, notify := agentEventNotification(kind)
+	if !notify {
+		return nil
+	}
+	rows, err := m.store.DB.Query(`SELECT w.project_id,w.created_by_user_id FROM work_items w WHERE w.id=? AND w.created_by_user_id IS NOT NULL
+		UNION SELECT w.project_id,w.assignee_id FROM work_items w WHERE w.id=? AND w.assignee_kind='human' AND w.assignee_id IS NOT NULL
+		UNION SELECT w.project_id,f.user_id FROM work_items w JOIN work_item_followers f ON f.work_item_id=w.id WHERE w.id=?`, itemID, itemID, itemID)
+	if err != nil {
+		return err
+	}
+	type recipient struct{ projectID, userID string }
+	recipients := []recipient{}
+	for rows.Next() {
+		var projectID, userID string
+		if err = rows.Scan(&projectID, &userID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		recipients = append(recipients, recipient{projectID: projectID, userID: userID})
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if _, err = m.store.DB.Exec("INSERT INTO notifications(id,user_id,project_id,work_item_id,kind,title,body,actor_type,created_at) VALUES(?,?,?,?,?,?,?,'system',?)", security.Token(18), recipient.userID, recipient.projectID, itemID, kind, title, body, now()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *Module) DeactivateAgent(ctx context.Context, agentID string) error {
 	var waits []<-chan struct{}
 	m.mu.Lock()
 	for requestID, control := range m.running {
 		var assigned string
 		if m.store.DB.QueryRow("SELECT COALESCE(assigned_agent_id,'') FROM agent_requests WHERE id=?", requestID).Scan(&assigned) == nil && assigned == agentID {
-			control.cancel()
+			control.cancel(context.Canceled)
 			waits = append(waits, control.done)
 		}
 	}
@@ -527,6 +752,19 @@ func (m *Module) DeactivateAgent(ctx context.Context, agentID string) error {
 	_, err := m.store.DB.ExecContext(ctx, "UPDATE agent_requests SET status='queued',assigned_agent_id=NULL,started_at=NULL,ended_at=NULL,error_message=NULL WHERE assigned_agent_id=? AND status='running'", agentID)
 	m.Wake()
 	return err
+}
+
+func (m *Module) BlockWorkItem(ctx context.Context, itemID string) error {
+	var waits []<-chan struct{}
+	m.mu.Lock()
+	for _, control := range m.running {
+		if control.itemID == itemID {
+			control.cancel(errWorkItemBlocked)
+			waits = append(waits, control.done)
+		}
+	}
+	m.mu.Unlock()
+	return waitForRuns(ctx, waits)
 }
 func waitForRuns(ctx context.Context, waits []<-chan struct{}) error {
 	for _, done := range waits {

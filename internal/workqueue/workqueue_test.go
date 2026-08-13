@@ -59,6 +59,26 @@ func TestAgentPauseFlagsAreClearedForHumanTask(t *testing.T) {
 	}
 }
 
+func TestTaskCreationTimelineIsAttributedToSystem(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = db.DB.Exec("INSERT INTO projects(id,project_key,name,project_path,created_at,updated_at) VALUES('p','PB','Project','C:\\repos\\p',?,?)", stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	item, err := New(db).Create(t.Context(), Actor{Type: "human", ID: "u"}, CreateInput{ProjectID: "p", Title: "Task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(item.Conversation) != 1 || item.Conversation[0]["kind"] != "stage_transition" || item.Conversation[0]["author_type"] != "system" || item.Conversation[0]["author_id"] != nil {
+		t.Fatalf("creation timeline attribution = %#v, want a system stage transition", item.Conversation)
+	}
+}
+
 func TestTaskDevelopmentBranchIsNotRestrictedByProjectAllowlist(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "test.db"))

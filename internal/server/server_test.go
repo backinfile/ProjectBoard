@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,9 +14,144 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/projectboard/projectboard/internal/agentexec"
 	"github.com/projectboard/projectboard/internal/server"
 )
+
+type cancelAwareRunner struct {
+	started  chan string
+	canceled chan string
+}
+
+func TestBlockingRunningAgentTaskCancelsOnlyThatExecution(t *testing.T) {
+	dataDir := t.TempDir()
+	runner := &cancelAwareRunner{started: make(chan string, 2), canceled: make(chan string, 2)}
+	handler, err := server.New(server.Config{
+		DataDir:           dataDir,
+		BootstrapUsername: "admin",
+		BootstrapPassword: "StrongPassword123",
+		LookPath:          func(string) (string, error) { return "codex", nil },
+		AgentRunner:       runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "cancel", "name": "Cancel", "projectPath": filepath.Join(dataDir, "cancel-project")})
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "cancel-aware", "maxConcurrentTasks": 2, "turnTimeoutMinutes": 120})
+
+	for number := 1; number <= 2; number++ {
+		requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{
+			"projectId": project["id"], "title": fmt.Sprintf("Task %d", number), "descriptionMarkdown": "Keep running", "acceptanceCriteriaMarkdown": "Canceled selectively", "isAgentTask": true,
+		})
+	}
+
+	started := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+	for len(started) < 2 {
+		select {
+		case item := <-runner.started:
+			started[item] = true
+		case <-deadline:
+			t.Fatalf("started=%v, want both executions", started)
+		}
+	}
+	live := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents/"+agent["id"].(string)+"/executions/current", csrf, nil)
+	if len(live) != 2 || !strings.Contains(live[0]["output"].(string), "command_execution") {
+		t.Fatalf("live executions=%#v, want streamed Codex output", live)
+	}
+	first := requestJSON(t, client, http.MethodGet, host.URL+"/api/work-items/CANCEL-1", csrf, nil)
+	blocked := requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items/CANCEL-1/block", csrf, map[string]any{"expectedVersion": first["version"], "reason": "manual diagnosis"})
+	if blocked["blocked_at"] == nil || blocked["agent_state"] != "queued" {
+		t.Fatalf("blocked item=%#v, want blocked and queued", blocked)
+	}
+	select {
+	case canceled := <-runner.canceled:
+		if canceled != "cancel-1" {
+			t.Fatalf("canceled=%q, want cancel-1", canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocking a running task did not cancel its Agent execution")
+	}
+	second := requestJSON(t, client, http.MethodGet, host.URL+"/api/work-items/CANCEL-2", csrf, nil)
+	if second["agent_state"] != "running" {
+		t.Fatalf("second task state=%v, want running", second["agent_state"])
+	}
+	executions := blocked["executions"].([]any)
+	if len(executions) != 2 || executions[0].(map[string]any)["state"] != "failed" || executions[1].(map[string]any)["state"] != "queued" {
+		t.Fatalf("blocked executions=%#v, want failed immutable request plus queued retry", executions)
+	}
+}
+
+func TestInactiveAgentExecutionIsAutomaticallyDiagnosedAndStopped(t *testing.T) {
+	dataDir := t.TempDir()
+	runner := &cancelAwareRunner{started: make(chan string, 1), canceled: make(chan string, 1)}
+	handler, err := server.New(server.Config{
+		DataDir: dataDir, BootstrapUsername: "admin", BootstrapPassword: "StrongPassword123",
+		LookPath: func(string) (string, error) { return "codex", nil }, AgentRunner: runner,
+		AgentPollInterval: 10 * time.Millisecond, AgentStallTimeout: 40 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
+	csrf := login["csrfToken"].(string)
+	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "stall", "name": "Stall", "projectPath": filepath.Join(dataDir, "stall-project")})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "stall-agent"})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/work-items", csrf, map[string]any{"projectId": project["id"], "title": "Stall", "descriptionMarkdown": "No more output", "acceptanceCriteriaMarkdown": "Auto-stop", "isAgentTask": true})
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("Agent execution did not start")
+	}
+	select {
+	case canceled := <-runner.canceled:
+		if canceled != "stall-1" {
+			t.Fatalf("canceled=%q, want stall-1", canceled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("inactive Agent execution was not stopped")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		item := requestJSON(t, client, http.MethodGet, host.URL+"/api/work-items/STALL-1", csrf, nil)
+		if item["agent_state"] == "paused_failure" {
+			executions := item["executions"].([]any)
+			if executions[len(executions)-1].(map[string]any)["state"] != "failed" {
+				t.Fatalf("executions=%#v, want failed request after stall", executions)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("item=%#v, want paused_failure", item)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (r *cancelAwareRunner) Run(ctx context.Context, invocation agentexec.Invocation) (agentexec.Result, error) {
+	item := filepath.Base(invocation.WorkDir)
+	if invocation.OnOutput != nil {
+		invocation.OnOutput([]byte(`{"type":"item.started","item":{"type":"command_execution","command":"go test ./..."}}` + "\n"))
+	}
+	r.started <- item
+	<-ctx.Done()
+	r.canceled <- item
+	return agentexec.Result{ThreadID: "thread-" + item}, ctx.Err()
+}
 
 func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
 	handler := server.NewTestHandler(t.TempDir())
@@ -39,6 +175,22 @@ func TestServerPublishesHealthAndStaticWorkspace(t *testing.T) {
 		if response.StatusCode != http.StatusOK || !strings.Contains(string(body), check.want) {
 			t.Fatalf("GET %s = %d %q, want 200 containing %q", check.path, response.StatusCode, body, check.want)
 		}
+	}
+}
+
+func TestUnversionedStaticAssetsRevalidateAfterDeployment(t *testing.T) {
+	handler := server.NewTestHandler(t.TempDir())
+	defer handler.Close()
+	host := httptest.NewServer(handler)
+	defer host.Close()
+
+	response, err := http.Get(host.URL + "/assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache so a redeployed unversioned asset is revalidated", got)
 	}
 }
 
@@ -346,12 +498,6 @@ func TestProjectKnowledgeTreeSupportsSearchLocksAndHistory(t *testing.T) {
 	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "kb", "name": "Knowledge", "projectPath": filepath.Join(t.TempDir(), "knowledge")})
 	root := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"title": "Architecture", "markdown": "System overview"})
 	child := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"parentId": root["id"], "title": "API", "markdown": "HTTP contract"})
-	file := uploadMultipart(t, client, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge/files", csrf, "reference.md", []byte("immutable reference"))
-	duplicate := uploadMultipart(t, client, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge/files", csrf, "renamed.md", []byte("immutable reference"))
-	if duplicate["id"] != file["id"] {
-		t.Fatalf("project file dedup failed: first=%#v duplicate=%#v", file, duplicate)
-	}
-	root = requestJSON(t, client, http.MethodPatch, host.URL+"/api/knowledge/nodes/"+root["id"].(string), csrf, map[string]any{"expectedVersion": root["version"], "title": "Architecture", "markdown": "System overview", "fileIds": []string{file["id"].(string)}})
 	found := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge?query=HTTP", csrf, nil)
 	if len(found) != 1 || found[0]["id"] != child["id"] {
 		t.Fatalf("knowledge search = %#v", found)
@@ -362,7 +508,7 @@ func TestProjectKnowledgeTreeSupportsSearchLocksAndHistory(t *testing.T) {
 	}
 	updated := requestJSON(t, client, http.MethodPatch, host.URL+"/api/knowledge/nodes/"+root["id"].(string), csrf, map[string]any{"expectedVersion": locked["version"], "title": "Architecture", "markdown": "Human edits remain allowed"})
 	revisions := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/knowledge/nodes/"+root["id"].(string)+"/revisions", csrf, nil)
-	if updated["version"] != float64(4) || len(revisions) != 4 {
+	if updated["version"] != float64(3) || len(revisions) != 3 {
 		t.Fatalf("updated=%#v revisions=%#v", updated, revisions)
 	}
 	viewer := requestJSON(t, client, http.MethodPost, host.URL+"/api/users", csrf, map[string]any{"username": "knowledge-viewer", "displayName": "Knowledge Viewer", "systemRole": "user"})
@@ -465,34 +611,6 @@ func requestJSONArray(t *testing.T, client *http.Client, method, endpoint, csrf 
 	_ = json.NewDecoder(response.Body).Decode(&value)
 	if response.StatusCode >= 300 {
 		t.Fatalf("%s %s = %d", method, endpoint, response.StatusCode)
-	}
-	return value
-}
-
-func uploadMultipart(t *testing.T, client *http.Client, endpoint, csrf, name string, content []byte) map[string]any {
-	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	part, err := writer.CreateFormFile("file", name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = part.Write(content); err != nil {
-		t.Fatal(err)
-	}
-	_ = writer.Close()
-	request, _ := http.NewRequest(http.MethodPost, endpoint, &body)
-	request.Header.Set("Content-Type", writer.FormDataContentType())
-	request.Header.Set("X-CSRF-Token", csrf)
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var value map[string]any
-	_ = json.NewDecoder(response.Body).Decode(&value)
-	if response.StatusCode >= 300 {
-		t.Fatalf("POST %s = %d %#v", endpoint, response.StatusCode, value)
 	}
 	return value
 }

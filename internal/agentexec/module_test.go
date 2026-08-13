@@ -36,6 +36,17 @@ func TestExecArgsAlwaysStartAFreshWritableSession(t *testing.T) {
 	}
 }
 
+func TestWindowsExecInputPreservesUnicodePromptAsArgument(t *testing.T) {
+	prompt := "创建并验收：鹦鹉骑自行车"
+	args, stdin := execInput(Invocation{WorkDir: `C:\work\PB-1`, Prompt: prompt}, `C:\schema.json`, "windows")
+	if stdin != nil {
+		t.Fatal("Windows invocation still sends the prompt through stdin")
+	}
+	if got := args[len(args)-1]; got != prompt {
+		t.Fatalf("prompt argument = %q, want %q", got, prompt)
+	}
+}
+
 func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
 	f.calls <- in
 	return <-f.results, nil

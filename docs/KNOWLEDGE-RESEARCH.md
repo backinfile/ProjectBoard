@@ -10,7 +10,7 @@
 | [AppFlowy](https://github.com/AppFlowy-IO/AppFlowy) | 本地优先块编辑、层级页面 | 树导航与本地数据所有权 |
 | [AFFiNE](https://github.com/toeverything/AFFiNE) | 文档/白板统一、协作 | 统一内容实体，但首版不引入块模型 |
 | [Logseq](https://github.com/logseq/logseq) | Outliner、双链、本地文件 | 树形浏览与 Markdown 内容 |
-| [SiYuan](https://github.com/siyuan-note/siyuan) | 层级文档、块引用、历史 | 节点历史与附件引用 |
+| [SiYuan](https://github.com/siyuan-note/siyuan) | 层级文档、块引用、历史 | 节点历史与深层树交互 |
 | [TriliumNext Notes](https://github.com/TriliumNext/Notes) | 深层树、克隆节点、保护 | 深树交互；首版坚持单父节点 |
 | [BookStack](https://github.com/BookStackApp/BookStack) | 书/章/页、角色权限 | 清晰层级；本项目进一步统一为一种节点 |
 | [Wiki.js](https://github.com/requarks/wiki) | 团队 Wiki、Markdown、搜索 | 简洁编辑与项目内搜索 |
@@ -53,11 +53,11 @@
 | [Memobase](https://github.com/memodb-io/memobase) | 用户画像与长期记忆 | 不做用户画像，只保留项目知识 |
 | [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) | 图增强长期检索 | 检索效果优先级低于简单可控的写入 |
 | [LightRAG](https://github.com/HKUDS/LightRAG) | 图 + 向量 RAG | 明确排除首版，避免运维和一致性成本 |
-| [RAGFlow](https://github.com/infiniflow/ragflow) | 文档解析和 RAG 管线 | 文件摄取能力过重，仅保留不可变文件引用 |
+| [RAGFlow](https://github.com/infiniflow/ragflow) | 文档解析和 RAG 管线 | 文件摄取能力过重，本项目不引入文件引用 |
 | [Memora](https://github.com/microsoft/Memora) | 事实/事件/程序记忆与混合检索 | 类型化记忆可后续演进，首版统一为节点 |
 
 ## 结论：本项目为什么这样写
 
 共同的高价值模式是：作用域隔离、可审计修订、后台整合、显式来源、可恢复、受控写入。共同的复杂度来源是：块编辑、实时协同、双链/图谱、embedding 管线、多存储后端和长期会话续接。
 
-ProjectBoard 首版只保留前一组：SQLite 树节点、Markdown、不可变项目文件、关键词搜索、完整历史、Agent 锁、事务化结构操作、任务关闭触发整理。Agent 需求同时充当队列与执行审计，不再维护第二套 execution 生命周期。这使新增核心模块只有 `agentrequest` 与 `knowledge`，且二者都有小而完整的接口。
+ProjectBoard 首版只保留前一组：SQLite 树节点、Markdown、关键词搜索、完整历史、Agent 锁、事务化结构操作、任务关闭触发整理。知识内容直接保存在节点中，不引入附件或外部文件引用。Agent 需求同时充当队列与执行审计，不再维护第二套 execution 生命周期。这使新增核心模块只有 `agentrequest` 与 `knowledge`，且二者都有小而完整的接口。

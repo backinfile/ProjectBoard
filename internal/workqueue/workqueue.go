@@ -166,7 +166,7 @@ func (m *Module) Create(ctx context.Context, actor Actor, in CreateInput) (*Work
 				return err
 			}
 		}
-		if err = timeline(ctx, tx, itemID, "stage_transition", "created", actor, map[string]any{"from": nil, "to": "created"}, 1); err != nil {
+		if err = timeline(ctx, tx, itemID, "stage_transition", "created", Actor{Type: "system"}, map[string]any{"from": nil, "to": "created"}, 1); err != nil {
 			return err
 		}
 		if in.IsAgentTask && m.onAgentRequested != nil {

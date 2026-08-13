@@ -204,7 +204,7 @@ func TestProjectManagementDrawerOwnsProjectSettings(t *testing.T) {
 			t.Errorf("settings routing contains obsolete behavior %q", forbidden)
 		}
 	}
-	for _, marker := range []string{"id=\"syncManagedProject\"", "id=\"editManagedProjectPolicy\"", "id=\"addManagedProjectPrompt\"", "id=\"editManagedProjectBranch\"", "id=\"enableManagedProjectMember\"", "id=\"enableManagedProjectAgent\""} {
+	for _, marker := range []string{"id=\"syncManagedProject\"", "id=\"editManagedProjectPolicy\"", "id=\"addManagedProjectPrompt\"", "id=\"editManagedProjectBranch\"", "id=\"enableManagedProjectMember\""} {
 		if !strings.Contains(source, marker) {
 			t.Errorf("project management drawer is missing %q", marker)
 		}
@@ -253,6 +253,306 @@ func TestTaskBoardSupportsStageDragAndDrop(t *testing.T) {
 		if !strings.Contains(css, marker) {
 			t.Errorf("task board drag-and-drop styling is missing %q", marker)
 		}
+	}
+}
+
+func TestActiveTaskConversationLocalizesSystemEvents(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	workflowCapture := strings.Index(app, "const localWorkflowUI=")
+	if workflowCapture < 0 {
+		t.Fatal("could not locate the active local workflow capture")
+	}
+	rendererStart := strings.LastIndex(app[:workflowCapture], "renderTask=async function")
+	if rendererStart < 0 {
+		t.Fatal("could not locate the active task renderer")
+	}
+	renderer := app[rendererStart:workflowCapture]
+	if strings.Contains(renderer, "JSON.stringify(p)") {
+		t.Error("active task renderer exposes raw event payload JSON in the conversation")
+	}
+	if !strings.Contains(renderer, "localizedConversationEvent(e,p)") || !strings.Contains(renderer, "localizedConversationAuthor(e,actors,p)") {
+		t.Error("active task renderer does not pass non-message events through localization")
+	}
+	for _, marker := range []string{"taskCreatedEvent:'任务已创建，当前阶段为“创建”'", "agentStartedEvent:'本地 Codex Agent 已开始执行任务。'", "agent_restart_queued:'agentRestartQueuedEvent'", "agentRestartQueuedEvent:'ProjectBoard 服务已重启，本地 Agent 已自动排队继续执行。'"} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("conversation localization is missing %q", marker)
+		}
+	}
+}
+
+func TestRunningAgentIsNamedOnTaskSurfaces(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	workflowCapture := strings.Index(app, "const localWorkflowUI=")
+	if workflowCapture < 0 {
+		t.Fatal("could not locate the active local workflow capture")
+	}
+	activeWorkflow := app[:workflowCapture]
+	queueStart := strings.LastIndex(activeWorkflow, "renderQueue=async function")
+	taskStart := strings.LastIndex(activeWorkflow, "renderTask=async function")
+	if queueStart < 0 || taskStart < 0 {
+		t.Fatal("could not locate active queue and task renderers")
+	}
+	queueRenderer := activeWorkflow[queueStart:taskStart]
+	taskRenderer := activeWorkflow[taskStart:]
+	for name, source := range map[string]string{"queue": queueRenderer, "task": taskRenderer} {
+		if !strings.Contains(source, "agentRunningMarkup") {
+			t.Errorf("%s renderer does not name the Agent that is currently executing", name)
+		}
+	}
+	if !strings.Contains(activeWorkflow, "t('agentRunningLabel',{agent:agentName})") {
+		t.Error("shared running Agent renderer does not include the localized Agent name")
+	}
+}
+
+func TestRunningAgentShowsCurrentInvocationElapsedTime(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"function activeAgentStartedAt",
+		"execution.state==='running'",
+		"function formatAgentElapsed",
+		"data-agent-started-at",
+		"setInterval(update,1000)",
+		"agentElapsed:'已执行 {duration}'",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("running Agent elapsed-time UI is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{".agent-running-copy", ".task-agent-duration", "font-variant-numeric: tabular-nums"} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("running Agent elapsed-time styling is missing %q", marker)
+		}
+	}
+}
+
+func TestActiveTaskPageRemovesRedundantBackButton(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	start := strings.Index(app, "localWorkflowUI.renderTask=async function")
+	end := strings.Index(app[start:], "function pendingFilesMarkup")
+	if start < 0 || end < 0 {
+		t.Fatal("could not locate the active task enhancement wrapper")
+	}
+	wrapper := app[start : start+end]
+	if !strings.Contains(wrapper, "redundantBack.onclick=null") || !strings.Contains(wrapper, "redundantBack.remove()") {
+		t.Error("active task page retains the redundant top back button or its click handler")
+	}
+}
+
+func TestTaskDetailPollsForConversationAndStateUpdates(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	for _, marker := range []string{
+		"function taskLiveSignature",
+		"function scheduleTaskLiveRefresh",
+		"item.conversation||[]",
+		"latestSignature!==baselineSignature",
+		"draft?.value",
+		"drawer?.classList.contains('open')",
+		"scheduleTaskLiveRefresh(item)",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("task detail live refresh is missing %q", marker)
+		}
+	}
+}
+
+func TestTaskBoardFiltersByInclusiveCreatedDateRange(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"function taskCreatedDateKey",
+		"id=\"queueDateFrom\"",
+		"id=\"queueDateTo\"",
+		"createdDate>=state.queueDateFrom",
+		"createdDate<=state.queueDateTo",
+		"id=\"clearQueueDates\"",
+		"dateClearButton.hidden=!state.queueDateFrom&&!state.queueDateTo",
+		"dateFrom.value>dateTo.value",
+		"dateTo.value<dateFrom.value",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("task board created-date range filter is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{".queue-date-filter", ".queue-date-clear", ".queue-date-clear[hidden]", ":focus-within"} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("task board created-date range styling is missing %q", marker)
+		}
+	}
+}
+
+func TestTaskBoardFiltersShareOneControlSystem(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	index := string(mustReadEmbedded(t, "index.html"))
+	for _, marker := range []string{
+		"class=\"queue-filter-bar\"",
+		"data-filter-field=\"query\"",
+		"data-filter-field=\"tag\"",
+		"data-filter-field=\"priority\"",
+		"data-filter-field=\"blocker\"",
+		"data-filter-field=\"date\"",
+		"id=\"clearQueueFilters\"",
+		"syncFilterChrome",
+		"clearFiltersButton.onclick",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("unified task filter bar is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{".queue-filter-bar", ".queue-filter-field", ".queue-filter-body", ".queue-filter-icon", ".queue-filter-clear", ".queue-filter-field.is-active"} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("unified task filter styling is missing %q", marker)
+		}
+	}
+	if !strings.Contains(index, "id=\"i-calendar\"") {
+		t.Error("task date filter is missing its Lucide calendar symbol")
+	}
+}
+
+func TestSettingsTabsFillAvailableWorkspace(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"wrapper.dataset.settingsSection=state.settingsSection",
+		"settings-reference-content global-settings-reference",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("settings tab workspace is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		".settings-reference-content.global-settings-reference",
+		"grid-template-rows: auto auto minmax(0, 1fr)",
+		".global-settings-reference > .settings-page-shell",
+		"[data-settings-section=\"account\"]",
+		"[data-settings-section=\"system\"]",
+		".settings-reference-content > .settings-management-content",
+		".settings-management-content > .settings-management-card",
+		"scrollbar-gutter: stable",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("settings tab fill layout is missing %q", marker)
+		}
+	}
+}
+
+func TestPageTitlesUseCompactTopRhythm(t *testing.T) {
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"padding-top: clamp(22px, 2.4vw, 32px)",
+		"margin-top: 14px",
+		"margin-bottom: 20px",
+		"margin-top: 10px",
+		"margin-bottom: 16px",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("compact page-title rhythm is missing %q", marker)
+		}
+	}
+}
+
+func TestSidebarCollapseAndLocaleControlsUseRequestedPositions(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{"mastActions=$('.mast-actions')", "collapse.className='rail-toggle'", "collapse.innerHTML=icon('chevron')", "mastActions.append(collapse)"} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("sidebar toggle is missing mast control behavior %q", marker)
+		}
+	}
+	for _, marker := range []string{"locale.classList.add('nav-locale')", "locale.innerHTML=`${icon('globe')}", "bottom.insertBefore(locale,settingsButton||null)"} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("locale switch is missing sidebar-tab behavior %q", marker)
+		}
+	}
+	if strings.Contains(app, "rail.insertBefore(controls") || strings.Contains(app, "shell.append(collapse)") {
+		t.Error("sidebar toggle still uses an obsolete placement")
+	}
+	for _, marker := range []string{".rail-toggle {", ".nav-locale .icon", ".shell.rail-collapsed .mast .brand { display: none; }", ".shell.rail-collapsed .mast-actions", ".mast-actions .rail-toggle { display: none; }"} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("sidebar shell control styling is missing %q", marker)
+		}
+	}
+}
+
+func TestFinalUIOnlyExposesSupportedLocalAgentWorkflow(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+
+	if !strings.Contains(app, "runtimeAgentID=item.assigned_agent_id") {
+		t.Error("task assignee rendering ignores the Agent selected by the local executor")
+	}
+
+	configurationStart := strings.LastIndex(app, "taskConfigurationMarkup=function")
+	configurationEnd := strings.Index(app[configurationStart:], "wireTaskConfiguration=function")
+	if configurationStart < 0 || configurationEnd < 0 {
+		t.Fatal("could not locate the final task configuration renderer")
+	}
+	configuration := app[configurationStart : configurationStart+configurationEnd]
+	if strings.Contains(configuration, "configAbandonTask") {
+		t.Error("task configuration exposes abandonment even though the four-state API has no abandon transition")
+	}
+
+	policyStart := strings.LastIndex(app, "function managedProjectPolicy")
+	policyEnd := strings.Index(app[policyStart:], "function managedProjectPrompt")
+	if policyStart < 0 || policyEnd < 0 {
+		t.Fatal("could not locate the final project policy editor")
+	}
+	policy := app[policyStart : policyStart+policyEnd]
+	for _, unsupported := range []string{"allowAgentExecution", "allowAgentAutoClose", "allowAgentAutoCloseSubtasks"} {
+		if strings.Contains(policy, unsupported) {
+			t.Errorf("project policy editor exposes unsupported setting %q", unsupported)
+		}
+	}
+
+	projectSettingsStart := strings.LastIndex(app, "projectSettings=async function")
+	projectSettingsEnd := strings.Index(app[projectSettingsStart:], "Object.assign(messages.zh,")
+	if projectSettingsStart < 0 || projectSettingsEnd < 0 {
+		t.Fatal("could not locate the final project settings drawer")
+	}
+	projectSettings := app[projectSettingsStart : projectSettingsStart+projectSettingsEnd]
+	for _, unsupported := range []string{"['agents','agents']", "enableManagedProjectAgent", "data-disable-managed-agent"} {
+		if strings.Contains(projectSettings, unsupported) {
+			t.Errorf("project settings exposes organization-level Agent control as project-level behavior: %q", unsupported)
+		}
+	}
+
+	for _, obsoleteCopy := range []string{
+		"配置公开地址、固定 Agent SSH 身份",
+		"SSH 公钥与活动连接会立即失效",
+		"pinned Agent SSH identity",
+		"SSH keys and active connections are revoked immediately",
+	} {
+		if strings.Contains(app[strings.LastIndex(app, "Object.assign(messages.zh,"):], obsoleteCopy) {
+			t.Errorf("final translation overrides retain obsolete SSH copy %q", obsoleteCopy)
+		}
+	}
+	finalTranslations := app
+	for _, currentCopy := range []string{"本地 Codex 执行身份、并发容量和运行状态", "HTTP 与 SQLite WAL 均可用", "local Codex execution identities, capacity, and runtime status", "HTTP and SQLite WAL are available"} {
+		if !strings.Contains(finalTranslations, currentCopy) {
+			t.Errorf("final translation overrides are missing local-executor copy %q", currentCopy)
+		}
+	}
+
+	systemStart := strings.LastIndex(app, "renderSystemSettings=async function")
+	systemEnd := strings.Index(app[systemStart:], "Object.assign(messages.zh,")
+	if systemStart < 0 || systemEnd < 0 {
+		t.Fatal("could not locate the final system settings renderer")
+	}
+	systemSettings := app[systemStart : systemStart+systemEnd]
+	for _, obsolete := range []string{"/api/system/ssh", "Agent SSH", "hostKeyFingerprint"} {
+		if strings.Contains(systemSettings, obsolete) {
+			t.Errorf("system settings exposes obsolete SSH runtime behavior %q", obsolete)
+		}
+	}
+
+	agentManagementStart := strings.LastIndex(app, "renderAgentManagement=async function")
+	agentManagementEnd := strings.Index(app[agentManagementStart:], "function managedProjectForm")
+	if agentManagementStart < 0 || agentManagementEnd < 0 {
+		t.Fatal("could not locate the final Agent management renderer")
+	}
+	agentManagement := app[agentManagementStart : agentManagementStart+agentManagementEnd]
+	if strings.Contains(agentManagement, "disableForProject") {
+		t.Error("organization Agent toggle is labelled as a project-scoped action")
 	}
 }
 

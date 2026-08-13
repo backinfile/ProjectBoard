@@ -57,8 +57,8 @@ func main() {
 		log.Fatal(err)
 	}
 	defer handler.Close()
-	address := ":" + env("PORT", "3333")
-	log.Printf("ProjectBoard listening on http://localhost%s", address)
+	address := "127.0.0.1:" + env("PORT", "3333")
+	log.Printf("ProjectBoard listening on http://%s", address)
 	httpServer := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

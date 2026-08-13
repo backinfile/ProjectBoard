@@ -39,6 +39,9 @@ type Config struct {
 	BootstrapPassword string
 	Production        bool
 	LookPath          func(string) (string, error)
+	AgentRunner       agentexec.Runner
+	AgentStallTimeout time.Duration
+	AgentPollInterval time.Duration
 }
 
 type domainError struct {
@@ -119,7 +122,7 @@ func New(config Config) (*Application, error) {
 		return createErr
 	})
 	s := &Server{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, config: config, static: static}
-	s.exec = agentexec.New(database, queue, requests, knowledgeModule, agentexec.Options{DataDir: config.DataDir})
+	s.exec = agentexec.New(database, queue, requests, knowledgeModule, agentexec.Options{DataDir: config.DataDir, Runner: config.AgentRunner, PollInterval: config.AgentPollInterval, StallTimeout: config.AgentStallTimeout})
 	if err = s.exec.Start(); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("start local Agent executor: %w", err)
@@ -158,6 +161,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/{id}/reset-password", s.handle(s.resetPassword))
 	mux.HandleFunc("POST /api/agents", s.handle(s.createAgent))
 	mux.HandleFunc("GET /api/agents", s.handle(s.listAgents))
+	mux.HandleFunc("GET /api/agents/{id}/executions/current", s.handle(s.currentAgentExecutions))
 	mux.HandleFunc("PATCH /api/agents/{id}", s.handle(s.updateAgent))
 	mux.HandleFunc("POST /api/agents/{id}/disable", s.handle(s.disableOrganizationAgent))
 	mux.HandleFunc("POST /api/agents/{id}/enable", s.handle(s.enableOrganizationAgent))
@@ -178,8 +182,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/knowledge/nodes/{id}/lock", s.handle(s.lockKnowledgeNode))
 	mux.HandleFunc("GET /api/knowledge/nodes/{id}/revisions", s.handle(s.knowledgeRevisions))
 	mux.HandleFunc("POST /api/knowledge/nodes/{id}/restore", s.handle(s.restoreKnowledgeNode))
-	mux.HandleFunc("POST /api/projects/{id}/knowledge/files", s.handle(s.uploadKnowledgeFile))
-	mux.HandleFunc("GET /api/knowledge/files/{id}", s.handle(s.downloadKnowledgeFile))
 	mux.HandleFunc("POST /api/work-items", s.handle(s.createWorkItem))
 	mux.HandleFunc("GET /api/work-items/{id}", s.handle(s.getWorkItem))
 	mux.HandleFunc("PATCH /api/work-items/{id}", s.handle(s.updateWorkItem))
@@ -988,6 +990,35 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+func (s *Server) currentAgentExecutions(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.human(w, r)
+	if !ok {
+		return
+	}
+	if err := requireAdmin(a); err != nil {
+		writeError(w, err)
+		return
+	}
+	rows, err := s.store.DB.QueryContext(r.Context(), `SELECT r.id,COALESCE(r.source_work_item_id,''),r.title,r.status,r.started_at,substr(r.output_jsonl,-200000),length(r.output_jsonl)>200000
+		FROM agent_requests r WHERE r.assigned_agent_id=? AND r.status='running' ORDER BY r.started_at,r.id`, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, itemID, title, state, startedAt, output string
+		var truncated bool
+		if err = rows.Scan(&id, &itemID, &title, &state, &startedAt, &output, &truncated); err != nil {
+			writeError(w, err)
+			return
+		}
+		out = append(out, map[string]any{"id": id, "workItemId": itemID, "title": title, "state": state, "startedAt": startedAt, "output": output, "truncated": truncated})
+	}
+	writeJSON(w, 200, out)
+}
+
 func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
 	if !ok {
@@ -1689,6 +1720,17 @@ func (s *Server) setBlocked(w http.ResponseWriter, r *http.Request, blocked bool
 		writeError(w, err)
 		return
 	}
+	if blocked {
+		if err = s.exec.BlockWorkItem(r.Context(), item.ID); err != nil {
+			writeError(w, err)
+			return
+		}
+		item, err = s.queue.Get(r.Context(), item.ID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	s.notifyRelated(item, a, "blocked_changed", "任务阻塞状态已更新", item.Title, nil)
 	s.exec.Wake()
 	writeJSON(w, 201, item)
@@ -1937,14 +1979,13 @@ func (s *Server) createKnowledgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ParentID  string   `json:"parentId"`
-		Title     string   `json:"title"`
-		Markdown  string   `json:"markdown"`
-		SortOrder int      `json:"sortOrder"`
-		FileIDs   []string `json:"fileIds"`
+		ParentID  string `json:"parentId"`
+		Title     string `json:"title"`
+		Markdown  string `json:"markdown"`
+		SortOrder int    `json:"sortOrder"`
 	}
 	decode(r, &in)
-	node, err := s.knowledge.Create(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.CreateInput{ProjectID: projectID, ParentID: in.ParentID, Title: in.Title, Markdown: in.Markdown, SortOrder: in.SortOrder, FileIDs: in.FileIDs})
+	node, err := s.knowledge.Create(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.CreateInput{ProjectID: projectID, ParentID: in.ParentID, Title: in.Title, Markdown: in.Markdown, SortOrder: in.SortOrder})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -1984,13 +2025,12 @@ func (s *Server) updateKnowledgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ExpectedVersion int64    `json:"expectedVersion"`
-		Title           string   `json:"title"`
-		Markdown        string   `json:"markdown"`
-		FileIDs         []string `json:"fileIds"`
+		ExpectedVersion int64  `json:"expectedVersion"`
+		Title           string `json:"title"`
+		Markdown        string `json:"markdown"`
 	}
 	decode(r, &in)
-	node, err := s.knowledge.Update(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.UpdateInput{ID: node.ID, ExpectedVersion: in.ExpectedVersion, Title: in.Title, Markdown: in.Markdown, FileIDs: in.FileIDs})
+	node, err := s.knowledge.Update(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.UpdateInput{ID: node.ID, ExpectedVersion: in.ExpectedVersion, Title: in.Title, Markdown: in.Markdown})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -2076,95 +2116,6 @@ func (s *Server) restoreKnowledgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, node)
-}
-func (s *Server) uploadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	projectID := r.PathValue("id")
-	if err := s.requireDeveloper(projectID, a); err != nil {
-		writeError(w, err)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
-	if err := r.ParseMultipartForm(25 << 20); err != nil {
-		writeError(w, &domainError{413, "KNOWLEDGE_FILE_TOO_LARGE", "File must be 25 MB or smaller", nil})
-		return
-	}
-	input, header, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, &domainError{422, "FILE_REQUIRED", "Choose a file to upload", nil})
-		return
-	}
-	defer input.Close()
-	content, err := io.ReadAll(input)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if len(content) == 0 {
-		writeError(w, &domainError{422, "EMPTY_FILE", "Empty files are not supported", nil})
-		return
-	}
-	name := filepath.Base(strings.TrimSpace(header.Filename))
-	if name == "." || name == "" {
-		name = "knowledge-file"
-	}
-	mimeType := header.Header.Get("Content-Type")
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType = http.DetectContentType(content)
-	}
-	digest := sha256.Sum256(content)
-	digestText := hex.EncodeToString(digest[:])
-	storageKey := digestText
-	directory := filepath.Join(s.config.DataDir, "knowledge-files")
-	if err = os.MkdirAll(directory, 0o700); err != nil {
-		writeError(w, err)
-		return
-	}
-	path := filepath.Join(directory, storageKey)
-	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-		if err = os.WriteFile(path, content, 0o600); err != nil {
-			writeError(w, err)
-			return
-		}
-	}
-	file, created, err := s.knowledge.RegisterFile(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.File{ProjectID: projectID, OriginalName: name, MIME: mimeType, Size: int64(len(content)), SHA256: digestText, StorageKey: storageKey})
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
-	writeJSON(w, status, file)
-}
-func (s *Server) downloadKnowledgeFile(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.human(w, r)
-	if !ok {
-		return
-	}
-	file, err := s.knowledge.File(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if !s.canView(file.ProjectID, a) {
-		writeError(w, &domainError{403, "PROJECT_ACCESS_REQUIRED", "Project access required", nil})
-		return
-	}
-	w.Header().Set("Content-Type", file.MIME)
-	w.Header().Set("Content-Length", fmt.Sprint(file.Size))
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox")
-	disposition := "attachment"
-	if attachmentCanPreviewInline(file.MIME, file.OriginalName) {
-		disposition = "inline"
-	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, file.OriginalName))
-	http.ServeFile(w, r, filepath.Join(s.config.DataDir, "knowledge-files", filepath.Base(file.StorageKey)))
 }
 func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.human(w, r)
@@ -2403,11 +2354,7 @@ func (s *Server) serveStatic(w http.ResponseWriter, r *http.Request) {
 			r.URL.Path = "/"
 		}
 	}
-	if r.URL.Path == "/" {
-		w.Header().Set("Cache-Control", "no-cache")
-	} else {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
-	}
+	w.Header().Set("Cache-Control", "no-cache")
 	files.ServeHTTP(w, r)
 }
 func decode(r *http.Request, out any) {

@@ -8,7 +8,10 @@ playwright-report/
 test-results/
 data/
 data-go-qa/
+data-e2e-v9/
+data-schema7/
 local-data-backups/
+*.log
 *.db
 *.db-shm
 *.db-wal
