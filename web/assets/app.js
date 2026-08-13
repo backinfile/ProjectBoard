@@ -570,7 +570,7 @@ function wireTaskComposer(item){
   form.onsubmit=async event=>{event.preventDefault();const button=$('button[type=submit]',form),markdown=new FormData(form).get('markdown');if(!String(markdown).trim()&&!pendingFiles.length)return toast(t('messageOrAttachmentRequired'));button.disabled=true;try{const attachmentIds=[];for(const file of pendingFiles){const body=new FormData();body.append('file',file);const uploaded=await api(`/api/work-items/${item.id}/attachments`,{method:'POST',body});attachmentIds.push(uploaded.id)}await api(`/api/work-items/${item.id}/messages`,{method:'POST',body:JSON.stringify({markdown,attachmentIds,expectedVersion:item.version})});await renderTask()}catch(error){toast(error.message);button.disabled=false}};
 }
 
-const renderTask=async function(){
+let renderTask=async function(){
   const [item,actors]=await Promise.all([api(`/api/work-items/${state.task}`),loadTaskActors()]),assignee=taskAssignee(item,actors),terminal=['completed','order_closed','abandoned'].includes(item.stage),followers=item.follower_ids||[],creator=taskPersonName(item.created_by_user_id,actors),criteria=(item.acceptance_criteria_markdown||'').split(/\r?\n/).filter(line=>line.trim());
   const attachmentByEntry=new Map();(item.attachments||[]).forEach(attachment=>{if(!attachment.entry_id)return;const list=attachmentByEntry.get(attachment.entry_id)||[];list.push(attachment);attachmentByEntry.set(attachment.entry_id,list)});(item.conversation||[]).forEach(event=>event.attachments=attachmentByEntry.get(event.id)||[]);
   const policyValue=key=>t(state.project?.[key]?'allowed':'notAllowed');

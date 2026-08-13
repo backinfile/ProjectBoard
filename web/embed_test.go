@@ -6,6 +6,13 @@ import (
 	"testing"
 )
 
+func TestOverriddenTaskRendererUsesMutableBinding(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	if strings.Contains(app, "const renderTask=") && strings.Count(app, "renderTask=") > 1 {
+		t.Fatal("renderTask is declared const but later renderer layers reassign it")
+	}
+}
+
 func TestDesktopMastActionsRemainVisible(t *testing.T) {
 	data, err := Files.ReadFile("assets/reference-theme.css")
 	if err != nil {
