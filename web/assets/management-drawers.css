@@ -1836,6 +1836,30 @@
 .agent-ops-roster h2 { font-size: 17px; font-weight: 740; letter-spacing: -.015em; }
 .agent-ops-roster p { max-width: 68ch; margin-top: 6px; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .agent-ops-roster > header > span { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
+.agent-ops-toolbar {
+  min-height: 72px;
+  padding: 14px 2px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.agent-ops-toolbar label { display: flex; align-items: center; gap: 12px; }
+.agent-ops-toolbar label > span { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 680; }
+.agent-ops-toolbar .icon { width: 14px; height: 14px; }
+.agent-ops-toolbar select {
+  min-width: 136px;
+  min-height: 38px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--raised);
+  font: inherit;
+}
+.agent-ops-toolbar select:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.agent-ops-toolbar > strong { color: var(--muted); font: 10px var(--mono); white-space: nowrap; }
 .agent-ops-list { border-bottom: 1px solid var(--line); }
 
 .agent-ops-row {
@@ -1926,6 +1950,11 @@
 .agent-ops-empty .icon { width: 28px; height: 28px; margin-bottom: 14px; color: var(--signal); }
 .agent-ops-empty strong { font-size: 15px; }
 .agent-ops-empty p { max-width: 48ch; margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.agent-ops-filter-empty { min-height: 220px; border-bottom: 1px solid var(--line); }
+.agent-ops-pagination { min-height: 68px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.agent-ops-pagination > span { min-width: 100px; color: var(--muted); font: 10px var(--mono); text-align: center; }
+.agent-ops-pagination .button { min-height: 36px; }
+.agent-ops-pagination #previousAgents .icon { transform: rotate(180deg); }
 
 .agent-ops-drawer-summary { position: relative; }
 .agent-ops-state { margin-left: auto; padding: 7px 10px; border: 1px solid #b8d9ce; border-radius: 999px; display: inline-flex; align-items: center; gap: 7px; color: var(--health); background: #f1f8f5; font-size: 10px; font-weight: 700; white-space: nowrap; }
@@ -1950,6 +1979,11 @@
   .agent-ops-summary dt { min-height: 28px; }
   .agent-ops-summary dd { font-size: 18px; }
   .agent-ops-roster > header { align-items: start; }
+  .agent-ops-toolbar { align-items: stretch; flex-direction: column; gap: 10px; }
+  .agent-ops-toolbar label { justify-content: space-between; }
+  .agent-ops-toolbar select { flex: 1; }
+  .agent-ops-pagination { justify-content: space-between; gap: 6px; }
+  .agent-ops-pagination > span { min-width: 0; }
   .agent-ops-row { min-height: 126px; grid-template-columns: 42px minmax(0, 1fr) 38px 20px; gap: 12px; }
   .agent-ops-capacity { grid-column: 2; }
   .agent-status-switch { grid-column: 3; grid-row: 1 / 3; align-self: center; }

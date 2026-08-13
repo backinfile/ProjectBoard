@@ -638,6 +638,38 @@ func TestTaskWorkflowUsesSharedProjectPageStructure(t *testing.T) {
 	}
 }
 
+func TestAgentManagementSupportsStatusFilterAndPagination(t *testing.T) {
+	app, err := Files.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := Files.ReadFile("assets/management-drawers.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appSource := string(app)
+	agentManagementStart := strings.LastIndex(appSource, "renderAgentManagement=async function")
+	if agentManagementStart < 0 {
+		t.Fatal("could not locate the final Agent management renderer")
+	}
+	agentManagementEnd := strings.Index(appSource[agentManagementStart:], "agentRequestDetail=async function")
+	if agentManagementEnd < 0 {
+		agentManagementEnd = len(appSource) - agentManagementStart
+	}
+	agentManagement := appSource[agentManagementStart : agentManagementStart+agentManagementEnd]
+	for _, marker := range []string{"agentStatusFilter", "agentManagementPage", "agentManagementPageSize", "previousAgents", "nextAgents", "noAgentsForStatus"} {
+		if !strings.Contains(agentManagement, marker) {
+			t.Errorf("Agent management is missing filtering or pagination marker %q", marker)
+		}
+	}
+	for _, marker := range []string{".agent-ops-toolbar", ".agent-ops-pagination"} {
+		if !strings.Contains(string(css), marker) {
+			t.Errorf("Agent management is missing styling for %q", marker)
+		}
+	}
+}
+
 func mustReadEmbedded(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := Files.ReadFile(name)
