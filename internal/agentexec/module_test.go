@@ -41,6 +41,29 @@ func (f *fakeRunner) Run(_ context.Context, in Invocation) (Result, error) {
 	return <-f.results, nil
 }
 
+func TestMergePromptRequiresRebaseBeforeMerge(t *testing.T) {
+	module := &Module{}
+	claimed := &claim{
+		Phase:        "merge",
+		ProjectKey:   "PB",
+		ItemNumber:   7,
+		TargetBranch: "dev",
+		Title:        "Rebase before merge",
+	}
+
+	prompt := module.prompt(t.Context(), claimed)
+	for _, required := range []string{
+		"rebase the task branch projectboard/pb/7 onto the current tip of the checked out target branch dev",
+		"Resolve all rebase conflicts",
+		"If dev changes before the merge, repeat the rebase and verification",
+		"Only after the rebase and verification succeed, merge projectboard/pb/7 into dev with --no-ff",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("merge prompt does not contain %q:\n%s", required, prompt)
+		}
+	}
+}
+
 func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(filepath.Join(dir, "test.db"))
