@@ -1306,6 +1306,8 @@ body {
 .chat-composer {
   grid-template-columns: minmax(0,1fr) 42px auto;
   padding-block: 10px;
+}
+
 /* Product identity and workspace switcher */
 .mast {
   display: flex;
@@ -6478,6 +6480,8 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   .managed-project-git > header { grid-template-columns: 42px minmax(0, 1fr); }
   .managed-project-git > header > .badge { grid-column: 2; justify-self: start; }
   .managed-project-git > .button { width: 100%; }
+}
+
 /* Full Variant A workflow surface alignment */
 .mast,
 .rail {

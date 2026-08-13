@@ -13,6 +13,16 @@ func TestOverriddenTaskRendererUsesMutableBinding(t *testing.T) {
 	}
 }
 
+func TestStylesheetsHaveBalancedBlocks(t *testing.T) {
+	for _, name := range []string{"assets/styles.css", "assets/management-drawers.css", "assets/reference-theme.css"} {
+		source := string(mustReadEmbedded(t, name))
+		opens, closes := strings.Count(source, "{"), strings.Count(source, "}")
+		if opens != closes {
+			t.Errorf("%s has %d opening braces and %d closing braces", name, opens, closes)
+		}
+	}
+}
+
 func TestDesktopMastActionsRemainVisible(t *testing.T) {
 	data, err := Files.ReadFile("assets/reference-theme.css")
 	if err != nil {

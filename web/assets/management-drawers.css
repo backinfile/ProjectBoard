@@ -1971,6 +1971,7 @@
 
 .workflow-field {
   margin-block: 20px 4px;
+}
 
 .agent-live-action { display: grid; gap: 12px; }
 .agent-live-action p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
