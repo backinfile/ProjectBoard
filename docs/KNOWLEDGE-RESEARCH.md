@@ -1,13 +1,13 @@
 # Knowledge base and Agent memory research
 
-调研时间：2026-08-12；按 2026-08-13 的 schema v9 实现重新核对。这里记录候选项目与 ProjectBoard 当前实际采用的模式；GitHub 热度会变化，因此不固化 star 数。
+调研时间：2026-08-12；按 2026-08-13 的 schema v10 实现重新核对。这里记录候选项目与 ProjectBoard 当前实际采用的模式；GitHub 热度会变化，因此不固化 star 数。
 
 ## 当前实现对照
 
-- 每个项目只有一棵 SQLite Markdown 知识树，支持任意层级、关键词搜索、移动、乐观版本、完整修订历史和恢复。
+- 每个项目只有一棵 SQLite Markdown 知识树，支持任意层级、摘要、触发描述、FTS5 搜索、移动、乐观版本、完整修订历史和恢复。
 - 项目开发者可以写知识，查看者只读。Agent 锁只保护当前节点免受 Agent 修改，不限制人类，也不继承到子节点。
 - 任务关闭时事务性创建 `task_knowledge` 需求；达到项目天数或任务知识数量阈值时创建 `project_knowledge_compaction` 需求。
-- 知识 Agent 接收只读快照并返回结构化节点操作；服务端校验整个操作列表后一次性提交或回滚。
+- 普通任务先接收小型知识目录，并可通过绑定当前项目的只读 STDIO MCP 主动搜索和读取正文；知识 Agent 接收完整只读快照并返回结构化节点操作。
 - 当前不提供知识附件、外部文件引用、实时协同编辑、双链、向量索引或知识图谱。
 
 ## 共享知识库 / Wiki（20+）
@@ -55,7 +55,7 @@
 | [memary](https://github.com/kingjulio8238/Memary) | 开源记忆层与实体关系 | 采用显式记忆资源；不采用额外图层 |
 | [Memoria](https://github.com/matrixorigin/Memoria) | 快照、分支、回滚、审计 | 采用完整历史与恢复，不引入独立数据库 |
 | [OpenMemory](https://github.com/mem0ai/mem0-mcp) | MCP 共享记忆接口 | 共享很重要；本项目直接使用内部模块接口 |
-| [Basic Memory](https://github.com/basicmachines-co/basic-memory) | Markdown + MCP 的本地知识 | 采用 Markdown 和项目边界，不依赖 MCP |
+| [Basic Memory](https://github.com/basicmachines-co/basic-memory) | Markdown + MCP 的本地知识 | 采用 Markdown、项目边界和请求级只读 MCP，不引入外部知识服务 |
 | [MCP Memory Service](https://github.com/doobidoo/mcp-memory-service) | 跨客户端持久记忆 | 采用跨 Agent 共享，不扩大到跨项目 |
 | [Supermemory](https://github.com/supermemoryai/supermemory) | 文档/记忆摄取与语义检索 | 文件清单与整理有用；当前版本只做关键词 |
 | [Memobase](https://github.com/memodb-io/memobase) | 用户画像与长期记忆 | 不做用户画像，只保留项目知识 |
@@ -68,4 +68,4 @@
 
 共同的高价值模式是：作用域隔离、可审计修订、后台整合、显式来源、可恢复、受控写入。共同的复杂度来源是：块编辑、实时协同、双链/图谱、embedding 管线、多存储后端和长期会话续接。
 
-ProjectBoard 当前版本只保留前一组：SQLite 树节点、Markdown、关键词搜索、完整历史、Agent 锁、事务化结构操作、任务关闭触发整理。知识内容直接保存在节点中，不引入附件或外部文件引用。`agent_requests` 同时充当队列与执行审计；任务详情中的执行记录也从这些需求读取，不再维护另一套活动执行生命周期。核心边界集中在 `agentrequest` 与 `knowledge` 两个模块，并由 `agentexec` 调度和应用结果。
+ProjectBoard 当前版本只保留前一组：SQLite 树节点、Markdown、摘要/触发描述、FTS5、渐进披露、项目级只读 MCP、完整历史、Agent 锁、事务化结构操作、任务关闭触发整理。知识内容直接保存在节点中，不引入附件或外部文件引用。普通任务的 MCP 调用仍进入 `agent_requests.output_jsonl` 执行证据，不维护另一套检索生命周期。核心 seam 集中在 `agentrequest`、`knowledge` 与只读 `knowledgemcp` adapter，并由 `agentexec` 调度和应用结果。

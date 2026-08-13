@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestKnowledgeEditorExposesAgentDiscoveryMetadata(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	for _, marker := range []string{`name="summary"`, `name="triggerDescription"`, "knowledgeSearchText(node)", "nodeSummaryNote", "nodeTriggerNote"} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("knowledge discovery metadata UI is missing %q", marker)
+		}
+	}
+}
+
 func TestOverriddenTaskRendererUsesMutableBinding(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	if strings.Contains(app, "const renderTask=") && strings.Count(app, "renderTask=") > 1 {

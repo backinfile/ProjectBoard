@@ -74,6 +74,49 @@ func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesV9KnowledgeWithoutLosingContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v9.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`CREATE TABLE schema_metadata(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL);
+		INSERT INTO schema_metadata VALUES(1,9,CURRENT_TIMESTAMP);
+		CREATE TABLE projects(id TEXT PRIMARY KEY);
+		INSERT INTO projects VALUES('p');
+		CREATE TABLE knowledge_nodes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES knowledge_nodes(id), title TEXT NOT NULL, markdown TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, locked_for_agents INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_by_type TEXT NOT NULL, created_by_id TEXT, created_at TEXT NOT NULL, updated_by_type TEXT NOT NULL, updated_by_id TEXT, updated_at TEXT NOT NULL);
+		INSERT INTO knowledge_nodes VALUES('n','p',NULL,'Runbook','preserved body',0,0,1,NULL,'human','u','now','human','u','now');
+		CREATE TABLE knowledge_node_revisions(id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES knowledge_nodes(id), version INTEGER NOT NULL, parent_id TEXT, title TEXT NOT NULL, markdown TEXT NOT NULL, sort_order INTEGER NOT NULL, locked_for_agents INTEGER NOT NULL, file_ids_json TEXT NOT NULL DEFAULT '[]', actor_type TEXT NOT NULL, actor_id TEXT, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(node_id,version));
+		INSERT INTO knowledge_node_revisions VALUES('r','n',1,NULL,'Runbook','preserved body',0,0,'[]','human','u','created','now');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	var version int
+	var body, summary string
+	if err = migrated.DB.QueryRow(`SELECT version FROM schema_metadata WHERE id=1`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrated.DB.QueryRow(`SELECT markdown,summary FROM knowledge_nodes WHERE id='n'`).Scan(&body, &summary); err != nil {
+		t.Fatal(err)
+	}
+	var indexed int
+	if err = migrated.DB.QueryRow(`SELECT COUNT(*) FROM knowledge_search WHERE knowledge_search MATCH 'preserved'`).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || body != "preserved body" || summary != "" || indexed != 1 {
+		t.Fatalf("version=%d body=%q summary=%q indexed=%d", version, body, summary, indexed)
+	}
+}
+
 func TestOpenRejectsPreviousSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v5.db")
 	database, err := sql.Open("sqlite", path)

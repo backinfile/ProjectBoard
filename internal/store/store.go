@@ -38,6 +38,13 @@ func Open(file string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("read database schema version: %w", err)
 		}
+		if version == 9 {
+			if err = migrateV9ToV10(db); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("migrate database schema 9 to 10: %w", err)
+			}
+			version = 10
+		}
 		if version != SchemaVersion {
 			db.Close()
 			return nil, fmt.Errorf("database schema %d is incompatible with this release; create a new data directory", version)
@@ -50,7 +57,30 @@ func Open(file string) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
-const SchemaVersion = 9
+const SchemaVersion = 10
+
+func migrateV9ToV10(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	statements := []string{
+		`ALTER TABLE knowledge_nodes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_nodes ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_node_revisions ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE knowledge_node_revisions ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
+		`CREATE VIRTUAL TABLE knowledge_search USING fts5(node_id UNINDEXED, project_id UNINDEXED, title, summary, trigger_description, markdown, tokenize='trigram')`,
+		`INSERT INTO knowledge_search(node_id,project_id,title,summary,trigger_description,markdown) SELECT id,project_id,title,summary,trigger_description,markdown FROM knowledge_nodes WHERE deleted_at IS NULL`,
+		`UPDATE schema_metadata SET version=10 WHERE id=1`,
+	}
+	for _, statement := range statements {
+		if _, err = tx.Exec(statement); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
 
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -68,7 +98,7 @@ func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, created_at TEXT NOT NULL);
-INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,9,CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,10,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, system_role TEXT NOT NULL CHECK(system_role IN('administrator','user')), status TEXT NOT NULL DEFAULT 'active', must_change_password INTEGER NOT NULL DEFAULT 0, disabled_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_active_at TEXT);
 CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, user_agent TEXT, ip TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);
@@ -90,9 +120,10 @@ CREATE INDEX IF NOT EXISTS agent_executions_active_agent ON agent_executions(age
 CREATE TABLE IF NOT EXISTS agent_requests(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), number INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind IN('task_plan','task_execution','task_knowledge','project_knowledge_compaction')), source_work_item_id TEXT REFERENCES work_items(id), retry_of_id TEXT REFERENCES agent_requests(id), status TEXT NOT NULL CHECK(status IN('queued','running','succeeded','failed','cancelled')), title TEXT NOT NULL, prompt_markdown TEXT NOT NULL DEFAULT '', assigned_agent_id TEXT REFERENCES agents(id), result_json TEXT, output_jsonl TEXT NOT NULL DEFAULT '', final_message TEXT, workspace_path TEXT, thread_id TEXT, command_json TEXT NOT NULL DEFAULT '[]', error_message TEXT, created_by_type TEXT NOT NULL CHECK(created_by_type IN('human','agent','system')), created_by_id TEXT, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT, UNIQUE(project_id,number));
 CREATE INDEX IF NOT EXISTS agent_requests_project_time ON agent_requests(project_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS agent_requests_queue ON agent_requests(status,created_at);
-CREATE TABLE IF NOT EXISTS knowledge_nodes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES knowledge_nodes(id), title TEXT NOT NULL, markdown TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, locked_for_agents INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_by_type TEXT NOT NULL, created_by_id TEXT, created_at TEXT NOT NULL, updated_by_type TEXT NOT NULL, updated_by_id TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS knowledge_nodes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES knowledge_nodes(id), title TEXT NOT NULL, markdown TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', trigger_description TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, locked_for_agents INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_by_type TEXT NOT NULL, created_by_id TEXT, created_at TEXT NOT NULL, updated_by_type TEXT NOT NULL, updated_by_id TEXT, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS knowledge_nodes_tree ON knowledge_nodes(project_id,parent_id,sort_order,title);
-CREATE TABLE IF NOT EXISTS knowledge_node_revisions(id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES knowledge_nodes(id), version INTEGER NOT NULL, parent_id TEXT, title TEXT NOT NULL, markdown TEXT NOT NULL, sort_order INTEGER NOT NULL, locked_for_agents INTEGER NOT NULL, file_ids_json TEXT NOT NULL DEFAULT '[]', actor_type TEXT NOT NULL, actor_id TEXT, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(node_id,version));
+CREATE TABLE IF NOT EXISTS knowledge_node_revisions(id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES knowledge_nodes(id), version INTEGER NOT NULL, parent_id TEXT, title TEXT NOT NULL, markdown TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', trigger_description TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL, locked_for_agents INTEGER NOT NULL, file_ids_json TEXT NOT NULL DEFAULT '[]', actor_type TEXT NOT NULL, actor_id TEXT, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(node_id,version));
+CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_search USING fts5(node_id UNINDEXED, project_id UNINDEXED, title, summary, trigger_description, markdown, tokenize='trigram');
 CREATE TABLE IF NOT EXISTS knowledge_files(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), original_name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL CHECK(size<=26214400), sha256 TEXT NOT NULL, storage_key TEXT NOT NULL, uploader_type TEXT NOT NULL, uploader_id TEXT, created_at TEXT NOT NULL, UNIQUE(project_id,sha256));
 CREATE TABLE IF NOT EXISTS knowledge_node_files(node_id TEXT NOT NULL REFERENCES knowledge_nodes(id), file_id TEXT NOT NULL REFERENCES knowledge_files(id), sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, PRIMARY KEY(node_id,file_id));
 CREATE INDEX IF NOT EXISTS knowledge_files_project ON knowledge_files(project_id,created_at);

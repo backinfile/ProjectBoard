@@ -122,7 +122,12 @@ func New(config Config) (*Application, error) {
 		return createErr
 	})
 	s := &Server{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, config: config, static: static}
-	s.exec = agentexec.New(database, queue, requests, knowledgeModule, agentexec.Options{DataDir: config.DataDir, Runner: config.AgentRunner, PollInterval: config.AgentPollInterval, StallTimeout: config.AgentStallTimeout})
+	knowledgeCommand, err := os.Executable()
+	if err != nil {
+		database.Close()
+		return nil, fmt.Errorf("resolve ProjectBoard executable for knowledge MCP: %w", err)
+	}
+	s.exec = agentexec.New(database, queue, requests, knowledgeModule, agentexec.Options{DataDir: config.DataDir, DatabasePath: config.DatabasePath, KnowledgeCommand: knowledgeCommand, Runner: config.AgentRunner, PollInterval: config.AgentPollInterval, StallTimeout: config.AgentStallTimeout})
 	if err = s.exec.Start(); err != nil {
 		database.Close()
 		return nil, fmt.Errorf("start local Agent executor: %w", err)
@@ -1979,13 +1984,15 @@ func (s *Server) createKnowledgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ParentID  string `json:"parentId"`
-		Title     string `json:"title"`
-		Markdown  string `json:"markdown"`
-		SortOrder int    `json:"sortOrder"`
+		ParentID           string `json:"parentId"`
+		Title              string `json:"title"`
+		Markdown           string `json:"markdown"`
+		Summary            string `json:"summary"`
+		TriggerDescription string `json:"triggerDescription"`
+		SortOrder          int    `json:"sortOrder"`
 	}
 	decode(r, &in)
-	node, err := s.knowledge.Create(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.CreateInput{ProjectID: projectID, ParentID: in.ParentID, Title: in.Title, Markdown: in.Markdown, SortOrder: in.SortOrder})
+	node, err := s.knowledge.Create(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.CreateInput{ProjectID: projectID, ParentID: in.ParentID, Title: in.Title, Markdown: in.Markdown, Summary: in.Summary, TriggerDescription: in.TriggerDescription, SortOrder: in.SortOrder})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -2025,12 +2032,21 @@ func (s *Server) updateKnowledgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		ExpectedVersion int64  `json:"expectedVersion"`
-		Title           string `json:"title"`
-		Markdown        string `json:"markdown"`
+		ExpectedVersion    int64   `json:"expectedVersion"`
+		Title              string  `json:"title"`
+		Markdown           string  `json:"markdown"`
+		Summary            *string `json:"summary"`
+		TriggerDescription *string `json:"triggerDescription"`
 	}
 	decode(r, &in)
-	node, err := s.knowledge.Update(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.UpdateInput{ID: node.ID, ExpectedVersion: in.ExpectedVersion, Title: in.Title, Markdown: in.Markdown})
+	summary, trigger := node.Summary, node.TriggerDescription
+	if in.Summary != nil {
+		summary = *in.Summary
+	}
+	if in.TriggerDescription != nil {
+		trigger = *in.TriggerDescription
+	}
+	node, err := s.knowledge.Update(r.Context(), knowledge.Actor{Type: "human", ID: a.ID}, knowledge.UpdateInput{ID: node.ID, ExpectedVersion: in.ExpectedVersion, Title: in.Title, Markdown: in.Markdown, Summary: summary, TriggerDescription: trigger})
 	if err != nil {
 		writeError(w, err)
 		return
