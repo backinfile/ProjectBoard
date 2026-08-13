@@ -28,6 +28,7 @@ import (
 
 type Invocation struct {
 	WorkDir, Prompt, ThreadID string
+	Model, ReasoningEffort    string
 	Timeout                   time.Duration
 	PlanOnly                  bool
 	OnOutput                  func([]byte)
@@ -36,6 +37,11 @@ type Invocation struct {
 type Result struct {
 	ThreadID, Status, Message, Raw, CommandJSON string
 	KnowledgeOperations                         []knowledge.Operation
+	Usage                                       TokenUsage
+}
+
+type TokenUsage struct {
+	Input, CachedInput, Output, Reasoning, Total int64
 }
 type Runner interface {
 	Run(context.Context, Invocation) (Result, error)
@@ -80,6 +86,10 @@ func (r *ExecRunner) Run(ctx context.Context, in Invocation) (Result, error) {
 			item, _ := event["item"].(map[string]any)
 			if item["type"] == "agent_message" {
 				result.Message, _ = item["text"].(string)
+			}
+		case "turn.completed":
+			if usage, ok := event["usage"].(map[string]any); ok {
+				result.Usage.add(usage)
 			}
 		case "turn.failed", "error":
 			if err == nil {
@@ -136,7 +146,52 @@ func execInput(in Invocation, schemaPath, goos string) ([]string, io.Reader) {
 }
 
 func execArgsWithPrompt(in Invocation, schemaPath, promptArg string) []string {
-	return []string{"exec", "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir, promptArg}
+	args := []string{"exec", "--json", "--sandbox", "danger-full-access", "--output-schema", schemaPath, "-C", in.WorkDir}
+	if strings.TrimSpace(in.Model) != "" {
+		args = append(args, "--model", strings.TrimSpace(in.Model))
+	}
+	if strings.TrimSpace(in.ReasoningEffort) != "" {
+		args = append(args, "--config", fmt.Sprintf("model_reasoning_effort=%q", strings.TrimSpace(in.ReasoningEffort)))
+	}
+	return append(args, promptArg)
+}
+
+func parseTokenUsage(raw string) TokenUsage {
+	var usage TokenUsage
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event["type"] == "turn.completed" {
+			if value, ok := event["usage"].(map[string]any); ok {
+				usage.add(value)
+			}
+		}
+	}
+	return usage
+}
+
+func (u *TokenUsage) add(value map[string]any) {
+	u.Input += tokenCount(value["input_tokens"])
+	u.CachedInput += tokenCount(value["cached_input_tokens"])
+	u.Output += tokenCount(value["output_tokens"])
+	u.Reasoning += tokenCount(value["reasoning_output_tokens"])
+	u.Total = u.Input + u.Output
+}
+
+func tokenCount(value any) int64 {
+	switch number := value.(type) {
+	case float64:
+		return int64(number)
+	case json.Number:
+		result, _ := number.Int64()
+		return result
+	case int64:
+		return number
+	case int:
+		return int64(number)
+	default:
+		return 0
+	}
 }
 
 type Options struct {
@@ -189,7 +244,11 @@ func New(database *store.Store, queue *workqueue.Module, requests *agentrequest.
 		option.StallTimeout = 10 * time.Minute
 	}
 	if option.Runner == nil {
-		option.Runner = &ExecRunner{Command: "codex", SchemaPath: filepath.Join(option.DataDir, "codex-result-schema.json")}
+		schemaPath, err := filepath.Abs(filepath.Join(option.DataDir, "codex-result-schema.json"))
+		if err != nil {
+			schemaPath = filepath.Join(option.DataDir, "codex-result-schema.json")
+		}
+		option.Runner = &ExecRunner{Command: "codex", SchemaPath: schemaPath}
 	}
 	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, runner: option.Runner, poll: option.PollInterval, stall: option.StallTimeout, wake: make(chan struct{}, 1), running: map[string]*runControl{}}
 }
@@ -279,6 +338,7 @@ func (m *Module) loop() {
 
 type claim struct {
 	RequestID, Kind, ItemID, AgentID, ProjectID, ProjectKey, ProjectPath, Title, Description, Criteria, TargetBranch, WorkflowType, Phase, BaseCommit, Workspace string
+	Model, ReasoningEffort                                                                                                                                       string
 	CustomPrompt                                                                                                                                                 string
 	AgentRules, ValidationCommands, ForbiddenPaths, AgentPrompts, KnowledgeSnapshot                                                                              string
 	RequestNumber, ItemNumber, Timeout                                                                                                                           int64
@@ -341,7 +401,7 @@ func (m *Module) appendOutput(requestID string, chunk []byte) {
 func (m *Module) claim() (*claim, error) {
 	var claimed *claim
 	err := m.store.Write(context.Background(), func(tx *sql.Tx) error {
-		row := tx.QueryRow(`SELECT r.id,r.kind,r.project_id,p.project_key,p.project_path,r.number,COALESCE(r.source_work_item_id,''),COALESCE(w.number,0),COALESCE(w.title,r.title),COALESCE(w.description_markdown,''),COALESCE(w.acceptance_criteria_markdown,''),COALESCE(w.target_branch,p.default_target_branch),COALESCE(w.workflow_type,'standard'),COALESCE(w.agent_phase,'work'),COALESCE(w.base_commit_sha,''),COALESCE(w.pause_before_completion,0),r.prompt_markdown,p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes
+		row := tx.QueryRow(`SELECT r.id,r.kind,r.project_id,p.project_key,p.project_path,r.number,COALESCE(r.source_work_item_id,''),COALESCE(w.number,0),COALESCE(w.title,r.title),COALESCE(w.description_markdown,''),COALESCE(w.acceptance_criteria_markdown,''),COALESCE(w.target_branch,p.default_target_branch),COALESCE(w.workflow_type,'standard'),COALESCE(w.agent_phase,'work'),COALESCE(w.base_commit_sha,''),COALESCE(w.pause_before_completion,0),r.prompt_markdown,p.agent_rules_markdown,p.validation_commands_json,p.forbidden_paths_json,p.agent_prompts_json,a.id,a.turn_timeout_minutes,a.model,a.reasoning_effort
 			FROM agent_requests r JOIN projects p ON p.id=r.project_id LEFT JOIN work_items w ON w.id=r.source_work_item_id CROSS JOIN agents a
 			WHERE r.status='queued' AND a.status='active' AND a.revoked_at IS NULL
 			AND (w.id IS NULL OR w.blocked_at IS NULL)
@@ -360,7 +420,7 @@ func (m *Module) claim() (*claim, error) {
 			ORDER BY (CAST((SELECT COUNT(*) FROM agent_requests active WHERE active.assigned_agent_id=a.id AND active.status='running') AS REAL)/a.max_concurrent_tasks),a.created_at,a.id,r.created_at,r.id LIMIT 1`)
 		var value claim
 		var pause int
-		if err := row.Scan(&value.RequestID, &value.Kind, &value.ProjectID, &value.ProjectKey, &value.ProjectPath, &value.RequestNumber, &value.ItemID, &value.ItemNumber, &value.Title, &value.Description, &value.Criteria, &value.TargetBranch, &value.WorkflowType, &value.Phase, &value.BaseCommit, &pause, &value.CustomPrompt, &value.AgentRules, &value.ValidationCommands, &value.ForbiddenPaths, &value.AgentPrompts, &value.AgentID, &value.Timeout); err != nil {
+		if err := row.Scan(&value.RequestID, &value.Kind, &value.ProjectID, &value.ProjectKey, &value.ProjectPath, &value.RequestNumber, &value.ItemID, &value.ItemNumber, &value.Title, &value.Description, &value.Criteria, &value.TargetBranch, &value.WorkflowType, &value.Phase, &value.BaseCommit, &pause, &value.CustomPrompt, &value.AgentRules, &value.ValidationCommands, &value.ForbiddenPaths, &value.AgentPrompts, &value.AgentID, &value.Timeout, &value.Model, &value.ReasoningEffort); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -376,7 +436,7 @@ func (m *Module) claim() (*claim, error) {
 			value.Workspace = projectrepo.WorktreePath(value.ProjectPath, value.ProjectKey, value.ItemNumber)
 		}
 		stamp := now()
-		result, err := tx.Exec("UPDATE agent_requests SET status='running',assigned_agent_id=?,started_at=?,workspace_path=? WHERE id=? AND status='queued'", value.AgentID, stamp, value.Workspace, value.RequestID)
+		result, err := tx.Exec("UPDATE agent_requests SET status='running',assigned_agent_id=?,started_at=?,workspace_path=?,model=?,reasoning_effort=? WHERE id=? AND status='queued'", value.AgentID, stamp, value.Workspace, value.Model, value.ReasoningEffort, value.RequestID)
 		if err != nil {
 			return err
 		}
@@ -498,6 +558,7 @@ func (m *Module) execute(parent context.Context, claimed *claim) {
 	m.noteActivity(claimed.RequestID)
 	result, err := m.runner.Run(ctx, Invocation{
 		WorkDir: claimed.Workspace, Prompt: prompt, Timeout: time.Duration(claimed.Timeout) * time.Minute, PlanOnly: claimed.PlanOnly,
+		Model: claimed.Model, ReasoningEffort: claimed.ReasoningEffort,
 		OnOutput:   func(chunk []byte) { m.appendOutput(claimed.RequestID, chunk) },
 		OnActivity: func() { m.noteActivity(claimed.RequestID) },
 	})
@@ -653,7 +714,7 @@ func (m *Module) record(claimed *claim, result Result, status string, runErr err
 		errorMessage = runErr.Error()
 	}
 	payload, _ := json.Marshal(map[string]any{"status": result.Status, "message": result.Message, "knowledgeOperations": result.KnowledgeOperations})
-	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status=?,thread_id=?,command_json=?,result_json=?,output_jsonl=CASE WHEN ?='' THEN output_jsonl ELSE ? END,final_message=?,ended_at=?,error_message=? WHERE id=? AND status='running'", status, nullable(result.ThreadID), defaultJSON(result.CommandJSON), string(payload), result.Raw, result.Raw, nullable(result.Message), now(), errorMessage, claimed.RequestID)
+	_, _ = m.store.DB.Exec("UPDATE agent_requests SET status=?,thread_id=?,command_json=?,result_json=?,output_jsonl=CASE WHEN ?='' THEN output_jsonl ELSE ? END,final_message=?,ended_at=?,error_message=?,input_tokens=?,cached_input_tokens=?,output_tokens=?,reasoning_tokens=?,total_tokens=? WHERE id=? AND status='running'", status, nullable(result.ThreadID), defaultJSON(result.CommandJSON), string(payload), result.Raw, result.Raw, nullable(result.Message), now(), errorMessage, result.Usage.Input, result.Usage.CachedInput, result.Usage.Output, result.Usage.Reasoning, result.Usage.Total, claimed.RequestID)
 }
 func (m *Module) fail(claimed *claim, result Result, err error) {
 	if !m.active(claimed.RequestID) {

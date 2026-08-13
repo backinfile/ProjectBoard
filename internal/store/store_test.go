@@ -74,7 +74,45 @@ func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsPreviousSchemaVersion(t *testing.T) {
+func TestOpenMigratesSchemaNineWithoutLosingData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v9.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Exec(`CREATE TABLE schema_metadata(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL);
+		INSERT INTO schema_metadata VALUES(1,9,CURRENT_TIMESTAMP);
+		CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT NOT NULL,purpose TEXT NOT NULL,runtime_type TEXT NOT NULL,max_concurrent_tasks INTEGER NOT NULL,turn_timeout_minutes INTEGER NOT NULL,accept_tags_json TEXT NOT NULL,reject_tags_json TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,revoked_at TEXT);
+		INSERT INTO agents VALUES('a','Existing','kept','local_codex_cli',1,120,'[]','[]','active',CURRENT_TIMESTAMP,NULL);
+		CREATE TABLE agent_requests(id TEXT PRIMARY KEY,assigned_agent_id TEXT);`); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	if err = migrateV9ToV10(migrated); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	var name, model, effort string
+	if err = migrated.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrated.QueryRow("SELECT name,model,reasoning_effort FROM agents WHERE id='a'").Scan(&name, &model, &effort); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || name != "Existing" || model != "" || effort != "" {
+		t.Fatalf("migration result version=%d agent=%q model=%q effort=%q", version, name, model, effort)
+	}
+}
+
+func TestOpenRejectsUnsupportedSchemaVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v5.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {

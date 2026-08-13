@@ -293,19 +293,20 @@ func TestLocalCodexAgentConfigurationIsExposed(t *testing.T) {
 	client := &http.Client{Jar: jar}
 	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
 	csrf := login["csrfToken"].(string)
-	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "local-codex", "runtimeType": "local_codex_cli", "maxConcurrentTasks": 3, "turnTimeoutMinutes": 45, "acceptTags": []string{"frontend"}, "rejectTags": []string{"blocked"}})
-	if agent["runtimeType"] != "local_codex_cli" || agent["maxConcurrentTasks"] != float64(3) || agent["turnTimeoutMinutes"] != float64(45) || agent["purpose"] != "" {
+	agent := requestJSON(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "local-codex", "runtimeType": "local_codex_cli", "model": "gpt-5.6-terra", "reasoningEffort": "high", "maxConcurrentTasks": 3, "turnTimeoutMinutes": 45, "acceptTags": []string{"frontend"}, "rejectTags": []string{"blocked"}})
+	if agent["runtimeType"] != "local_codex_cli" || agent["model"] != "gpt-5.6-terra" || agent["reasoningEffort"] != "high" || agent["maxConcurrentTasks"] != float64(3) || agent["turnTimeoutMinutes"] != float64(45) || agent["purpose"] != "" {
 		t.Fatalf("unexpected Agent: %#v", agent)
 	}
-	agent = requestJSON(t, client, http.MethodPatch, host.URL+"/api/agents/"+agent["id"].(string), csrf, map[string]any{"purpose": "UI work", "acceptTags": []string{"frontend", "ux"}, "rejectTags": []string{"blocked"}})
-	if fmt.Sprint(agent["acceptTags"]) != "[frontend ux]" || fmt.Sprint(agent["rejectTags"]) != "[blocked]" || agent["purpose"] != "UI work" {
+	agent = requestJSON(t, client, http.MethodPatch, host.URL+"/api/agents/"+agent["id"].(string), csrf, map[string]any{"purpose": "UI work", "model": "gpt-5.6-sol", "reasoningEffort": "xhigh", "acceptTags": []string{"frontend", "ux"}, "rejectTags": []string{"blocked"}})
+	if fmt.Sprint(agent["acceptTags"]) != "[frontend ux]" || fmt.Sprint(agent["rejectTags"]) != "[blocked]" || agent["purpose"] != "UI work" || agent["model"] != "gpt-5.6-sol" || agent["reasoningEffort"] != "xhigh" {
 		t.Fatalf("updated Agent tags were not exposed: %#v", agent)
 	}
 	agents := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/agents", csrf, nil)
-	if len(agents) != 1 || agents[0]["currentLoad"] != float64(0) {
+	if len(agents) != 1 || agents[0]["currentLoad"] != float64(0) || agents[0]["totalTokens"] != float64(0) {
 		t.Fatalf("unexpected Agents: %#v", agents)
 	}
 	requestErrorCode(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "invalid", "maxConcurrentTasks": -1, "turnTimeoutMinutes": 120}, http.StatusUnprocessableEntity, "INVALID_AGENT_CONFIGURATION")
+	requestErrorCode(t, client, http.MethodPost, host.URL+"/api/agents", csrf, map[string]any{"name": "invalid-effort", "reasoningEffort": "extreme"}, http.StatusUnprocessableEntity, "INVALID_REASONING_EFFORT")
 }
 
 func TestCreatingAgentFailsWhenCodexIsMissingFromPath(t *testing.T) {

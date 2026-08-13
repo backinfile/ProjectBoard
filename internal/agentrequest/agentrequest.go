@@ -11,28 +11,35 @@ import (
 )
 
 type Request struct {
-	ID               string  `json:"id"`
-	ProjectID        string  `json:"projectId"`
-	Number           int64   `json:"number"`
-	Kind             string  `json:"kind"`
-	SourceWorkItemID *string `json:"sourceWorkItemId,omitempty"`
-	RetryOfID        *string `json:"retryOfId,omitempty"`
-	Status           string  `json:"status"`
-	Title            string  `json:"title"`
-	PromptMarkdown   string  `json:"promptMarkdown,omitempty"`
-	AssignedAgentID  *string `json:"assignedAgentId,omitempty"`
-	ResultJSON       *string `json:"resultJson,omitempty"`
-	OutputJSONL      string  `json:"outputJsonl,omitempty"`
-	FinalMessage     *string `json:"finalMessage,omitempty"`
-	WorkspacePath    *string `json:"workspacePath,omitempty"`
-	ThreadID         *string `json:"threadId,omitempty"`
-	CommandJSON      string  `json:"commandJson,omitempty"`
-	ErrorMessage     *string `json:"errorMessage,omitempty"`
-	CreatedByType    string  `json:"createdByType"`
-	CreatedByID      *string `json:"createdById,omitempty"`
-	CreatedAt        string  `json:"createdAt"`
-	StartedAt        *string `json:"startedAt,omitempty"`
-	EndedAt          *string `json:"endedAt,omitempty"`
+	ID                string  `json:"id"`
+	ProjectID         string  `json:"projectId"`
+	Number            int64   `json:"number"`
+	Kind              string  `json:"kind"`
+	SourceWorkItemID  *string `json:"sourceWorkItemId,omitempty"`
+	RetryOfID         *string `json:"retryOfId,omitempty"`
+	Status            string  `json:"status"`
+	Title             string  `json:"title"`
+	PromptMarkdown    string  `json:"promptMarkdown,omitempty"`
+	AssignedAgentID   *string `json:"assignedAgentId,omitempty"`
+	ResultJSON        *string `json:"resultJson,omitempty"`
+	OutputJSONL       string  `json:"outputJsonl,omitempty"`
+	FinalMessage      *string `json:"finalMessage,omitempty"`
+	WorkspacePath     *string `json:"workspacePath,omitempty"`
+	ThreadID          *string `json:"threadId,omitempty"`
+	CommandJSON       string  `json:"commandJson,omitempty"`
+	ErrorMessage      *string `json:"errorMessage,omitempty"`
+	Model             string  `json:"model,omitempty"`
+	ReasoningEffort   string  `json:"reasoningEffort,omitempty"`
+	InputTokens       int64   `json:"inputTokens"`
+	CachedInputTokens int64   `json:"cachedInputTokens"`
+	OutputTokens      int64   `json:"outputTokens"`
+	ReasoningTokens   int64   `json:"reasoningTokens"`
+	TotalTokens       int64   `json:"totalTokens"`
+	CreatedByType     string  `json:"createdByType"`
+	CreatedByID       *string `json:"createdById,omitempty"`
+	CreatedAt         string  `json:"createdAt"`
+	StartedAt         *string `json:"startedAt,omitempty"`
+	EndedAt           *string `json:"endedAt,omitempty"`
 }
 
 type CreateInput struct {
@@ -219,11 +226,11 @@ func getTx(ctx context.Context, tx *sql.Tx, id string) (*Request, error) {
 	return scan(tx.QueryRowContext(ctx, requestSelect+` WHERE id=?`, id))
 }
 
-const requestSelect = `SELECT id,project_id,number,kind,source_work_item_id,retry_of_id,status,title,prompt_markdown,assigned_agent_id,result_json,output_jsonl,final_message,workspace_path,thread_id,command_json,error_message,created_by_type,created_by_id,created_at,started_at,ended_at FROM agent_requests`
+const requestSelect = `SELECT id,project_id,number,kind,source_work_item_id,retry_of_id,status,title,prompt_markdown,assigned_agent_id,result_json,output_jsonl,final_message,workspace_path,thread_id,command_json,error_message,model,reasoning_effort,input_tokens,cached_input_tokens,output_tokens,reasoning_tokens,total_tokens,created_by_type,created_by_id,created_at,started_at,ended_at FROM agent_requests`
 
 func scan(row scanner) (*Request, error) {
 	var request Request
-	err := row.Scan(&request.ID, &request.ProjectID, &request.Number, &request.Kind, &request.SourceWorkItemID, &request.RetryOfID, &request.Status, &request.Title, &request.PromptMarkdown, &request.AssignedAgentID, &request.ResultJSON, &request.OutputJSONL, &request.FinalMessage, &request.WorkspacePath, &request.ThreadID, &request.CommandJSON, &request.ErrorMessage, &request.CreatedByType, &request.CreatedByID, &request.CreatedAt, &request.StartedAt, &request.EndedAt)
+	err := row.Scan(&request.ID, &request.ProjectID, &request.Number, &request.Kind, &request.SourceWorkItemID, &request.RetryOfID, &request.Status, &request.Title, &request.PromptMarkdown, &request.AssignedAgentID, &request.ResultJSON, &request.OutputJSONL, &request.FinalMessage, &request.WorkspacePath, &request.ThreadID, &request.CommandJSON, &request.ErrorMessage, &request.Model, &request.ReasoningEffort, &request.InputTokens, &request.CachedInputTokens, &request.OutputTokens, &request.ReasoningTokens, &request.TotalTokens, &request.CreatedByType, &request.CreatedByID, &request.CreatedAt, &request.StartedAt, &request.EndedAt)
 	return &request, err
 }
 

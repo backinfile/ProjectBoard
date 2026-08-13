@@ -910,6 +910,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name, Purpose      string
 		RuntimeType        string   `json:"runtimeType"`
+		Model              string   `json:"model"`
+		ReasoningEffort    string   `json:"reasoningEffort"`
 		MaxConcurrentTasks int      `json:"maxConcurrentTasks"`
 		TurnTimeoutMinutes int      `json:"turnTimeoutMinutes"`
 		AcceptTags         []string `json:"acceptTags"`
@@ -931,6 +933,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Name = strings.TrimSpace(in.Name)
 	in.Purpose = strings.TrimSpace(in.Purpose)
+	var err error
+	in.Model, in.ReasoningEffort, err = normalizeAgentExecutionConfig(in.Model, in.ReasoningEffort)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if in.Name == "" {
 		writeError(w, &domainError{422, "INVALID_AGENT_CONFIGURATION", "Agent name is required", nil})
 		return
@@ -952,21 +960,27 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	id, stamp := security.Token(18), now()
 	acceptRaw, _ := json.Marshal(acceptTags)
 	rejectRaw, _ := json.Marshal(rejectTags)
-	_, err = s.store.DB.Exec("INSERT INTO agents(id,name,purpose,runtime_type,max_concurrent_tasks,turn_timeout_minutes,accept_tags_json,reject_tags_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,'active',?)", id, in.Name, in.Purpose, in.RuntimeType, in.MaxConcurrentTasks, in.TurnTimeoutMinutes, string(acceptRaw), string(rejectRaw), stamp)
+	_, err = s.store.DB.Exec("INSERT INTO agents(id,name,purpose,runtime_type,model,reasoning_effort,max_concurrent_tasks,turn_timeout_minutes,accept_tags_json,reject_tags_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'active',?)", id, in.Name, in.Purpose, in.RuntimeType, in.Model, in.ReasoningEffort, in.MaxConcurrentTasks, in.TurnTimeoutMinutes, string(acceptRaw), string(rejectRaw), stamp)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	s.audit(a, "agent.created", "agent", id, "", map[string]any{"name": in.Name})
-	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "runtimeType": in.RuntimeType, "maxConcurrentTasks": in.MaxConcurrentTasks, "turnTimeoutMinutes": in.TurnTimeoutMinutes, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true})
+	writeJSON(w, 201, map[string]any{"id": id, "name": in.Name, "purpose": in.Purpose, "runtimeType": in.RuntimeType, "model": in.Model, "reasoningEffort": in.ReasoningEffort, "maxConcurrentTasks": in.MaxConcurrentTasks, "turnTimeoutMinutes": in.TurnTimeoutMinutes, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true, "requestCount": 0, "inputTokens": 0, "cachedInputTokens": 0, "outputTokens": 0, "reasoningTokens": 0, "totalTokens": 0})
 }
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	_, ok := s.human(w, r)
 	if !ok {
 		return
 	}
-	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.max_concurrent_tasks,a.turn_timeout_minutes,a.accept_tags_json,a.reject_tags_json,
-		(SELECT COUNT(*) FROM agent_requests r WHERE r.assigned_agent_id=a.id AND r.status='running')
+	rows, err := s.store.DB.Query(`SELECT a.id,a.name,a.purpose,a.status,a.runtime_type,a.model,a.reasoning_effort,a.max_concurrent_tasks,a.turn_timeout_minutes,a.accept_tags_json,a.reject_tags_json,
+		(SELECT COUNT(*) FROM agent_requests r WHERE r.assigned_agent_id=a.id AND r.status='running'),
+		(SELECT COUNT(*) FROM agent_requests r WHERE r.assigned_agent_id=a.id),
+		(SELECT COALESCE(SUM(input_tokens),0) FROM agent_requests r WHERE r.assigned_agent_id=a.id),
+		(SELECT COALESCE(SUM(cached_input_tokens),0) FROM agent_requests r WHERE r.assigned_agent_id=a.id),
+		(SELECT COALESCE(SUM(output_tokens),0) FROM agent_requests r WHERE r.assigned_agent_id=a.id),
+		(SELECT COALESCE(SUM(reasoning_tokens),0) FROM agent_requests r WHERE r.assigned_agent_id=a.id),
+		(SELECT COALESCE(SUM(total_tokens),0) FROM agent_requests r WHERE r.assigned_agent_id=a.id)
 		FROM agents a WHERE a.status<>'deleted' AND a.revoked_at IS NULL ORDER BY a.name`)
 	if err != nil {
 		writeError(w, err)
@@ -976,16 +990,17 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var id, name, purpose, status, acceptRaw, rejectRaw string
-		var runtimeType string
-		var capacity, timeout, running int
-		if err = rows.Scan(&id, &name, &purpose, &status, &runtimeType, &capacity, &timeout, &acceptRaw, &rejectRaw, &running); err != nil {
+		var runtimeType, model, reasoningEffort string
+		var capacity, timeout, running, requestCount int
+		var inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens int64
+		if err = rows.Scan(&id, &name, &purpose, &status, &runtimeType, &model, &reasoningEffort, &capacity, &timeout, &acceptRaw, &rejectRaw, &running, &requestCount, &inputTokens, &cachedInputTokens, &outputTokens, &reasoningTokens, &totalTokens); err != nil {
 			writeError(w, err)
 			return
 		}
 		acceptTags, rejectTags := []string{}, []string{}
 		_ = json.Unmarshal([]byte(acceptRaw), &acceptTags)
 		_ = json.Unmarshal([]byte(rejectRaw), &rejectTags)
-		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": status == "active", "runtimeType": runtimeType, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "currentLoad": running})
+		out = append(out, map[string]any{"id": id, "name": name, "purpose": purpose, "status": status, "enabled": status == "active", "runtimeType": runtimeType, "model": model, "reasoningEffort": reasoningEffort, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "currentLoad": running, "requestCount": requestCount, "inputTokens": inputTokens, "cachedInputTokens": cachedInputTokens, "outputTokens": outputTokens, "reasoningTokens": reasoningTokens, "totalTokens": totalTokens})
 	}
 	writeJSON(w, 200, out)
 }
@@ -1031,15 +1046,18 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name               string   `json:"name"`
 		Purpose            string   `json:"purpose"`
+		Model              *string  `json:"model"`
+		ReasoningEffort    *string  `json:"reasoningEffort"`
 		MaxConcurrentTasks int      `json:"maxConcurrentTasks"`
 		TurnTimeoutMinutes int      `json:"turnTimeoutMinutes"`
 		AcceptTags         []string `json:"acceptTags"`
 		RejectTags         []string `json:"rejectTags"`
 	}
 	decode(r, &in)
-	var name, purpose string
+	var name, purpose, model, reasoningEffort string
 	var capacity, timeout int
-	if err := s.store.DB.QueryRow("SELECT name,purpose,max_concurrent_tasks,turn_timeout_minutes FROM agents WHERE id=? AND status<>'deleted' AND revoked_at IS NULL", r.PathValue("id")).Scan(&name, &purpose, &capacity, &timeout); err != nil {
+	var err error
+	if err := s.store.DB.QueryRow("SELECT name,purpose,model,reasoning_effort,max_concurrent_tasks,turn_timeout_minutes FROM agents WHERE id=? AND status<>'deleted' AND revoked_at IS NULL", r.PathValue("id")).Scan(&name, &purpose, &model, &reasoningEffort, &capacity, &timeout); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -1055,6 +1073,17 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	if in.TurnTimeoutMinutes > 0 {
 		timeout = in.TurnTimeoutMinutes
 	}
+	if in.Model != nil {
+		model = *in.Model
+	}
+	if in.ReasoningEffort != nil {
+		reasoningEffort = *in.ReasoningEffort
+	}
+	model, reasoningEffort, err = normalizeAgentExecutionConfig(model, reasoningEffort)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	acceptTags, err := normalizeAgentTags(in.AcceptTags)
 	if err != nil {
 		writeError(w, err)
@@ -1067,12 +1096,25 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	acceptRaw, _ := json.Marshal(acceptTags)
 	rejectRaw, _ := json.Marshal(rejectTags)
-	if _, err = s.store.DB.Exec("UPDATE agents SET name=?,purpose=?,max_concurrent_tasks=?,turn_timeout_minutes=?,accept_tags_json=?,reject_tags_json=? WHERE id=?", name, purpose, capacity, timeout, string(acceptRaw), string(rejectRaw), r.PathValue("id")); err != nil {
+	if _, err = s.store.DB.Exec("UPDATE agents SET name=?,purpose=?,model=?,reasoning_effort=?,max_concurrent_tasks=?,turn_timeout_minutes=?,accept_tags_json=?,reject_tags_json=? WHERE id=?", name, purpose, model, reasoningEffort, capacity, timeout, string(acceptRaw), string(rejectRaw), r.PathValue("id")); err != nil {
 		writeError(w, err)
 		return
 	}
 	s.exec.Wake()
-	writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "name": name, "purpose": purpose, "runtimeType": "local_codex_cli", "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true})
+	writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "name": name, "purpose": purpose, "runtimeType": "local_codex_cli", "model": model, "reasoningEffort": reasoningEffort, "maxConcurrentTasks": capacity, "turnTimeoutMinutes": timeout, "acceptTags": acceptTags, "rejectTags": rejectTags, "enabled": true})
+}
+
+func normalizeAgentExecutionConfig(model, effort string) (string, string, error) {
+	model = strings.TrimSpace(model)
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if len(model) > 100 || strings.ContainsAny(model, " \t\r\n") {
+		return "", "", &domainError{422, "INVALID_MODEL", "Codex model must be a single identifier of at most 100 characters", nil}
+	}
+	valid := map[string]bool{"": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true}
+	if !valid[effort] {
+		return "", "", &domainError{422, "INVALID_REASONING_EFFORT", "Reasoning effort must be inherited, minimal, low, medium, high, or xhigh", nil}
+	}
+	return model, effort, nil
 }
 
 func normalizeAgentTags(values []string) ([]string, error) {

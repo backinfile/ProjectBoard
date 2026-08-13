@@ -36,6 +36,39 @@ func TestExecArgsAlwaysStartAFreshWritableSession(t *testing.T) {
 	}
 }
 
+func TestExecArgsApplyAgentModelAndReasoningEffort(t *testing.T) {
+	args := execArgs(Invocation{WorkDir: `C:\work\PB-1`, Model: "gpt-5.6-terra", ReasoningEffort: "high"}, `C:\schema.json`)
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "--model\x00gpt-5.6-terra") {
+		t.Fatalf("model was not passed to Codex: %#v", args)
+	}
+	if !strings.Contains(joined, "--config\x00model_reasoning_effort=\"high\"") {
+		t.Fatalf("reasoning effort was not passed to Codex: %#v", args)
+	}
+}
+
+func TestDefaultRunnerUsesAbsoluteResultSchemaPath(t *testing.T) {
+	module := New(nil, nil, nil, nil, Options{DataDir: "data"})
+	runner, ok := module.runner.(*ExecRunner)
+	if !ok {
+		t.Fatalf("default runner = %T", module.runner)
+	}
+	if !filepath.IsAbs(runner.SchemaPath) {
+		t.Fatalf("schema path must survive a project working-directory change: %q", runner.SchemaPath)
+	}
+}
+
+func TestParseTokenUsageSumsCompletedTurns(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":10}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":80,"cached_input_tokens":5,"output_tokens":25,"reasoning_output_tokens":7}}`,
+	}, "\n")
+	usage := parseTokenUsage(raw)
+	if usage.Input != 200 || usage.CachedInput != 25 || usage.Output != 55 || usage.Reasoning != 17 || usage.Total != 255 {
+		t.Fatalf("usage = %+v", usage)
+	}
+}
+
 func TestWindowsExecInputPreservesUnicodePromptAsArgument(t *testing.T) {
 	prompt := "创建并验收：鹦鹉骑自行车"
 	args, stdin := execInput(Invocation{WorkDir: `C:\work\PB-1`, Prompt: prompt}, `C:\schema.json`, "windows")
@@ -91,7 +124,7 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.DB.Exec("INSERT INTO agents(id,name,purpose,created_at) VALUES('a','Codex','Local',?)", stamp)
+	_, err = db.DB.Exec("INSERT INTO agents(id,name,purpose,model,reasoning_effort,created_at) VALUES('a','Codex','Local','gpt-5.6-terra','high',?)", stamp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +139,7 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{results: make(chan Result, 2), calls: make(chan Invocation, 2)}
-	runner.results <- Result{ThreadID: "thread-1", Status: "planned", Message: "Implementation plan"}
+	runner.results <- Result{ThreadID: "thread-1", Status: "planned", Message: "Implementation plan", Usage: TokenUsage{Input: 120, CachedInput: 20, Output: 30, Reasoning: 10, Total: 150}}
 	runner.results <- Result{ThreadID: "thread-1", Status: "paused", Message: "Waiting for input"}
 	module := New(db, queue, requests, knowledge.New(db), Options{DataDir: dir, Runner: runner, PollInterval: 10 * time.Millisecond})
 	if err = module.Start(); err != nil {
@@ -117,6 +150,9 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	case call := <-runner.calls:
 		if !call.PlanOnly {
 			t.Fatal("first turn was not plan-only")
+		}
+		if call.Model != "gpt-5.6-terra" || call.ReasoningEffort != "high" {
+			t.Fatalf("Agent execution config = model %q effort %q", call.Model, call.ReasoningEffort)
 		}
 		if !strings.Contains(call.Prompt, "Target branch: main") || !strings.Contains(call.Prompt, "Workflow: standard") {
 			t.Fatalf("prompt does not identify the local workflow: %s", call.Prompt)
@@ -134,6 +170,13 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	}
 	if request.Status != "succeeded" {
 		t.Fatalf("request status = %s", request.Status)
+	}
+	var inputTokens, outputTokens, reasoningTokens, totalTokens int64
+	if err = db.DB.QueryRow("SELECT input_tokens,output_tokens,reasoning_tokens,total_tokens FROM agent_requests WHERE id=?", request.ID).Scan(&inputTokens, &outputTokens, &reasoningTokens, &totalTokens); err != nil {
+		t.Fatal(err)
+	}
+	if inputTokens != 120 || outputTokens != 30 || reasoningTokens != 10 || totalTokens != 150 {
+		t.Fatalf("stored usage = %d/%d/%d/%d", inputTokens, outputTokens, reasoningTokens, totalTokens)
 	}
 	plan := ""
 	if request.FinalMessage != nil {

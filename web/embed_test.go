@@ -563,9 +563,12 @@ func TestFinalUIOnlyExposesSupportedLocalAgentWorkflow(t *testing.T) {
 	}
 
 	agentManagementStart := strings.LastIndex(app, "renderAgentManagement=async function")
-	agentManagementEnd := strings.Index(app[agentManagementStart:], "function managedProjectForm")
-	if agentManagementStart < 0 || agentManagementEnd < 0 {
+	if agentManagementStart < 0 {
 		t.Fatal("could not locate the final Agent management renderer")
+	}
+	agentManagementEnd := strings.Index(app[agentManagementStart:], "agentRequestDetail=async function")
+	if agentManagementEnd < 0 {
+		agentManagementEnd = len(app) - agentManagementStart
 	}
 	agentManagement := app[agentManagementStart : agentManagementStart+agentManagementEnd]
 	if strings.Contains(agentManagement, "disableForProject") {

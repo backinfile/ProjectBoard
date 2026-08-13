@@ -84,6 +84,8 @@ Knowledge uses a tree/document split view with search, node actions, lock state 
 
 Users, Agents, projects and audit events use full-width rows with hairline separators. A right-side drawer preserves list context for entity details and editing. Project drawers organize automation, repository and member settings; dangerous actions remain visually and spatially separate.
 
+Agent rows expose the effective model/reasoning profile, live capacity and total Token use without competing with identity. The Agent drawer separates cumulative Token statistics from editable Codex, capacity, timeout and routing configuration. Request details show the immutable execution profile and per-request Token breakdown.
+
 ### Buttons and fields
 
 Primary buttons use the accent color and white text. Secondary buttons use a neutral border. Inputs are at least 44 px high, with a visible focus ring. Disabled controls remain legible and clearly inactive.

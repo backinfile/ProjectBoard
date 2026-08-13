@@ -12,7 +12,7 @@ flowchart LR
   C --> G["Server-local Git repository"]
   G --> W["Standard task worktree"]
   S --> K
-  I --> D[("SQLite WAL · schema v9")]
+  I --> D[("SQLite WAL · schema v10")]
   T --> D
   R --> D
   K --> D
@@ -33,7 +33,7 @@ The data directory contains the default database, task attachments and request-s
 - `internal/agentrequest` owns one-shot request state, retry lineage, plan approval and knowledge-compaction policy.
 - `internal/agentexec` claims queued requests, accounts for Agent capacity, prepares repositories or workspaces, invokes Codex, records raw evidence, applies results and cleans validated workspaces.
 - `internal/knowledge` owns the project tree, keyword search, optimistic versions, node-local Agent locks, revisions, read snapshots and transactional structured operations.
-- `internal/store` owns schema v9 creation and strict version compatibility.
+- `internal/store` owns schema v10 creation, the narrow v9-to-v10 migration and strict compatibility for all other versions.
 - `internal/ops` owns consistent SQLite backup and checked restore. File attachments are outside that database operation.
 
 ## Authorization model
@@ -53,13 +53,13 @@ Authentication uses seven-day cookie sessions. Unsafe API methods require a CSRF
 7. Project knowledge maintenance is serialized. At most one task or global knowledge request runs for a project at a time.
 8. Standard work runs on `projectboard/<project-key>/<task-number>` in sibling `worktrees/<project-key>-<task-number>`. Simple-conversation and merge work run in the project repository.
 9. Writes to a project repository are serialized. ProjectBoard never automatically resets, stashes, fetches, pulls or pushes.
-10. Schema v9 rejects every other schema version rather than attempting an implicit migration.
+10. Schema v10 supports one explicit, additive migration from v9. Every other schema version is rejected.
 
 ## Task and request state
 
 Standard tasks use `created → in_progress → completed → closed`. Simple-conversation tasks use `created → in_progress → closed`. Blocking is an independent state, not an additional stage.
 
-Agent requests use `queued`, `running`, `succeeded`, `failed` or `cancelled`. Each request stores its command, prompt, thread ID, raw JSONL, final message, result, workspace, timestamps and error. Plan approval and retry preserve lineage by creating another request.
+Agent requests use `queued`, `running`, `succeeded`, `failed` or `cancelled`. When claimed, each request snapshots the selected Agent's model and reasoning effort. It stores its command, prompt, thread ID, raw JSONL, final message, result, workspace, timestamps, error and Token counters. Plan approval and retry preserve lineage by creating another request.
 
 The scheduler is event-woken with polling fallback. Agent selection applies status, capacity and accept/reject tags. Interrupted, invalid, dirty, stalled or failed requests preserve evidence and pause the related task safely. Main-repository writes are serialized per project; ordinary task worktrees may execute independently.
 
