@@ -96,7 +96,7 @@ sudo systemctl stop projectboard
 sudo systemctl start projectboard
 ```
 
-恢复会校验备份数据库，并把原数据库保留为 `projectboard.db.before-restore`。当前 schema 为 v10；v9 会自动迁移到 v10，其他版本会被拒绝。
+恢复会校验备份数据库，并把原数据库保留为 `projectboard.db.before-restore`。当前 schema 为 v11；v9 和 v10 会自动迁移到 v11，其他版本会被拒绝。
 
 ## 发布检查
 

@@ -38,12 +38,19 @@ func Open(file string) (*Store, error) {
 			db.Close()
 			return nil, fmt.Errorf("read database schema version: %w", err)
 		}
-		if version == 9 && SchemaVersion == 10 {
-			if err = migrateV9ToV10(db); err != nil {
+		if version == 9 && SchemaVersion == 11 {
+			if err = migrateV9ToV11(db); err != nil {
 				db.Close()
-				return nil, fmt.Errorf("migrate database schema 9 to 10: %w", err)
+				return nil, fmt.Errorf("migrate database schema 9 to 11: %w", err)
 			}
-			version = 10
+			version = 11
+		}
+		if version == 10 && SchemaVersion == 11 {
+			if err = migrateV10ToV11(db); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("migrate database schema 10 to 11: %w", err)
+			}
+			version = 11
 		}
 		if version != SchemaVersion {
 			db.Close()
@@ -57,36 +64,51 @@ func Open(file string) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
-const SchemaVersion = 10
+const SchemaVersion = 11
 
-func migrateV9ToV10(db *sql.DB) error {
+var agentModelMigrationStatements = []string{
+	"ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE agents ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE agent_requests ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE agent_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''",
+	"ALTER TABLE agent_requests ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
+	"ALTER TABLE agent_requests ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0",
+	"ALTER TABLE agent_requests ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
+	"ALTER TABLE agent_requests ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0",
+	"ALTER TABLE agent_requests ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
+}
+
+var knowledgeSearchMigrationStatements = []string{
+	`ALTER TABLE knowledge_nodes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE knowledge_nodes ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE knowledge_node_revisions ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE knowledge_node_revisions ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
+	`CREATE VIRTUAL TABLE knowledge_search USING fts5(node_id UNINDEXED, project_id UNINDEXED, title, summary, trigger_description, markdown, tokenize='trigram')`,
+	`INSERT INTO knowledge_search(node_id,project_id,title,summary,trigger_description,markdown) SELECT id,project_id,title,summary,trigger_description,markdown FROM knowledge_nodes WHERE deleted_at IS NULL`,
+}
+
+func migrateV9ToV11(db *sql.DB) error {
+	statements := append([]string{}, agentModelMigrationStatements...)
+	statements = append(statements, knowledgeSearchMigrationStatements...)
+	return migrateToV11(db, 9, statements)
+}
+
+func migrateV10ToV11(db *sql.DB) error {
+	return migrateToV11(db, 10, knowledgeSearchMigrationStatements)
+}
+
+func migrateToV11(db *sql.DB, fromVersion int, statements []string) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for _, statement := range []string{
-		"ALTER TABLE agents ADD COLUMN model TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE agents ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE agent_requests ADD COLUMN model TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE agent_requests ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''",
-		"ALTER TABLE agent_requests ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE agent_requests ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE agent_requests ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE agent_requests ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0",
-		"ALTER TABLE agent_requests ADD COLUMN total_tokens INTEGER NOT NULL DEFAULT 0",
-		`ALTER TABLE knowledge_nodes ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE knowledge_nodes ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE knowledge_node_revisions ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE knowledge_node_revisions ADD COLUMN trigger_description TEXT NOT NULL DEFAULT ''`,
-		`CREATE VIRTUAL TABLE knowledge_search USING fts5(node_id UNINDEXED, project_id UNINDEXED, title, summary, trigger_description, markdown, tokenize='trigram')`,
-		`INSERT INTO knowledge_search(node_id,project_id,title,summary,trigger_description,markdown) SELECT id,project_id,title,summary,trigger_description,markdown FROM knowledge_nodes WHERE deleted_at IS NULL`,
-	} {
+	for _, statement := range statements {
 		if _, err = tx.Exec(statement); err != nil {
 			return err
 		}
 	}
-	if _, err = tx.Exec("UPDATE schema_metadata SET version=10 WHERE id=1 AND version=9"); err != nil {
+	if _, err = tx.Exec("UPDATE schema_metadata SET version=11 WHERE id=1 AND version=?", fromVersion); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -108,7 +130,7 @@ func (s *Store) Write(ctx context.Context, fn func(*sql.Tx) error) error {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_metadata(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL, created_at TEXT NOT NULL);
-INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,10,CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO schema_metadata(id,version,created_at) VALUES(1,11,CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, system_role TEXT NOT NULL CHECK(system_role IN('administrator','user')), status TEXT NOT NULL DEFAULT 'active', must_change_password INTEGER NOT NULL DEFAULT 0, disabled_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_active_at TEXT);
 CREATE TABLE IF NOT EXISTS system_settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_by TEXT NOT NULL REFERENCES users(id), updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, csrf_hash TEXT NOT NULL, user_agent TEXT, ip TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, created_at TEXT NOT NULL);

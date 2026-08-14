@@ -74,7 +74,7 @@ func TestOpenRejectsPreviousSchemaWithoutMigration(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesSchemaNineWithoutLosingData(t *testing.T) {
+func TestMigratesSchemaNineToElevenWithoutLosingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v9.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestOpenMigratesSchemaNineWithoutLosingData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer migrated.Close()
-	if err = migrateV9ToV10(migrated); err != nil {
+	if err = migrateV9ToV11(migrated); err != nil {
 		t.Fatal(err)
 	}
 	var version int
@@ -126,6 +126,36 @@ func TestOpenMigratesSchemaNineWithoutLosingData(t *testing.T) {
 	}
 	if version != SchemaVersion || name != "Existing" || model != "" || effort != "" || body != "preserved body" || summary != "" || indexed != 1 {
 		t.Fatalf("migration result version=%d agent=%q model=%q effort=%q body=%q summary=%q indexed=%d", version, name, model, effort, body, summary, indexed)
+	}
+}
+
+func TestMigratesSchemaTenToElevenWithKnowledgeSearch(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "v10.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err = database.Exec(`CREATE TABLE schema_metadata(id INTEGER PRIMARY KEY, version INTEGER NOT NULL, created_at TEXT NOT NULL);
+		INSERT INTO schema_metadata VALUES(1,10,CURRENT_TIMESTAMP);
+		CREATE TABLE projects(id TEXT PRIMARY KEY);
+		INSERT INTO projects VALUES('p');
+		CREATE TABLE knowledge_nodes(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), parent_id TEXT REFERENCES knowledge_nodes(id), title TEXT NOT NULL, markdown TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, locked_for_agents INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_by_type TEXT NOT NULL, created_by_id TEXT, created_at TEXT NOT NULL, updated_by_type TEXT NOT NULL, updated_by_id TEXT, updated_at TEXT NOT NULL);
+		INSERT INTO knowledge_nodes VALUES('n','p',NULL,'Runbook','preserved body',0,0,1,NULL,'human','u','now','human','u','now');
+		CREATE TABLE knowledge_node_revisions(id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES knowledge_nodes(id), version INTEGER NOT NULL, parent_id TEXT, title TEXT NOT NULL, markdown TEXT NOT NULL, sort_order INTEGER NOT NULL, locked_for_agents INTEGER NOT NULL, file_ids_json TEXT NOT NULL DEFAULT '[]', actor_type TEXT NOT NULL, actor_id TEXT, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(node_id,version));`); err != nil {
+		t.Fatal(err)
+	}
+	if err = migrateV10ToV11(database); err != nil {
+		t.Fatal(err)
+	}
+	var version, indexed int
+	if err = database.QueryRow("SELECT version FROM schema_metadata WHERE id=1").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.QueryRow("SELECT COUNT(*) FROM knowledge_search WHERE knowledge_search MATCH 'preserved'").Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion || indexed != 1 {
+		t.Fatalf("migration result version=%d indexed=%d", version, indexed)
 	}
 }
 

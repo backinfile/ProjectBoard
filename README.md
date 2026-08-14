@@ -71,7 +71,7 @@ PROJECTBOARD_BOOTSTRAP_PASSWORD='change-this-password' ./projectboard serve
 
 知识 Agent 只能提交完整、结构化的节点操作。服务端在一个事务中校验项目归属、版本和 Agent 锁；锁只阻止 Agent 修改当前节点，不阻止成员修改，也不继承到子节点。摘要和触发描述与正文一起进入修订历史。当前知识节点不支持附件或外部文件引用。
 
-SQLite 使用 WAL，当前 schema 为 v10。首次打开 v9 数据库时会事务性增加 Agent 模型与 Token 字段、知识触发元数据和 FTS5 索引，并迁移到 v10；其他 schema 会被拒绝。升级前仍应先备份。
+SQLite 使用 WAL，当前 schema 为 v11。首次打开 v9 数据库时会事务性增加 Agent 模型与 Token 字段、知识触发元数据和 FTS5 索引，并迁移到 v11；v10 会补充知识元数据和索引后迁移到 v11；其他 schema 会被拒绝。升级前仍应先备份。
 
 ```bash
 ./projectboard backup ./backups/projectboard.db

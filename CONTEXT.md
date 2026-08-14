@@ -11,4 +11,4 @@
 - Human surface: an embedded Web UI and cookie-session HTTP API protected by CSRF and security headers. The binary binds to loopback; production HTTPS terminates at a reverse proxy.
 - Git: ordinary local Git only. ProjectBoard stores no provider credentials and performs no automatic network operations.
 - Usage: each completed Codex turn contributes input, cached-input, output, reasoning, and total token counters to its immutable request; Agent APIs aggregate those counters.
-- Persistence: SQLite WAL schema v10 plus file attachments and temporary Agent workspaces under the data directory. Schema v9 migrates transactionally to v10; other versions are rejected.
+- Persistence: SQLite WAL schema v11 plus file attachments and temporary Agent workspaces under the data directory. Schema v9 and v10 migrate transactionally to v11; other versions are rejected.

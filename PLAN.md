@@ -9,7 +9,7 @@
 - One-shot Agent requests for planning, execution, merge and knowledge maintenance, including cancellation, retry, plan approval and raw output retention.
 - Versioned project knowledge trees with search, move, lock, restore and transactional Agent operations.
 - Per-request Token accounting with per-Agent aggregate statistics in the API and Web UI.
-- Embedded responsive Web UI, SQLite WAL persistence, health checks, database backup/restore and schema v10 compatibility enforcement.
+- Embedded responsive Web UI, SQLite WAL persistence, health checks, database backup/restore and schema v11 compatibility enforcement.
 
 ## Current operational constraints
 
@@ -23,6 +23,6 @@
 - Other Agent runtimes, SSH/MCP runners, remote execution and user-selectable CLI path, profile or arbitrary arguments.
 - Git provider authorization, webhook ingestion and automatic `fetch`, `pull`, `push` or background commit synchronization.
 - Priority-aware Agent scheduling, automatic conflict resolution, vector search, knowledge graphs and real-time collaborative editing.
-- Automatic migration from pre-v9 databases or compatibility with removed APIs and execution models. The only supported migration is v9 to v10.
+- Automatic migration from pre-v9 databases or compatibility with removed APIs and execution models. The supported migrations are v9 and v10 to v11.
 
 Future work should be added only after the user-facing contract in `PRODUCT.md` and the invariants in `docs/ARCHITECTURE.md` are updated together.

@@ -1,6 +1,6 @@
 # Knowledge base and Agent memory research
 
-调研时间：2026-08-12；按 2026-08-13 的 schema v10 实现重新核对。这里记录候选项目与 ProjectBoard 当前实际采用的模式；GitHub 热度会变化，因此不固化 star 数。
+调研时间：2026-08-12；按 2026-08-14 的 schema v11 实现重新核对。这里记录候选项目与 ProjectBoard 当前实际采用的模式；GitHub 热度会变化，因此不固化 star 数。
 
 ## 当前实现对照
 

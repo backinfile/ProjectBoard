@@ -14,7 +14,7 @@ flowchart LR
   C --> G["Server-local Git repository"]
   G --> W["Standard task worktree"]
   S --> K
-  I --> D[("SQLite WAL · schema v10")]
+  I --> D[("SQLite WAL · schema v11")]
   T --> D
   R --> D
   K --> D
@@ -36,7 +36,7 @@ The data directory contains the default database, task attachments and request-s
 - `internal/agentexec` claims queued requests, accounts for Agent capacity, prepares repositories or workspaces, injects the knowledge catalog, configures a request-scoped MCP, invokes Codex, records raw evidence, applies results and cleans validated workspaces.
 - `internal/knowledge` owns the project tree, discovery metadata, FTS5 search, project-scoped reads, optimistic versions, node-local Agent locks, revisions, read snapshots and transactional structured operations.
 - `internal/knowledgemcp` is a read-only STDIO adapter that binds the knowledge interface to exactly one project for one Codex process.
-- `internal/store` owns schema v10 creation, the transactional v9-to-v10 migration, and strict compatibility for other versions.
+- `internal/store` owns schema v11 creation, the transactional v9/v10-to-v11 migrations, and strict compatibility for other versions.
 - `internal/ops` owns consistent SQLite backup and checked restore. File attachments are outside that database operation.
 
 ## Authorization model
@@ -57,7 +57,7 @@ Authentication uses seven-day cookie sessions. Unsafe API methods require a CSRF
 8. Ordinary task requests receive only knowledge discovery metadata initially; full node content is read on demand through project-scoped tools. Knowledge-maintenance requests retain the complete snapshot.
 9. Standard work runs on `projectboard/<project-key>/<task-number>` in sibling `worktrees/<project-key>-<task-number>`. Simple-conversation and merge work run in the project repository.
 10. Writes to a project repository are serialized. ProjectBoard never automatically resets, stashes, fetches, pulls or pushes.
-11. Schema v9 migrates transactionally to v10; every other prior schema is rejected.
+11. Schema v9 and v10 migrate transactionally to v11; every other prior schema is rejected.
 
 ## Task and request state
 
