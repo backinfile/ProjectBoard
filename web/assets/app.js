@@ -920,7 +920,7 @@ const taskWorkspacePage={
     for(const id of [...taskWorkspaceIDs('pinned'),...taskWorkspaceIDs('recent')])if(byID.has(id))return byID.get(id);
     return [...items].sort((a,b)=>taskAttentionScore(b)-taskAttentionScore(a)||String(b.updated_at||'').localeCompare(String(a.updated_at||'')))[0]||null
   },
-  async open(taskID=null){state.page=this.id;state.task=taskID;writeCurrentRoute();renderShell()},
+  async open(taskID=null){pageFramework.open(this.id,{taskID})},
   async select(taskID){if(!taskID||taskID===state.task)return;state.page=this.id;state.task=taskID;writeCurrentRoute();await renderTask()},
   async render(){
     if(!state.project){$('.shell')?.classList.remove('task-detail-shell');return renderQueue()}
@@ -1346,22 +1346,9 @@ localAgentDrawer=function(agent){
 };
 agentSettings=localAgentDrawer;
 
-boot();
-
 /* Project knowledge and one-shot Agent Requests. */
 Object.assign(messages.zh,{knowledge:'知识库',knowledgeNote:'以树状层级组织项目知识，由成员与 Agent 共同维护。',knowledgeTree:'项目知识树',knowledgeNodeCount:'{count} 个节点',knowledgeUpdated:'更新于 {time} · {actor}',knowledgeNoResults:'没有匹配的知识节点',synced:'已同步',agentLockedShort:'Agent 已锁定',agentEditable:'Agent 可编辑',agentRequests:'Agent 需求',agentRequestsNote:'所有 Agent 执行都以一次性需求排队、运行并保留结果。',newKnowledgeNode:'新建节点',newChildNode:'新建子节点',nodeTitle:'节点标题',nodeSummary:'知识摘要',nodeSummaryNote:'用一两句话说明这条知识是什么，Agent 会先看到这里。',nodeTrigger:'何时使用',nodeTriggerNote:'说明哪些任务、目录、阶段或不确定情况应触发查询。',nodeMarkdown:'Markdown 内容',noKnowledge:'知识库还是空的',noKnowledgeNote:'创建第一个节点，建立项目长期上下文。',lockedForAgents:'已锁定 Agent 修改',lockForAgents:'锁定 Agent',unlockForAgents:'解除 Agent 锁',revisionHistory:'版本历史',restoreRevision:'恢复此版本',agentRequest:'交给 Agent',planFirst:'先生成计划',executeNow:'直接执行',retryRequest:'新建重试需求',cancelRequest:'中断需求',approvePlan:'批准计划并执行',requestType:'需求类型',sourceTask:'来源任务',rawLog:'原始日志',noAgentRequests:'暂无 Agent 需求',noAgentRequestsNote:'任务操作和知识整理会自动在这里生成需求。',projectRoot:'项目根节点',knowledgeSaved:'知识节点已保存',requestCreated:'Agent 需求已创建',delete:'删除'});
 Object.assign(messages.en,{knowledge:'Knowledge',knowledgeNote:'Project knowledge organized as a hierarchy and maintained by members and Agents.',knowledgeTree:'Project knowledge tree',knowledgeNodeCount:'{count} nodes',knowledgeUpdated:'Updated {time} · {actor}',knowledgeNoResults:'No matching knowledge nodes',synced:'Synced',agentLockedShort:'Agent locked',agentEditable:'Agent editable',agentRequests:'Agent requests',agentRequestsNote:'Every Agent run is a one-shot request with a durable result.',newKnowledgeNode:'New node',newChildNode:'New child',nodeTitle:'Node title',nodeSummary:'Knowledge summary',nodeSummaryNote:'Describe this knowledge in one or two sentences. Agents see this before the full content.',nodeTrigger:'When to use',nodeTriggerNote:'Describe the tasks, paths, phases, or uncertainties that should trigger retrieval.',nodeMarkdown:'Markdown content',noKnowledge:'The knowledge base is empty',noKnowledgeNote:'Create the first node to establish durable project context.',lockedForAgents:'Locked for Agent edits',lockForAgents:'Lock Agent edits',unlockForAgents:'Unlock Agent edits',revisionHistory:'Revision history',restoreRevision:'Restore revision',agentRequest:'Ask Agent',planFirst:'Plan first',executeNow:'Execute now',retryRequest:'Create retry request',cancelRequest:'Cancel request',approvePlan:'Approve plan and execute',requestType:'Request type',sourceTask:'Source task',rawLog:'Raw log',noAgentRequests:'No Agent requests',noAgentRequestsNote:'Task actions and knowledge maintenance create requests here automatically.',projectRoot:'Project root',knowledgeSaved:'Knowledge node saved',requestCreated:'Agent request created',delete:'Delete'});
-
-const knowledgeBaseRoute=currentRouteHash;
-currentRouteHash=function(){const base=projectRouteBase();if(base&&state.page==='knowledge')return `#${base}/knowledge`;if(base&&state.page==='agentRequests')return `#${base}/agent-requests`;return knowledgeBaseRoute()};
-const knowledgeApplyRoute=applyRouteFromURL;
-applyRouteFromURL=function(){knowledgeApplyRoute();const parts=location.hash.replace(/^#\/?/,'').split('/').filter(Boolean).map(part=>{try{return decodeURIComponent(part)}catch{return part}});if(parts[0]==='projects'&&parts[2]==='knowledge'){state.page='knowledge';state.task=null}if(parts[0]==='projects'&&parts[2]==='agent-requests'){state.page='agentRequests';state.task=null}};
-
-const knowledgePageRouter=renderPage;
-renderPage=async function(){if(state.page==='taskWorkspace')return taskWorkspacePage.render();if(state.page==='knowledge')return renderKnowledge();if(state.page==='agentRequests')return renderAgentRequests();return knowledgePageRouter()};
-
-const knowledgeShell=renderShell;
-renderShell=function(){knowledgeShell();const primary=$('.rail .nav');if(!primary||!state.project)return;const queue=primary.querySelector('[data-page="queue"]');for(const [page,label,iconName] of [['agentRequests','agentRequests','bot'],['knowledge','knowledge','book-open'],['taskWorkspace','taskWorkspace','message']]){let button=primary.querySelector(`[data-page="${page}"]`);if(!button){button=document.createElement('button');button.dataset.page=page;button.innerHTML=`${icon(iconName)}<span>${t(label)}</span>`;queue?.after(button);button.onclick=()=>navigate(page)}button.classList.toggle('active',state.page===page)}};
 
 const knowledgeCollapsedNodes=new Set();
 function knowledgeSearchText(node){return `${node.title}\n${node.summary||''}\n${node.triggerDescription||''}\n${node.markdown||''}`}
@@ -1422,3 +1409,59 @@ renderAgentManagement=async function(){
 
 agentRequestDetail=async function(id){const request=await api(`/api/agent-requests/${id}`),terminal=['succeeded','failed','cancelled'].includes(request.status),result=request.finalMessage||request.resultJson||'',actions=`${request.kind==='task_plan'&&request.status==='succeeded'?`<button class="button primary" id="approvePlan">${icon('check')}${t('approvePlan')}</button>`:''}${terminal?`<button class="button" id="retryRequest">${icon('history')}${t('retryRequest')}</button>`:`<button class="button danger" id="cancelRequest">${icon('x')}${t('cancelRequest')}</button>`}`,runtime=request.model||request.reasoningEffort?`<dl class="settings-summary-rows">${settingsSummaryRow(t('codexModel'),escapeHTML(request.model||t('inheritCodexConfig')))}${settingsSummaryRow(t('reasoningEffort'),escapeHTML(request.reasoningEffort||t('inheritCodexConfig')))}${settingsSummaryRow(t('totalTokens'),tokenNumber(request.totalTokens))}${settingsSummaryRow(t('inputTokens'),tokenNumber(request.inputTokens))}${settingsSummaryRow(t('cachedInputTokens'),tokenNumber(request.cachedInputTokens))}${settingsSummaryRow(t('outputTokens'),tokenNumber(request.outputTokens))}${settingsSummaryRow(t('reasoningTokens'),tokenNumber(request.reasoningTokens))}</dl>`:'';openDrawer(request.id,`<section class="agent-request-detail"><header><span>${badge(request.status,request.status==='succeeded'?'signal':request.status==='failed'?'danger':'')}</span><h3>${escapeHTML(request.title)}</h3><p>${escapeHTML(requestKindLabel[request.kind]||request.kind)}${request.sourceWorkItemId?` · ${escapeHTML(request.sourceWorkItemId)}`:''}</p></header>${runtime}<article><h4>${t('outcome')}</h4><pre>${escapeHTML(result||'—')}</pre></article>${request.outputJsonl?`<details><summary>${t('rawLog')}</summary><pre>${escapeHTML(request.outputJsonl)}</pre></details>`:''}<div class="drawer-actions">${actions}</div></section>`,()=>{$('#approvePlan')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/approve-plan`,{method:'POST',body:'{}'});closeDrawer();toast(t('requestCreated'));renderAgentRequests()});$('#retryRequest')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/retry`,{method:'POST',body:'{}'});closeDrawer();toast(t('requestCreated'));renderAgentRequests()});$('#cancelRequest')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/cancel`,{method:'POST',body:'{}'});closeDrawer();renderAgentRequests()})})};
 agentRequestDetail=async function(id){const request=await api(`/api/agent-requests/${id}`),terminal=['succeeded','failed','cancelled'].includes(request.status),result=request.finalMessage||request.resultJson||'',actions=`${request.kind==='task_plan'&&request.status==='succeeded'?`<button class="button primary" id="approvePlan">${icon('check')}${t('approvePlan')}</button>`:''}${terminal?`<button class="button" id="retryRequest">${icon('history')}${t('retryRequest')}</button>`:`<button class="button danger" id="cancelRequest">${icon('x')}${t('cancelRequest')}</button>`}`,runtime=`<dl class="settings-summary-rows">${settingsSummaryRow(t('codexModel'),escapeHTML(request.model||t('inheritCodexConfig')))}${settingsSummaryRow(t('reasoningEffort'),escapeHTML(reasoningLabel(request.reasoningEffort)))}${settingsSummaryRow(t('totalTokens'),tokenNumber(request.totalTokens))}${settingsSummaryRow(t('inputTokens'),tokenNumber(request.inputTokens))}${settingsSummaryRow(t('cachedInputTokens'),tokenNumber(request.cachedInputTokens))}${settingsSummaryRow(t('outputTokens'),tokenNumber(request.outputTokens))}${settingsSummaryRow(t('reasoningTokens'),tokenNumber(request.reasoningTokens))}</dl>`;openDrawer(request.id,`<section class="agent-request-detail"><header><span>${badge(request.status,request.status==='succeeded'?'signal':request.status==='failed'?'danger':'')}</span><h3>${escapeHTML(request.title)}</h3><p>${escapeHTML(requestKindLabel[request.kind]||request.kind)}${request.sourceWorkItemId?` · ${escapeHTML(request.sourceWorkItemId)}`:''}</p></header>${runtime}${request.errorMessage?`<article class="form-error"><h4>${t('executionError')}</h4><pre>${escapeHTML(request.errorMessage)}</pre></article>`:''}<article><h4>${t('outcome')}</h4><pre>${escapeHTML(result||'—')}</pre></article>${request.outputJsonl?`<details><summary>${t('rawLog')}</summary><pre>${escapeHTML(request.outputJsonl)}</pre></details>`:''}<div class="drawer-actions">${actions}</div></section>`,()=>{$('#approvePlan')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/approve-plan`,{method:'POST',body:'{}'});closeDrawer();toast(t('requestCreated'));renderAgentRequests()});$('#retryRequest')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/retry`,{method:'POST',body:'{}'});closeDrawer();toast(t('requestCreated'));renderAgentRequests()});$('#cancelRequest')?.addEventListener('click',async()=>{await api(`/api/agent-requests/${id}/cancel`,{method:'POST',body:'{}'});closeDrawer();renderAgentRequests()})})};
+
+/* Shared project-page framework. Every top-level tab is an Adapter at this seam. */
+const pageAdapters=[
+  {id:'queue',label:'queue',icon:'list',group:'primary',segment:'queue',render:()=>renderQueue()},
+  {id:'taskWorkspace',label:'taskWorkspace',icon:'message',group:'primary',segment:'tasks',requiresProject:true,layout:'focus',enter:context=>{state.task=context.taskID||null},path:base=>`#${base}/tasks${state.task?`/${encodeURIComponent(state.task)}`:''}`,restore:parts=>{state.task=parts[3]||null},render:()=>taskWorkspacePage.render()},
+  {id:'knowledge',label:'knowledge',icon:'book-open',group:'primary',segment:'knowledge',requiresProject:true,render:()=>renderKnowledge()},
+  {id:'agentRequests',label:'agentRequests',icon:'bot',group:'primary',segment:'agent-requests',requiresProject:true,render:()=>renderAgentRequests()},
+  {id:'myQueue',label:'myQueue',icon:'list',segment:'my-queue',render:()=>renderQueue()},
+  {id:'messages',label:'messages',icon:'bell',group:'secondary',segment:'messages',render:()=>renderMessages()},
+  {id:'settings',label:'settings',icon:'settings',group:'utility',segment:'settings',global:true,path:()=>`#/settings/${encodeURIComponent(state.settingsSection||'account')}`,restore:parts=>{state.settingsSection=['account','agentsManagement','users','projects','audit','system','runner'].includes(parts[1])?parts[1]:'account'},render:()=>renderSettingsHub()}
+];
+
+const pageFramework={
+  adapters:new Map(pageAdapters.map(adapter=>[adapter.id,adapter])),
+  adapter(pageID=state.page){return this.adapters.get(pageID)||this.adapters.get('queue')},
+  open(pageID,context={}){
+    const adapter=this.adapter(pageID);state.page=adapter.id;state.task=null;adapter.enter?.(context);writeCurrentRoute();this.shell()
+  },
+  route(){
+    const adapter=this.adapter(),base=projectRouteBase();
+    if(adapter.path)return adapter.path(base);
+    if(adapter.global)return `#/${adapter.segment}`;
+    return base?`#${base}/${adapter.segment}`:`#/${adapter.segment}`
+  },
+  hydrate(){
+    const parts=location.hash.replace(/^#\/?/,'').split('/').filter(Boolean).map(part=>{try{return decodeURIComponent(part)}catch{return part}});state.task=null;
+    if(parts[0]==='settings'){state.page='settings';this.adapter('settings').restore(parts);return}
+    if(parts[0]==='projects'){
+      const selected=state.projects.find(project=>project.key===parts[1]||project.id===parts[1]);if(selected){state.project=selected;localStorage.pbProject=selected.id}
+      if(parts[2]==='settings'){state.page='settings';state.settingsSection='projects';state.managedProjectID=selected?.id||'';state.managedProjectTab=['automation','repository','members'].includes(parts[3])?parts[3]:'automation';return}
+      const adapter=pageAdapters.find(candidate=>candidate.segment===(parts[2]||'queue')&&!candidate.global)||this.adapter('queue');state.page=adapter.id;adapter.restore?.(parts);return
+    }
+    const adapter=pageAdapters.find(candidate=>candidate.segment===(parts[0]||'queue')&&!candidate.requiresProject)||this.adapter('queue');state.page=adapter.id;adapter.restore?.(parts)
+  },
+  async render(){
+    const root=$('#workspace'),adapter=this.adapter();if(!root)return;
+    const shell=$('.shell');shell?.classList.toggle('task-detail-shell',adapter.layout==='focus');shell?.setAttribute('data-page',adapter.id);root.dataset.page=adapter.id;
+    try{if(adapter.requiresProject&&!state.project)return this.adapter('queue').render();await adapter.render()}catch(error){root.innerHTML=header(t('loadFailed'),t('loadFailedNote'))+`<div class="content"><div class="form-error">${escapeHTML(error.message)}</div></div>`}
+  },
+  navigation(group){
+    return pageAdapters.filter(adapter=>adapter.group===group&&(!adapter.requiresProject||state.project)).map(adapter=>`<button data-page="${adapter.id}" class="${state.page===adapter.id?'active':''}" title="${escapeHTML(t(adapter.label))}" aria-label="${escapeHTML(t(adapter.label))}">${icon(adapter.icon)}<span>${t(adapter.label)}</span>${adapter.id==='messages'?'<em class="nav-message-badge" hidden></em>':''}</button>`).join('')
+  },
+  shell(){
+    if(!state.routeHydrated){this.hydrate();state.routeHydrated=true}writeCurrentRoute();syncDocumentLocale();const adapter=this.adapter(),collapsed=localStorage.pbRailCollapsed==='true';state.railCollapsed=collapsed;
+    $('#app').innerHTML=`<div class="shell ${collapsed?'rail-collapsed':''} ${adapter.layout==='focus'?'task-detail-shell':''}" data-page="${adapter.id}"><header class="mast"><div class="brand"><span class="brand-mark">PB</span><span>ProjectBoard</span></div><div class="mast-actions"><button id="railCollapse" class="rail-toggle" type="button" aria-expanded="${!collapsed}" aria-label="${t(collapsed?'expandSidebar':'collapseSidebar')}" title="${t(collapsed?'expandSidebar':'collapseSidebar')}">${icon('chevron')}</button></div></header><div class="workspace-grid"><aside class="rail"><button class="project-switch" id="projectSwitch"><span class="project-mark">${state.project?escapeHTML(state.project.key.slice(0,2).toUpperCase()):'--'}</span><span><strong>${escapeHTML(state.project?.name||t('noProjects'))}</strong><small>${escapeHTML(state.project?.projectPath||t('projectSetup'))}</small></span>${icon('chevron')}</button><nav class="nav rail-primary">${this.navigation('primary')}</nav><nav class="nav rail-bottom">${this.navigation('secondary')}<button class="nav-locale" id="locale" type="button" title="${t(state.locale==='zh'?'switchToEnglish':'switchToChinese')}" aria-label="${t(state.locale==='zh'?'switchToEnglish':'switchToChinese')}">${icon('globe')}<span>${state.locale==='zh'?'English':'中文'}</span></button>${this.navigation('utility')}</nav><div class="rail-foot">${t('footerRuntime')}<br>${t('footerEmbedded')}</div></aside><main class="workspace" id="workspace" data-page="${adapter.id}"></main></div></div><div class="drawer-backdrop" id="drawerBackdrop"></div><aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-hidden="true"></aside>`;
+    document.querySelectorAll('button[data-page]').forEach(button=>button.onclick=()=>this.open(button.dataset.page));wireLocaleControl();$('#projectSwitch').onclick=projectPicker;$('#drawerBackdrop').onclick=closeDrawer;document.removeEventListener('keydown',escapeDrawer);document.addEventListener('keydown',escapeDrawer);const collapse=$('#railCollapse');collapse.onclick=()=>{state.railCollapsed=!state.railCollapsed;localStorage.pbRailCollapsed=String(state.railCollapsed);this.shell()};refreshUnreadMessageBadge();this.render()
+  }
+};
+
+currentRouteHash=()=>pageFramework.route();
+applyRouteFromURL=()=>pageFramework.hydrate();
+navigate=pageID=>pageFramework.open(pageID);
+renderPage=()=>pageFramework.render();
+renderShell=()=>pageFramework.shell();
+
+boot();

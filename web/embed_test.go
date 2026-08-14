@@ -425,26 +425,42 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	}
 }
 
-func TestTaskDetailIsAnIndependentProjectPage(t *testing.T) {
+func TestAllTabsUseTheSharedPageFramework(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	for _, marker := range []string{
+		"const pageAdapters=[",
+		"const pageFramework={",
+		"open(pageID,context={})",
+		"route()",
+		"hydrate()",
+		"async render()",
+		"shell()",
+		"currentRouteHash=()=>pageFramework.route()",
+		"applyRouteFromURL=()=>pageFramework.hydrate()",
+		"navigate=pageID=>pageFramework.open(pageID)",
+		"renderPage=()=>pageFramework.render()",
+		"renderShell=()=>pageFramework.shell()",
+		"id:'queue'",
 		"const taskWorkspacePage={",
 		"id:'taskWorkspace'",
-		"segment:'tasks'",
-		"async open(taskID=null)",
-		"async render()",
-		"state.page==='taskWorkspace'",
-		"parts[2]==='tasks'",
-		"['taskWorkspace','taskWorkspace','message']",
+		"id:'knowledge'",
+		"id:'agentRequests'",
+		"id:'messages'",
+		"id:'settings'",
 		"taskWorkspacePage.open(item.id)",
 		"taskWorkspacePage.open(row.dataset.workItem)",
 	} {
 		if !strings.Contains(app, marker) {
-			t.Errorf("independent task detail page is missing %q", marker)
+			t.Errorf("shared page framework is missing %q", marker)
 		}
 	}
-	if strings.Contains(app, "if(state.task)return `#${base}/tasks/") {
-		t.Error("task detail routing still overrides every project page whenever a task is selected")
+	for _, obsolete := range []string{"const knowledgePageRouter=renderPage", "const knowledgeShell=renderShell", "const knowledgeBaseRoute=currentRouteHash"} {
+		if strings.Contains(app, obsolete) {
+			t.Errorf("page-specific framework wrapper still exists: %q", obsolete)
+		}
+	}
+	if strings.LastIndex(app, "boot();") < strings.Index(app, "const pageFramework={") {
+		t.Error("application boots before the shared page framework is installed")
 	}
 }
 
