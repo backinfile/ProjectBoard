@@ -382,6 +382,39 @@ func TestTaskDetailPollsForConversationAndStateUpdates(t *testing.T) {
 	}
 }
 
+func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"task-focus-page",
+		"task-focus-nav",
+		"task-focus-conversation",
+		"task-focus-inspector",
+		"taskNavigationGroups",
+		"taskWorkspaceIDs('pinned')",
+		"rememberTaskVisit(item.id)",
+		"pinnedTasks",
+		"attentionTasks",
+		"followedTasks",
+		"recentTasks",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("three-column task workspace is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		"grid-template-columns: var(--task-nav-width) minmax(390px, 1fr) var(--task-inspector-width)",
+		"--task-nav-width: 282px",
+		"--task-inspector-width: 334px",
+		".task-nav-pin.active",
+		".task-focus-conversation .chat-composer",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("three-column task workspace styling is missing %q", marker)
+		}
+	}
+}
+
 func TestTaskBoardFiltersByInclusiveCreatedDateRange(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
