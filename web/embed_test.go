@@ -352,7 +352,7 @@ func TestRunningAgentShowsCurrentInvocationElapsedTime(t *testing.T) {
 	}
 }
 
-func TestActiveTaskPageRemovesRedundantBackButton(t *testing.T) {
+func TestActiveTaskPageKeepsPrototypeBreadcrumbBackButton(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	start := strings.Index(app, "localWorkflowUI.renderTask=async function")
 	end := strings.Index(app[start:], "function pendingFilesMarkup")
@@ -360,8 +360,11 @@ func TestActiveTaskPageRemovesRedundantBackButton(t *testing.T) {
 		t.Fatal("could not locate the active task enhancement wrapper")
 	}
 	wrapper := app[start : start+end]
-	if !strings.Contains(wrapper, "redundantBack.onclick=null") || !strings.Contains(wrapper, "redundantBack.remove()") {
-		t.Error("active task page retains the redundant top back button or its click handler")
+	if strings.Contains(wrapper, "redundantBack.remove()") {
+		t.Error("task enhancement wrapper removes the exported breadcrumb back button")
+	}
+	if !strings.Contains(app, `id="back" type="button" title="${t('backToQueue')}"`) || !strings.Contains(app, "$('#back')?.addEventListener('click'") {
+		t.Error("active task page does not expose a working breadcrumb back button")
 	}
 }
 
@@ -387,9 +390,14 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
 	for _, marker := range []string{
 		"task-focus-page",
+		"task-focus-top",
+		"task-focus-top-actions",
 		"task-focus-nav",
 		"task-focus-conversation",
 		"task-focus-inspector",
+		"task-chat-event",
+		"task-inspector-progress",
+		"task-detail-shell",
 		"taskNavigationGroups",
 		"taskWorkspaceIDs('pinned')",
 		"rememberTaskVisit(item.id)",
@@ -404,8 +412,10 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"grid-template-columns: var(--task-nav-width) minmax(390px, 1fr) var(--task-inspector-width)",
+		"grid-template-rows: 56px minmax(0, 1fr)",
 		"--task-nav-width: 282px",
 		"--task-inspector-width: 334px",
+		".shell.task-detail-shell .workspace",
 		".task-nav-pin.active",
 		".task-focus-conversation .chat-composer",
 	} {
