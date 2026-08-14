@@ -445,6 +445,32 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	}
 }
 
+func TestTaskDetailHeaderUsesSharedBrandAndTaskListNavigationLabel(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		`$('.task-focus-top-brand')?.remove()`,
+		`{id:'queue',label:'taskList'`,
+		`taskList:'任务列表'`,
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("task detail shared header is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		".task-focus-top-crumb {",
+		"grid-column: 1 / 3",
+		"grid-column: 3",
+	} {
+		if !strings.Contains(css, marker) {
+			t.Errorf("task detail shared header styling is missing %q", marker)
+		}
+	}
+	if strings.Contains(css, ".task-focus-top-brand {") {
+		t.Error("task detail still styles a duplicate internal brand")
+	}
+}
+
 func TestAllTabsShareTheSameApplicationSidebar(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
