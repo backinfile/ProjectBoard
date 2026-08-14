@@ -9,6 +9,8 @@ flowchart LR
   T --> R["One-shot Agent requests"]
   R --> S["Built-in scheduler"]
   S --> C["Fresh local codex process"]
+  C --> M["Request-scoped read-only knowledge MCP"]
+  M --> K
   C --> G["Server-local Git repository"]
   G --> W["Standard task worktree"]
   S --> K
@@ -31,9 +33,10 @@ The data directory contains the default database, task attachments and request-s
 - `internal/projectrepo` validates immutable absolute project paths, initializes repositories and baseline commits, manages standard task worktrees, and exposes guarded local Git operations.
 - `internal/workqueue` owns task creation, workflow transitions, assignment, followers, blocking, relationships and conversation. It emits transactional hooks for Agent work and task closure.
 - `internal/agentrequest` owns one-shot request state, retry lineage, plan approval and knowledge-compaction policy.
-- `internal/agentexec` claims queued requests, accounts for Agent capacity, prepares repositories or workspaces, invokes Codex, records raw evidence, applies results and cleans validated workspaces.
-- `internal/knowledge` owns the project tree, keyword search, optimistic versions, node-local Agent locks, revisions, read snapshots and transactional structured operations.
-- `internal/store` owns schema v10 creation, the narrow v9-to-v10 migration and strict compatibility for all other versions.
+- `internal/agentexec` claims queued requests, accounts for Agent capacity, prepares repositories or workspaces, injects the knowledge catalog, configures a request-scoped MCP, invokes Codex, records raw evidence, applies results and cleans validated workspaces.
+- `internal/knowledge` owns the project tree, discovery metadata, FTS5 search, project-scoped reads, optimistic versions, node-local Agent locks, revisions, read snapshots and transactional structured operations.
+- `internal/knowledgemcp` is a read-only STDIO adapter that binds the knowledge interface to exactly one project for one Codex process.
+- `internal/store` owns schema v10 creation, the transactional v9-to-v10 migration, and strict compatibility for other versions.
 - `internal/ops` owns consistent SQLite backup and checked restore. File attachments are outside that database operation.
 
 ## Authorization model
@@ -51,9 +54,10 @@ Authentication uses seven-day cookie sessions. Unsafe API methods require a CSRF
 5. Knowledge mutations are complete node operations, never partial patches; the complete operation list succeeds or rolls back.
 6. Agent locks apply only to the selected node. Humans may still modify it, and children may be created below it.
 7. Project knowledge maintenance is serialized. At most one task or global knowledge request runs for a project at a time.
-8. Standard work runs on `projectboard/<project-key>/<task-number>` in sibling `worktrees/<project-key>-<task-number>`. Simple-conversation and merge work run in the project repository.
-9. Writes to a project repository are serialized. ProjectBoard never automatically resets, stashes, fetches, pulls or pushes.
-10. Schema v10 supports one explicit, additive migration from v9. Every other schema version is rejected.
+8. Ordinary task requests receive only knowledge discovery metadata initially; full node content is read on demand through project-scoped tools. Knowledge-maintenance requests retain the complete snapshot.
+9. Standard work runs on `projectboard/<project-key>/<task-number>` in sibling `worktrees/<project-key>-<task-number>`. Simple-conversation and merge work run in the project repository.
+10. Writes to a project repository are serialized. ProjectBoard never automatically resets, stashes, fetches, pulls or pushes.
+11. Schema v9 migrates transactionally to v10; every other prior schema is rejected.
 
 ## Task and request state
 

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/projectboard/projectboard/internal/knowledgemcp"
 	"github.com/projectboard/projectboard/internal/ops"
 	"github.com/projectboard/projectboard/internal/server"
 )
@@ -23,6 +24,14 @@ func main() {
 	dataDir := env("PROJECTBOARD_DATA_DIR", "./data")
 	databasePath := env("PROJECTBOARD_DB", filepath.Join(dataDir, "projectboard.db"))
 	switch command {
+	case "knowledge-mcp":
+		if len(os.Args) != 4 {
+			log.Fatal("usage: projectboard knowledge-mcp <database.db> <project-id>")
+		}
+		if err := knowledgemcp.Serve(context.Background(), os.Args[2], os.Args[3], os.Stdin, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
 	case "backup":
 		if len(os.Args) != 3 {
 			log.Fatal("usage: projectboard backup <destination.db>")
@@ -43,7 +52,7 @@ func main() {
 		return
 	case "serve":
 	default:
-		fmt.Fprintln(os.Stderr, "usage: projectboard <serve|backup|restore>")
+		fmt.Fprintln(os.Stderr, "usage: projectboard <serve|backup|restore|knowledge-mcp>")
 		os.Exit(2)
 	}
 	handler, err := server.New(server.Config{

@@ -69,6 +69,23 @@ func TestParseTokenUsageSumsCompletedTurns(t *testing.T) {
 	}
 }
 
+func TestExecArgsConfigureProjectScopedKnowledgeTools(t *testing.T) {
+	args := execArgs(Invocation{
+		WorkDir: `C:\work\PB-1`, KnowledgeCommand: `C:\ProjectBoard\projectboard.exe`,
+		DatabasePath: `C:\ProjectBoard\data\projectboard.db`, ProjectID: "project-1",
+	}, `C:\schema.json`)
+	joined := strings.Join(args, "\x00")
+	for _, required := range []string{
+		`mcp_servers.projectboard_knowledge.command=`, `knowledge-mcp`, `project-1`,
+		`mcp_servers.projectboard_knowledge.enabled_tools=["knowledge_search","knowledge_read"]`,
+		`mcp_servers.projectboard_knowledge.required=true`,
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("knowledge MCP args missing %q: %#v", required, args)
+		}
+	}
+}
+
 func TestWindowsExecInputPreservesUnicodePromptAsArgument(t *testing.T) {
 	prompt := "创建并验收：鹦鹉骑自行车"
 	args, stdin := execInput(Invocation{WorkDir: `C:\work\PB-1`, Prompt: prompt}, `C:\schema.json`, "windows")
@@ -129,6 +146,12 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	queue := workqueue.New(db)
+	knowledgeModule := knowledge.New(db)
+	if _, err = knowledgeModule.Create(t.Context(), knowledge.Actor{Type: "human", ID: "u"}, knowledge.CreateInput{
+		ProjectID: "p", Title: "Planning rules", Summary: "Project planning conventions", TriggerDescription: "Use when preparing implementation plans", Markdown: "private full knowledge body",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	item, err := queue.Create(t.Context(), workqueue.Actor{Type: "human", ID: "u"}, workqueue.CreateInput{ProjectID: "p", Title: "Plan me"})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +164,7 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 	runner := &fakeRunner{results: make(chan Result, 2), calls: make(chan Invocation, 2)}
 	runner.results <- Result{ThreadID: "thread-1", Status: "planned", Message: "Implementation plan", Usage: TokenUsage{Input: 120, CachedInput: 20, Output: 30, Reasoning: 10, Total: 150}}
 	runner.results <- Result{ThreadID: "thread-1", Status: "paused", Message: "Waiting for input"}
-	module := New(db, queue, requests, knowledge.New(db), Options{DataDir: dir, Runner: runner, PollInterval: 10 * time.Millisecond})
+	module := New(db, queue, requests, knowledgeModule, Options{DataDir: dir, DatabasePath: filepath.Join(dir, "test.db"), KnowledgeCommand: `C:\ProjectBoard\projectboard.exe`, Runner: runner, PollInterval: 10 * time.Millisecond})
 	if err = module.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +179,12 @@ func TestLocalAgentPausesAfterInitialPlan(t *testing.T) {
 		}
 		if !strings.Contains(call.Prompt, "Target branch: main") || !strings.Contains(call.Prompt, "Workflow: standard") {
 			t.Fatalf("prompt does not identify the local workflow: %s", call.Prompt)
+		}
+		if !strings.Contains(call.Prompt, "Project planning conventions") || !strings.Contains(call.Prompt, "knowledge_search") || strings.Contains(call.Prompt, "private full knowledge body") {
+			t.Fatalf("ordinary task did not receive progressive knowledge disclosure: %s", call.Prompt)
+		}
+		if call.ProjectID != "p" || call.KnowledgeCommand == "" || call.DatabasePath == "" {
+			t.Fatalf("ordinary task knowledge invocation = %#v", call)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Agent did not receive task")

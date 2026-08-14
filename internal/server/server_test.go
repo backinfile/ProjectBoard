@@ -497,10 +497,12 @@ func TestProjectKnowledgeTreeSupportsSearchLocksAndHistory(t *testing.T) {
 	login := requestJSON(t, client, http.MethodPost, host.URL+"/api/auth/login", "", map[string]any{"username": "admin", "password": "StrongPassword123"})
 	csrf := login["csrfToken"].(string)
 	project := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects", csrf, map[string]any{"key": "kb", "name": "Knowledge", "projectPath": filepath.Join(t.TempDir(), "knowledge")})
-	root := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"title": "Architecture", "markdown": "System overview"})
-	child := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"parentId": root["id"], "title": "API", "markdown": "HTTP contract"})
-	found := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge?query=HTTP", csrf, nil)
-	if len(found) != 1 || found[0]["id"] != child["id"] {
+	root := requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{
+		"title": "Architecture", "markdown": "System overview", "summary": "Service topology and module map", "triggerDescription": "Use when changing module responsibilities",
+	})
+	requestJSON(t, client, http.MethodPost, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge", csrf, map[string]any{"parentId": root["id"], "title": "API", "markdown": "HTTP contract"})
+	found := requestJSONArray(t, client, http.MethodGet, host.URL+"/api/projects/"+project["id"].(string)+"/knowledge?query=topology", csrf, nil)
+	if len(found) != 1 || found[0]["id"] != root["id"] || root["triggerDescription"] != "Use when changing module responsibilities" {
 		t.Fatalf("knowledge search = %#v", found)
 	}
 	locked := requestJSON(t, client, http.MethodPost, host.URL+"/api/knowledge/nodes/"+root["id"].(string)+"/lock", csrf, map[string]any{"expectedVersion": root["version"], "locked": true})

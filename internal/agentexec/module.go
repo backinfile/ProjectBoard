@@ -27,12 +27,13 @@ import (
 )
 
 type Invocation struct {
-	WorkDir, Prompt, ThreadID string
-	Model, ReasoningEffort    string
-	Timeout                   time.Duration
-	PlanOnly                  bool
-	OnOutput                  func([]byte)
-	OnActivity                func()
+	WorkDir, Prompt, ThreadID                 string
+	Model, ReasoningEffort                    string
+	KnowledgeCommand, DatabasePath, ProjectID string
+	Timeout                                   time.Duration
+	PlanOnly                                  bool
+	OnOutput                                  func([]byte)
+	OnActivity                                func()
 }
 type Result struct {
 	ThreadID, Status, Message, Raw, CommandJSON string
@@ -153,6 +154,23 @@ func execArgsWithPrompt(in Invocation, schemaPath, promptArg string) []string {
 	if strings.TrimSpace(in.ReasoningEffort) != "" {
 		args = append(args, "--config", fmt.Sprintf("model_reasoning_effort=%q", strings.TrimSpace(in.ReasoningEffort)))
 	}
+	if in.KnowledgeCommand != "" && in.DatabasePath != "" && in.ProjectID != "" {
+		mcpArgs := []string{"knowledge-mcp", in.DatabasePath, in.ProjectID}
+		quoted := make([]string, len(mcpArgs))
+		for index, value := range mcpArgs {
+			quoted[index] = strconv.Quote(value)
+		}
+		configs := []string{
+			"mcp_servers.projectboard_knowledge.command=" + strconv.Quote(in.KnowledgeCommand),
+			"mcp_servers.projectboard_knowledge.args=[" + strings.Join(quoted, ",") + "]",
+			`mcp_servers.projectboard_knowledge.enabled_tools=["knowledge_search","knowledge_read"]`,
+			"mcp_servers.projectboard_knowledge.default_tools_approval_mode=\"approve\"",
+			"mcp_servers.projectboard_knowledge.required=true",
+		}
+		for _, config := range configs {
+			args = append(args, "--config", config)
+		}
+	}
 	return append(args, promptArg)
 }
 
@@ -195,27 +213,31 @@ func tokenCount(value any) int64 {
 }
 
 type Options struct {
-	DataDir      string
-	Runner       Runner
-	PollInterval time.Duration
-	StallTimeout time.Duration
+	DataDir          string
+	DatabasePath     string
+	KnowledgeCommand string
+	Runner           Runner
+	PollInterval     time.Duration
+	StallTimeout     time.Duration
 }
 type Module struct {
-	store     *store.Store
-	queue     *workqueue.Module
-	requests  *agentrequest.Module
-	knowledge *knowledge.Module
-	dataDir   string
-	runner    Runner
-	poll      time.Duration
-	stall     time.Duration
-	wake      chan struct{}
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	repoMu    sync.Mutex
-	running   map[string]*runControl
+	store            *store.Store
+	queue            *workqueue.Module
+	requests         *agentrequest.Module
+	knowledge        *knowledge.Module
+	dataDir          string
+	databasePath     string
+	knowledgeCommand string
+	runner           Runner
+	poll             time.Duration
+	stall            time.Duration
+	wake             chan struct{}
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	mu               sync.Mutex
+	repoMu           sync.Mutex
+	running          map[string]*runControl
 }
 type runControl struct {
 	itemID       string
@@ -250,10 +272,10 @@ func New(database *store.Store, queue *workqueue.Module, requests *agentrequest.
 		}
 		option.Runner = &ExecRunner{Command: "codex", SchemaPath: schemaPath}
 	}
-	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, runner: option.Runner, poll: option.PollInterval, stall: option.StallTimeout, wake: make(chan struct{}, 1), running: map[string]*runControl{}}
+	return &Module{store: database, queue: queue, requests: requests, knowledge: knowledgeModule, dataDir: option.DataDir, databasePath: option.DatabasePath, knowledgeCommand: option.KnowledgeCommand, runner: option.Runner, poll: option.PollInterval, stall: option.StallTimeout, wake: make(chan struct{}, 1), running: map[string]*runControl{}}
 }
 
-const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","failed"]},"message":{"type":"string"},"knowledgeOperations":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"type":{"type":"string","enum":["create","update","move","delete"]},"nodeId":{"type":"string"},"parentId":{"type":"string"},"title":{"type":"string"},"markdown":{"type":"string"},"sortOrder":{"type":"integer"},"expectedVersion":{"type":"integer"}},"required":["type"],"additionalProperties":false}}},"required":["status","message"],"additionalProperties":false}`
+const resultSchema = `{"type":"object","properties":{"status":{"type":"string","enum":["planned","completed","failed"]},"message":{"type":"string"},"knowledgeOperations":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"type":{"type":"string","enum":["create","update","move","delete"]},"nodeId":{"type":"string"},"parentId":{"type":"string"},"title":{"type":"string"},"markdown":{"type":"string"},"summary":{"type":"string"},"triggerDescription":{"type":"string"},"sortOrder":{"type":"integer"},"expectedVersion":{"type":"integer"}},"required":["type"],"additionalProperties":false}}},"required":["status","message"],"additionalProperties":false}`
 
 func (m *Module) Start() error {
 	if err := os.MkdirAll(filepath.Join(m.dataDir, "workspaces"), 0o700); err != nil {
@@ -511,12 +533,16 @@ func (m *Module) prompt(ctx context.Context, claimed *claim) string {
 	if strings.TrimSpace(claimed.CustomPrompt) != "" {
 		fmt.Fprintf(&prompt, "Request context:\n%s\n", claimed.CustomPrompt)
 	}
-	prompt.WriteString("The following project knowledge snapshot is read-only context. Do not edit the snapshot file directly.\n\n")
+	if isKnowledgeKind(claimed.Kind) {
+		prompt.WriteString("The following project knowledge snapshot is read-only context. Do not edit the snapshot file directly.\n\n")
+	} else {
+		prompt.WriteString("The following project knowledge catalog is discovery metadata, not the full knowledge content. When the task depends on project-specific decisions, conventions, architecture, release procedures, or runbooks, call knowledge_search and then knowledge_read before relying on that knowledge. Do not query for generic programming facts. If a search is insufficient, rewrite it at most once.\n\n")
+	}
 	prompt.WriteString(claimed.KnowledgeSnapshot)
 	if claimed.PlanOnly {
 		prompt.WriteString("\nProduce a concrete implementation plan only. Do not edit files. Return status planned.\n")
 	} else if isKnowledgeKind(claimed.Kind) {
-		prompt.WriteString("\nReturn complete knowledgeOperations. Each update/move/delete must include the current expectedVersion. The server applies the entire list transactionally; patches and partial writes are not accepted. Locked nodes cannot be changed, but children may be created below them. Return status completed.\n")
+		prompt.WriteString("\nReturn complete knowledgeOperations. Each create or update must include a concise summary and triggerDescription explaining when ordinary task Agents should retrieve the node. Each update/move/delete must include the current expectedVersion. The server applies the entire list transactionally; patches and partial writes are not accepted. Locked nodes cannot be changed, but children may be created below them. Return status completed.\n")
 	} else if claimed.Phase == "merge" {
 		workBranch := fmt.Sprintf("projectboard/%s/%d", strings.ToLower(claimed.ProjectKey), claimed.ItemNumber)
 		fmt.Fprintf(&prompt, "\nBefore merging, rebase the task branch %s onto the current tip of the checked out target branch %s in its existing task worktree. Resolve all rebase conflicts on the task branch and verify the repository after the rebase. If %s changes before the merge, repeat the rebase and verification. Only after the rebase and verification succeed, merge %s into %s with --no-ff, using merge commit message %q. Do not fetch, pull, or push. Return completed only when the branch is fully merged and both working trees are clean.\n", workBranch, claimed.TargetBranch, claimed.TargetBranch, workBranch, claimed.TargetBranch, "merge: "+claimed.ItemID+" "+claimed.Title)
@@ -542,7 +568,13 @@ func (m *Module) prompt(ctx context.Context, claimed *claim) string {
 func (m *Module) execute(parent context.Context, claimed *claim) {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(claimed.Timeout)*time.Minute)
 	defer cancel()
-	snapshot, err := m.knowledge.Snapshot(ctx, claimed.ProjectID)
+	var snapshot string
+	var err error
+	if isKnowledgeKind(claimed.Kind) {
+		snapshot, err = m.knowledge.Snapshot(ctx, claimed.ProjectID)
+	} else {
+		snapshot, err = m.knowledge.Catalog(ctx, claimed.ProjectID)
+	}
 	if err != nil {
 		m.fail(claimed, Result{}, err)
 		return
@@ -556,11 +588,16 @@ func (m *Module) execute(parent context.Context, claimed *claim) {
 	_, _ = m.store.DB.Exec("UPDATE agent_requests SET prompt_markdown=? WHERE id=? AND status='running'", prompt, claimed.RequestID)
 	_ = m.event(claimed, "agent_started", "Local Codex execution started")
 	m.noteActivity(claimed.RequestID)
+	knowledgeCommand, databasePath, projectID := m.knowledgeCommand, m.databasePath, claimed.ProjectID
+	if isKnowledgeKind(claimed.Kind) {
+		knowledgeCommand, databasePath, projectID = "", "", ""
+	}
 	result, err := m.runner.Run(ctx, Invocation{
 		WorkDir: claimed.Workspace, Prompt: prompt, Timeout: time.Duration(claimed.Timeout) * time.Minute, PlanOnly: claimed.PlanOnly,
 		Model: claimed.Model, ReasoningEffort: claimed.ReasoningEffort,
-		OnOutput:   func(chunk []byte) { m.appendOutput(claimed.RequestID, chunk) },
-		OnActivity: func() { m.noteActivity(claimed.RequestID) },
+		OnOutput:         func(chunk []byte) { m.appendOutput(claimed.RequestID, chunk) },
+		OnActivity:       func() { m.noteActivity(claimed.RequestID) },
+		KnowledgeCommand: knowledgeCommand, DatabasePath: databasePath, ProjectID: projectID,
 	})
 	if err != nil {
 		switch context.Cause(parent) {

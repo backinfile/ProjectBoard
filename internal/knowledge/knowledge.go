@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/projectboard/projectboard/internal/security"
 	"github.com/projectboard/projectboard/internal/store"
@@ -27,54 +28,62 @@ func IsCode(err error, code string) bool {
 }
 
 type Node struct {
-	ID              string  `json:"id"`
-	ProjectID       string  `json:"projectId"`
-	ParentID        *string `json:"parentId"`
-	Title           string  `json:"title"`
-	Markdown        string  `json:"markdown"`
-	SortOrder       int     `json:"sortOrder"`
-	LockedForAgents bool    `json:"lockedForAgents"`
-	Version         int64   `json:"version"`
-	CreatedByType   string  `json:"createdByType"`
-	CreatedByID     *string `json:"createdById,omitempty"`
-	CreatedAt       string  `json:"createdAt"`
-	UpdatedByType   string  `json:"updatedByType"`
-	UpdatedByID     *string `json:"updatedById,omitempty"`
-	UpdatedAt       string  `json:"updatedAt"`
+	ID                 string  `json:"id"`
+	ProjectID          string  `json:"projectId"`
+	ParentID           *string `json:"parentId"`
+	Title              string  `json:"title"`
+	Markdown           string  `json:"markdown"`
+	Summary            string  `json:"summary"`
+	TriggerDescription string  `json:"triggerDescription"`
+	SortOrder          int     `json:"sortOrder"`
+	LockedForAgents    bool    `json:"lockedForAgents"`
+	Version            int64   `json:"version"`
+	CreatedByType      string  `json:"createdByType"`
+	CreatedByID        *string `json:"createdById,omitempty"`
+	CreatedAt          string  `json:"createdAt"`
+	UpdatedByType      string  `json:"updatedByType"`
+	UpdatedByID        *string `json:"updatedById,omitempty"`
+	UpdatedAt          string  `json:"updatedAt"`
 }
 
 type Revision struct {
-	Version         int64   `json:"version"`
-	ParentID        *string `json:"parentId"`
-	Title           string  `json:"title"`
-	Markdown        string  `json:"markdown"`
-	SortOrder       int     `json:"sortOrder"`
-	LockedForAgents bool    `json:"lockedForAgents"`
-	ActorType       string  `json:"actorType"`
-	ActorID         *string `json:"actorId,omitempty"`
-	Reason          string  `json:"reason"`
-	CreatedAt       string  `json:"createdAt"`
+	Version            int64   `json:"version"`
+	ParentID           *string `json:"parentId"`
+	Title              string  `json:"title"`
+	Markdown           string  `json:"markdown"`
+	Summary            string  `json:"summary"`
+	TriggerDescription string  `json:"triggerDescription"`
+	SortOrder          int     `json:"sortOrder"`
+	LockedForAgents    bool    `json:"lockedForAgents"`
+	ActorType          string  `json:"actorType"`
+	ActorID            *string `json:"actorId,omitempty"`
+	Reason             string  `json:"reason"`
+	CreatedAt          string  `json:"createdAt"`
 }
 
 type CreateInput struct {
 	ProjectID, ParentID, Title, Markdown string
+	Summary, TriggerDescription          string
 	SortOrder                            int
 }
 
 type UpdateInput struct {
-	ID              string
-	ExpectedVersion int64
-	Title, Markdown string
+	ID                          string
+	ExpectedVersion             int64
+	Title, Markdown             string
+	Summary, TriggerDescription string
 }
 
 type Operation struct {
-	Type            string `json:"type"`
-	NodeID          string `json:"nodeId,omitempty"`
-	ParentID        string `json:"parentId,omitempty"`
-	Title           string `json:"title,omitempty"`
-	Markdown        string `json:"markdown,omitempty"`
-	SortOrder       int    `json:"sortOrder,omitempty"`
-	ExpectedVersion int64  `json:"expectedVersion,omitempty"`
+	Type               string `json:"type"`
+	NodeID             string `json:"nodeId,omitempty"`
+	ParentID           string `json:"parentId,omitempty"`
+	Title              string `json:"title,omitempty"`
+	Markdown           string `json:"markdown,omitempty"`
+	Summary            string `json:"summary,omitempty"`
+	TriggerDescription string `json:"triggerDescription,omitempty"`
+	SortOrder          int    `json:"sortOrder,omitempty"`
+	ExpectedVersion    int64  `json:"expectedVersion,omitempty"`
 }
 
 type Module struct {
@@ -143,12 +152,12 @@ func (m *Module) Apply(ctx context.Context, actor Actor, projectID string, opera
 			switch operation.Type {
 			case "create":
 				newID := security.Token(18)
-				if err := m.createTx(ctx, tx, actor, newID, CreateInput{ProjectID: projectID, ParentID: operation.ParentID, Title: operation.Title, Markdown: operation.Markdown, SortOrder: operation.SortOrder}); err != nil {
+				if err := m.createTx(ctx, tx, actor, newID, CreateInput{ProjectID: projectID, ParentID: operation.ParentID, Title: operation.Title, Markdown: operation.Markdown, Summary: operation.Summary, TriggerDescription: operation.TriggerDescription, SortOrder: operation.SortOrder}); err != nil {
 					return err
 				}
 				touched = append(touched, newID)
 			case "update":
-				if err := m.updateTx(ctx, tx, actor, UpdateInput{ID: operation.NodeID, ExpectedVersion: operation.ExpectedVersion, Title: operation.Title, Markdown: operation.Markdown}); err != nil {
+				if err := m.updateTx(ctx, tx, actor, UpdateInput{ID: operation.NodeID, ExpectedVersion: operation.ExpectedVersion, Title: operation.Title, Markdown: operation.Markdown, Summary: operation.Summary, TriggerDescription: operation.TriggerDescription}); err != nil {
 					return err
 				}
 				touched = append(touched, operation.NodeID)
@@ -215,14 +224,17 @@ func (m *Module) Restore(ctx context.Context, actor Actor, id string, expectedVe
 		}
 		var revision Revision
 		var locked int
-		err = tx.QueryRowContext(ctx, `SELECT parent_id,title,markdown,sort_order,locked_for_agents FROM knowledge_node_revisions WHERE node_id=? AND version=?`, id, revisionVersion).Scan(&revision.ParentID, &revision.Title, &revision.Markdown, &revision.SortOrder, &locked)
+		err = tx.QueryRowContext(ctx, `SELECT parent_id,title,markdown,summary,trigger_description,sort_order,locked_for_agents FROM knowledge_node_revisions WHERE node_id=? AND version=?`, id, revisionVersion).Scan(&revision.ParentID, &revision.Title, &revision.Markdown, &revision.Summary, &revision.TriggerDescription, &revision.SortOrder, &locked)
 		if err != nil {
 			return err
 		}
 		revision.LockedForAgents = locked != 0
 		stamp := m.timestamp()
-		_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET parent_id=?,title=?,markdown=?,sort_order=?,locked_for_agents=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, revision.ParentID, revision.Title, revision.Markdown, revision.SortOrder, boolInt(revision.LockedForAgents), actor.Type, nullable(actor.ID), stamp, id)
+		_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET parent_id=?,title=?,markdown=?,summary=?,trigger_description=?,sort_order=?,locked_for_agents=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, revision.ParentID, revision.Title, revision.Markdown, revision.Summary, revision.TriggerDescription, revision.SortOrder, boolInt(revision.LockedForAgents), actor.Type, nullable(actor.ID), stamp, id)
 		if err != nil {
+			return err
+		}
+		if err = upsertSearchTx(ctx, tx, id); err != nil {
 			return err
 		}
 		return saveRevision(ctx, tx, id, actor, "restored revision", stamp)
@@ -248,9 +260,9 @@ func (m *Module) List(ctx context.Context, projectID, query string) ([]Node, err
 	statement := nodeSelect + " WHERE project_id=? AND deleted_at IS NULL"
 	args := []any{projectID}
 	if strings.TrimSpace(query) != "" {
-		statement += " AND (title LIKE ? OR markdown LIKE ?)"
+		statement += " AND (title LIKE ? OR markdown LIKE ? OR summary LIKE ? OR trigger_description LIKE ?)"
 		like := "%" + strings.TrimSpace(query) + "%"
-		args = append(args, like, like)
+		args = append(args, like, like, like, like)
 	}
 	statement += " ORDER BY parent_id,sort_order,title,id"
 	rows, err := m.store.DB.QueryContext(ctx, statement, args...)
@@ -272,41 +284,105 @@ func (m *Module) List(ctx context.Context, projectID, query string) ([]Node, err
 	return out, nil
 }
 
+type SearchHit struct {
+	NodeID  string  `json:"nodeId"`
+	Title   string  `json:"title"`
+	Summary string  `json:"summary"`
+	Snippet string  `json:"snippet"`
+	Version int64   `json:"version"`
+	Score   float64 `json:"score"`
+}
+
+func (m *Module) Search(ctx context.Context, projectID, query string, limit int) ([]SearchHit, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []SearchHit{}, nil
+	}
+	if limit <= 0 || limit > 20 {
+		limit = 5
+	}
+	terms := strings.Fields(query)
+	for index, term := range terms {
+		terms[index] = `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
+	}
+	match := strings.Join(terms, " OR ")
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT n.id,n.title,n.summary,snippet(knowledge_search,5,'','', ' … ',24),n.version,bm25(knowledge_search,0.0,0.0,8.0,5.0,4.0,1.0)
+		FROM knowledge_search JOIN knowledge_nodes n ON n.id=knowledge_search.node_id
+		WHERE knowledge_search MATCH ? AND knowledge_search.project_id=? AND n.deleted_at IS NULL
+		ORDER BY bm25(knowledge_search,0.0,0.0,8.0,5.0,4.0,1.0),n.title,n.id LIMIT ?`, match, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hits := []SearchHit{}
+	for rows.Next() {
+		var hit SearchHit
+		if err = rows.Scan(&hit.NodeID, &hit.Title, &hit.Summary, &hit.Snippet, &hit.Version, &hit.Score); err != nil {
+			return nil, err
+		}
+		hits = append(hits, hit)
+	}
+	return hits, rows.Err()
+}
+
+func (m *Module) Catalog(ctx context.Context, projectID string) (string, error) {
+	nodes, err := m.List(ctx, projectID, "")
+	if err != nil {
+		return "", err
+	}
+	paths := nodePaths(nodes)
+	sort.Slice(nodes, func(i, j int) bool { return paths[nodes[i].ID] < paths[nodes[j].ID] })
+	var catalog strings.Builder
+	catalog.WriteString("# Project knowledge catalog\n\n")
+	for index, node := range nodes {
+		var entry strings.Builder
+		fmt.Fprintf(&entry, "- %s (node_id: %s, version: %d)\n", paths[node.ID], node.ID, node.Version)
+		if strings.TrimSpace(node.Summary) != "" {
+			fmt.Fprintf(&entry, "  Summary: %s\n", strings.TrimSpace(node.Summary))
+		}
+		if strings.TrimSpace(node.TriggerDescription) != "" {
+			fmt.Fprintf(&entry, "  Use when: %s\n", strings.TrimSpace(node.TriggerDescription))
+		}
+		if catalog.Len()+entry.Len() > 7900 {
+			fmt.Fprintf(&catalog, "\n%d additional nodes omitted from the catalog budget; use knowledge_search to discover them.\n", len(nodes)-index)
+			break
+		}
+		catalog.WriteString(entry.String())
+	}
+	return catalog.String(), nil
+}
+
+func (m *Module) GetForProject(ctx context.Context, projectID, id string) (*Node, error) {
+	node, err := m.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if node.ProjectID != projectID {
+		return nil, &Error{404, "NOT_FOUND", "Knowledge node not found"}
+	}
+	return node, nil
+}
+
 func (m *Module) Snapshot(ctx context.Context, projectID string) (string, error) {
 	nodes, err := m.List(ctx, projectID, "")
 	if err != nil {
 		return "", err
 	}
-	byID := map[string]Node{}
-	for _, node := range nodes {
-		byID[node.ID] = node
-	}
-	var pathFor func(Node, map[string]bool) string
-	pathFor = func(node Node, seen map[string]bool) string {
-		if seen[node.ID] || node.ParentID == nil {
-			return node.Title
-		}
-		seen[node.ID] = true
-		parent, ok := byID[*node.ParentID]
-		if !ok {
-			return node.Title
-		}
-		return pathFor(parent, seen) + "/" + node.Title
-	}
+	paths := nodePaths(nodes)
 	sort.Slice(nodes, func(i, j int) bool {
-		return pathFor(nodes[i], map[string]bool{}) < pathFor(nodes[j], map[string]bool{})
+		return paths[nodes[i].ID] < paths[nodes[j].ID]
 	})
 	var snapshot strings.Builder
 	snapshot.WriteString("# Project knowledge snapshot\n\n")
 	for _, node := range nodes {
-		fmt.Fprintf(&snapshot, "## %s\nnode_id: %s\nversion: %d\nlocked_for_agents: %t\n", pathFor(node, map[string]bool{}), node.ID, node.Version, node.LockedForAgents)
+		fmt.Fprintf(&snapshot, "## %s\nnode_id: %s\nversion: %d\nlocked_for_agents: %t\nsummary: %s\ntrigger_description: %s\n", paths[node.ID], node.ID, node.Version, node.LockedForAgents, node.Summary, node.TriggerDescription)
 		snapshot.WriteString("\n" + node.Markdown + "\n\n")
 	}
 	return snapshot.String(), nil
 }
 
 func (m *Module) Revisions(ctx context.Context, id string) ([]Revision, error) {
-	rows, err := m.store.DB.QueryContext(ctx, `SELECT version,parent_id,title,markdown,sort_order,locked_for_agents,actor_type,actor_id,reason,created_at FROM knowledge_node_revisions WHERE node_id=? ORDER BY version DESC`, id)
+	rows, err := m.store.DB.QueryContext(ctx, `SELECT version,parent_id,title,markdown,summary,trigger_description,sort_order,locked_for_agents,actor_type,actor_id,reason,created_at FROM knowledge_node_revisions WHERE node_id=? ORDER BY version DESC`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +391,7 @@ func (m *Module) Revisions(ctx context.Context, id string) ([]Revision, error) {
 	for rows.Next() {
 		var revision Revision
 		var locked int
-		if err = rows.Scan(&revision.Version, &revision.ParentID, &revision.Title, &revision.Markdown, &revision.SortOrder, &locked, &revision.ActorType, &revision.ActorID, &revision.Reason, &revision.CreatedAt); err != nil {
+		if err = rows.Scan(&revision.Version, &revision.ParentID, &revision.Title, &revision.Markdown, &revision.Summary, &revision.TriggerDescription, &revision.SortOrder, &locked, &revision.ActorType, &revision.ActorID, &revision.Reason, &revision.CreatedAt); err != nil {
 			return nil, err
 		}
 		revision.LockedForAgents = locked != 0
@@ -328,6 +404,9 @@ func (m *Module) createTx(ctx context.Context, tx *sql.Tx, actor Actor, id strin
 	if strings.TrimSpace(in.ProjectID) == "" || strings.TrimSpace(in.Title) == "" {
 		return &Error{422, "VALIDATION_ERROR", "Project and title are required"}
 	}
+	if err := validateDiscoveryMetadata(in.Summary, in.TriggerDescription); err != nil {
+		return err
+	}
 	if in.ParentID != "" {
 		var projectID string
 		if err := tx.QueryRowContext(ctx, "SELECT project_id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL", in.ParentID).Scan(&projectID); err != nil || projectID != in.ProjectID {
@@ -335,8 +414,11 @@ func (m *Module) createTx(ctx context.Context, tx *sql.Tx, actor Actor, id strin
 		}
 	}
 	stamp := m.timestamp()
-	_, err := tx.ExecContext(ctx, `INSERT INTO knowledge_nodes(id,project_id,parent_id,title,markdown,sort_order,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, in.ProjectID, nullable(in.ParentID), strings.TrimSpace(in.Title), in.Markdown, in.SortOrder, actor.Type, nullable(actor.ID), stamp, actor.Type, nullable(actor.ID), stamp)
+	_, err := tx.ExecContext(ctx, `INSERT INTO knowledge_nodes(id,project_id,parent_id,title,markdown,summary,trigger_description,sort_order,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, in.ProjectID, nullable(in.ParentID), strings.TrimSpace(in.Title), in.Markdown, strings.TrimSpace(in.Summary), strings.TrimSpace(in.TriggerDescription), in.SortOrder, actor.Type, nullable(actor.ID), stamp, actor.Type, nullable(actor.ID), stamp)
 	if err != nil {
+		return err
+	}
+	if err = upsertSearchTx(ctx, tx, id); err != nil {
 		return err
 	}
 	return saveRevision(ctx, tx, id, actor, "created", stamp)
@@ -346,6 +428,9 @@ func (m *Module) updateTx(ctx context.Context, tx *sql.Tx, actor Actor, in Updat
 	if strings.TrimSpace(in.Title) == "" {
 		return &Error{422, "VALIDATION_ERROR", "Title is required"}
 	}
+	if err := validateDiscoveryMetadata(in.Summary, in.TriggerDescription); err != nil {
+		return err
+	}
 	current, err := getTx(ctx, tx, in.ID)
 	if err != nil {
 		return err
@@ -354,8 +439,11 @@ func (m *Module) updateTx(ctx context.Context, tx *sql.Tx, actor Actor, in Updat
 		return err
 	}
 	stamp := m.timestamp()
-	_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET title=?,markdown=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, strings.TrimSpace(in.Title), in.Markdown, actor.Type, nullable(actor.ID), stamp, in.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE knowledge_nodes SET title=?,markdown=?,summary=?,trigger_description=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id=?`, strings.TrimSpace(in.Title), in.Markdown, strings.TrimSpace(in.Summary), strings.TrimSpace(in.TriggerDescription), actor.Type, nullable(actor.ID), stamp, in.ID)
 	if err != nil {
+		return err
+	}
+	if err = upsertSearchTx(ctx, tx, in.ID); err != nil {
 		return err
 	}
 	return saveRevision(ctx, tx, in.ID, actor, "updated", stamp)
@@ -412,20 +500,24 @@ func (m *Module) deleteTx(ctx context.Context, tx *sql.Tx, actor Actor, id strin
 		}
 	}
 	stamp := m.timestamp()
+	_, err = tx.ExecContext(ctx, `WITH RECURSIVE subtree(id) AS (SELECT id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL UNION ALL SELECT n.id FROM knowledge_nodes n JOIN subtree s ON n.parent_id=s.id WHERE n.deleted_at IS NULL) DELETE FROM knowledge_search WHERE node_id IN (SELECT id FROM subtree)`, id)
+	if err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `WITH RECURSIVE subtree(id) AS (SELECT id FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL UNION ALL SELECT n.id FROM knowledge_nodes n JOIN subtree s ON n.parent_id=s.id WHERE n.deleted_at IS NULL) UPDATE knowledge_nodes SET deleted_at=?,version=version+1,updated_by_type=?,updated_by_id=?,updated_at=? WHERE id IN (SELECT id FROM subtree)`, id, stamp, actor.Type, nullable(actor.ID), stamp)
 	return err
 }
 
 func (m *Module) timestamp() string { return m.now().UTC().Format(time.RFC3339Nano) }
 
-const nodeSelect = `SELECT id,project_id,parent_id,title,markdown,sort_order,locked_for_agents,version,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at FROM knowledge_nodes`
+const nodeSelect = `SELECT id,project_id,parent_id,title,markdown,summary,trigger_description,sort_order,locked_for_agents,version,created_by_type,created_by_id,created_at,updated_by_type,updated_by_id,updated_at FROM knowledge_nodes`
 
 type scanner interface{ Scan(...any) error }
 
 func scanNode(row scanner) (*Node, error) {
 	var node Node
 	var locked int
-	err := row.Scan(&node.ID, &node.ProjectID, &node.ParentID, &node.Title, &node.Markdown, &node.SortOrder, &locked, &node.Version, &node.CreatedByType, &node.CreatedByID, &node.CreatedAt, &node.UpdatedByType, &node.UpdatedByID, &node.UpdatedAt)
+	err := row.Scan(&node.ID, &node.ProjectID, &node.ParentID, &node.Title, &node.Markdown, &node.Summary, &node.TriggerDescription, &node.SortOrder, &locked, &node.Version, &node.CreatedByType, &node.CreatedByID, &node.CreatedAt, &node.UpdatedByType, &node.UpdatedByID, &node.UpdatedAt)
 	node.LockedForAgents = locked != 0
 	return &node, err
 }
@@ -453,8 +545,51 @@ func saveRevision(ctx context.Context, tx *sql.Tx, id string, actor Actor, reaso
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_node_revisions(id,node_id,version,parent_id,title,markdown,sort_order,locked_for_agents,file_ids_json,actor_type,actor_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, security.Token(18), id, node.Version, node.ParentID, node.Title, node.Markdown, node.SortOrder, boolInt(node.LockedForAgents), "[]", actor.Type, nullable(actor.ID), reason, stamp)
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_node_revisions(id,node_id,version,parent_id,title,markdown,summary,trigger_description,sort_order,locked_for_agents,file_ids_json,actor_type,actor_id,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, security.Token(18), id, node.Version, node.ParentID, node.Title, node.Markdown, node.Summary, node.TriggerDescription, node.SortOrder, boolInt(node.LockedForAgents), "[]", actor.Type, nullable(actor.ID), reason, stamp)
 	return err
+}
+
+func upsertSearchTx(ctx context.Context, tx *sql.Tx, id string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_search WHERE node_id=?`, id); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO knowledge_search(node_id,project_id,title,summary,trigger_description,markdown)
+		SELECT id,project_id,title,summary,trigger_description,markdown FROM knowledge_nodes WHERE id=? AND deleted_at IS NULL`, id)
+	return err
+}
+
+func nodePaths(nodes []Node) map[string]string {
+	byID := map[string]Node{}
+	for _, node := range nodes {
+		byID[node.ID] = node
+	}
+	paths := map[string]string{}
+	var pathFor func(Node, map[string]bool) string
+	pathFor = func(node Node, seen map[string]bool) string {
+		if path, ok := paths[node.ID]; ok {
+			return path
+		}
+		if seen[node.ID] || node.ParentID == nil {
+			return node.Title
+		}
+		seen[node.ID] = true
+		parent, ok := byID[*node.ParentID]
+		if !ok {
+			return node.Title
+		}
+		return pathFor(parent, seen) + "/" + node.Title
+	}
+	for _, node := range nodes {
+		paths[node.ID] = pathFor(node, map[string]bool{})
+	}
+	return paths
+}
+
+func validateDiscoveryMetadata(summary, trigger string) error {
+	if utf8.RuneCountInString(summary) > 1000 || utf8.RuneCountInString(trigger) > 1000 {
+		return &Error{422, "VALIDATION_ERROR", "Knowledge summary and trigger description must each be 1000 characters or fewer"}
+	}
+	return nil
 }
 
 func nullable(value string) any {
