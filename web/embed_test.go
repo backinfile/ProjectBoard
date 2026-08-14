@@ -415,12 +415,43 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 		"grid-template-rows: 56px minmax(0, 1fr)",
 		"--task-nav-width: 282px",
 		"--task-inspector-width: 334px",
-		".shell.task-detail-shell .workspace",
+		".workspace:has(.task-focus-page)",
 		".task-nav-pin.active",
 		".task-focus-conversation .chat-composer",
 	} {
 		if !strings.Contains(css, marker) {
 			t.Errorf("three-column task workspace styling is missing %q", marker)
+		}
+	}
+}
+
+func TestAllTabsShareTheSameApplicationSidebar(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	for _, marker := range []string{
+		"navigation(group)",
+		"this.navigation('primary')",
+		"this.navigation('secondary')",
+		"this.navigation('utility')",
+		"class=\"project-switch\" id=\"projectSwitch\"",
+		"class=\"nav rail-primary\"",
+		"class=\"nav rail-bottom\"",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("shared application sidebar is missing %q", marker)
+		}
+	}
+	for _, pageSpecificRule := range []string{
+		".shell.task-detail-shell .mast",
+		".shell.task-detail-shell .rail",
+		".shell.task-detail-shell .project-switch",
+		".shell.task-detail-shell .rail-primary",
+		".shell.task-detail-shell .rail-bottom",
+		".shell.task-detail-shell .nav",
+		".shell.task-detail-shell .workspace",
+	} {
+		if strings.Contains(css, pageSpecificRule) {
+			t.Errorf("task detail still overrides the shared application sidebar: %q", pageSpecificRule)
 		}
 	}
 }

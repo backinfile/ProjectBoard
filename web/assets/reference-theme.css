@@ -8098,90 +8098,7 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   }
 }
 
-/* Task detail fidelity pass: exported calm prototype, isolated from legacy layers. */
-@media (min-width: 761px) {
-  .shell.task-detail-shell .mast {
-    width: 64px;
-    height: 64px;
-    padding: 0 8px;
-    justify-content: center;
-  }
-
-  .shell.task-detail-shell .mast .brand {
-    margin: 0;
-  }
-
-  .shell.task-detail-shell .mast .brand-mark {
-    width: 38px;
-    height: 38px;
-    border-radius: 10px;
-  }
-
-  .shell.task-detail-shell .mast .brand > span:last-child,
-  .shell.task-detail-shell .mast-actions {
-    display: none;
-  }
-
-  .shell.task-detail-shell .rail {
-    inset: 64px auto 0 0;
-    width: 64px;
-    padding: 10px 8px;
-    align-items: center;
-    overflow: visible;
-  }
-
-  .shell.task-detail-shell .project-switch {
-    width: 48px;
-    min-height: 44px;
-    padding: 6px;
-    grid-template-columns: 1fr;
-    place-items: center;
-    border-color: transparent;
-    background: transparent;
-  }
-
-  .shell.task-detail-shell .project-switch > span:nth-child(2),
-  .shell.task-detail-shell .project-switch > .icon,
-  .shell.task-detail-shell .rail-label,
-  .shell.task-detail-shell .rail-foot,
-  .shell.task-detail-shell .nav button > span:not(.nav-message-badge) {
-    display: none;
-  }
-
-  .shell.task-detail-shell .rail-primary {
-    width: 100%;
-    margin-top: 12px;
-  }
-
-  .shell.task-detail-shell .rail-bottom {
-    width: 100%;
-    padding-top: 10px;
-  }
-
-  .shell.task-detail-shell .nav {
-    width: 100%;
-    gap: 5px;
-  }
-
-  .shell.task-detail-shell .nav button,
-  .shell.task-detail-shell .nav-locale {
-    position: relative;
-    width: 48px;
-    min-height: 44px;
-    padding: 0;
-    justify-content: center;
-    border-radius: 9px;
-  }
-
-  .shell.task-detail-shell .nav button.active::before {
-    inset: 12px auto 12px -8px;
-    width: 3px;
-  }
-
-  .shell.task-detail-shell .workspace {
-    margin-left: 64px;
-  }
-}
+/* Task detail fidelity pass. The application sidebar remains owned by pageFramework. */
 
 .workspace:has(.task-focus-page) {
   height: 100svh;
@@ -8678,66 +8595,9 @@ body:has(.settings-surface) .drawer .button.primary:hover {
 }
 
 @media (max-width: 760px) {
-  .shell.task-detail-shell .mast {
-    display: none;
-  }
-
-  .shell.task-detail-shell .rail {
-    position: fixed;
-    z-index: 40;
-    inset: auto 0 0;
-    width: 100%;
-    height: 56px;
-    padding: 5px 8px;
-    border: 0;
-    border-top: 1px solid var(--line);
-    display: flex;
-    flex-direction: row;
-    background: #fff;
-    overflow-x: auto;
-  }
-
-  .shell.task-detail-shell .project-switch,
-  .shell.task-detail-shell .rail-label,
-  .shell.task-detail-shell .rail-foot {
-    display: none;
-  }
-
-  .shell.task-detail-shell .rail-primary,
-  .shell.task-detail-shell .rail-bottom,
-  .shell.task-detail-shell .rail .nav {
-    width: auto;
-    margin: 0;
-    padding: 0;
-    border: 0;
-    display: flex;
-  }
-
-  .shell.task-detail-shell .rail-bottom {
-    margin-left: auto;
-  }
-
-  .shell.task-detail-shell .rail .nav button,
-  .shell.task-detail-shell .nav-locale {
-    width: 44px;
-    min-height: 44px;
-    padding: 0;
-    justify-content: center;
-  }
-
-  .shell.task-detail-shell .rail .nav button > span:not(.nav-message-badge),
-  .shell.task-detail-shell .nav-locale > span {
-    display: none;
-  }
-
-  .shell.task-detail-shell .workspace {
-    min-height: 0;
-    margin-left: 0;
-  }
-
   .workspace:has(.task-focus-page),
   .task-focus-page {
-    height: calc(100svh - 56px);
+    height: calc(100svh - 116px);
   }
 
   .task-focus-page {
