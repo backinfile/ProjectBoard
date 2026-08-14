@@ -425,6 +425,29 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	}
 }
 
+func TestTaskDetailIsAnIndependentProjectPage(t *testing.T) {
+	app := string(mustReadEmbedded(t, "assets/app.js"))
+	for _, marker := range []string{
+		"const taskWorkspacePage={",
+		"id:'taskWorkspace'",
+		"segment:'tasks'",
+		"async open(taskID=null)",
+		"async render()",
+		"state.page==='taskWorkspace'",
+		"parts[2]==='tasks'",
+		"['taskWorkspace','taskWorkspace','message']",
+		"taskWorkspacePage.open(item.id)",
+		"taskWorkspacePage.open(row.dataset.workItem)",
+	} {
+		if !strings.Contains(app, marker) {
+			t.Errorf("independent task detail page is missing %q", marker)
+		}
+	}
+	if strings.Contains(app, "if(state.task)return `#${base}/tasks/") {
+		t.Error("task detail routing still overrides every project page whenever a task is selected")
+	}
+}
+
 func TestTaskBoardFiltersByInclusiveCreatedDateRange(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
