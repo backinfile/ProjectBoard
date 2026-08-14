@@ -1308,7 +1308,7 @@ body {
 .task-focus-nav {
   border-right: 1px solid var(--line);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .task-focus-nav > header {
@@ -1459,7 +1459,7 @@ body {
   border-radius: 6px;
   background: transparent;
   color: #9ca1ac;
-  opacity: 0;
+  opacity: .62;
 }
 
 .task-nav-row:hover .task-nav-pin,
@@ -1475,7 +1475,17 @@ body {
 
 .task-nav-pin.active {
   color: var(--signal);
+  opacity: 1;
 }
+
+.task-inspector-description > div {
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.58;
+}
+
+.task-inspector-description > div > :first-child { margin-top: 0; }
+.task-inspector-description > div > :last-child { margin-bottom: 0; }
 
 .task-nav-empty {
   margin: 0;
@@ -8200,7 +8210,7 @@ body:has(.settings-surface) .drawer .button.primary:hover {
 }
 
 .task-focus-nav-scroll {
-  padding: 0 11px 28px;
+  padding: 14px 11px 28px;
 }
 
 .task-nav-group {
@@ -8248,26 +8258,6 @@ body:has(.settings-surface) .drawer .button.primary:hover {
 
 .task-focus-header p {
   margin-top: 7px;
-}
-
-.task-focus-sync {
-  flex: 0 0 auto;
-  min-height: 27px;
-  padding: 0 9px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--signal);
-  background: var(--signal-soft);
-  font-size: 9px;
-  font-weight: 750;
-  white-space: nowrap;
-}
-
-.task-focus-sync .icon {
-  width: 13px;
-  height: 13px;
 }
 
 .task-focus-conversation > .task-thread {
@@ -8638,13 +8628,6 @@ body:has(.settings-surface) .drawer .button.primary:hover {
   .task-focus-header {
     min-height: 72px;
     padding: 10px 14px;
-  }
-
-  .task-focus-sync {
-    width: 28px;
-    padding: 0;
-    justify-content: center;
-    font-size: 0;
   }
 
   .task-focus-conversation .task-conversation-scroll > section {

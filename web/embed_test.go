@@ -388,6 +388,7 @@ func TestTaskDetailPollsForConversationAndStateUpdates(t *testing.T) {
 func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	app := string(mustReadEmbedded(t, "assets/app.js"))
 	css := string(mustReadEmbedded(t, "assets/reference-theme.css"))
+	index := string(mustReadEmbedded(t, "index.html"))
 	for _, marker := range []string{
 		"task-focus-page",
 		"task-focus-top",
@@ -421,6 +422,25 @@ func TestTaskDetailUsesConversationCenteredThreeColumnWorkspace(t *testing.T) {
 	} {
 		if !strings.Contains(css, marker) {
 			t.Errorf("three-column task workspace styling is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`$('.task-focus-context')?.remove()`,
+		`class="task-inspector-description"`,
+		`taskDescriptionSection:'任务描述'`,
+		`${t('taskDescriptionSection')}`,
+		`opacity: .62`,
+	} {
+		if !strings.Contains(app+css, marker) {
+			t.Errorf("streamlined task navigation is missing %q", marker)
+		}
+	}
+	if !strings.Contains(index, `id="i-pin"`) {
+		t.Error("task navigation is missing its Lucide pin symbol")
+	}
+	for _, removed := range []string{`<span class="eyebrow">Attention map</span>`, `id="taskNavSearch"`, `class="task-focus-sync"`} {
+		if strings.Contains(app, removed) {
+			t.Errorf("task detail still renders removed chrome %q", removed)
 		}
 	}
 }
