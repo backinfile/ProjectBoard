@@ -1,0 +1,12 @@
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+coverage/
+playwright-report/
+test-results/
+projectboard.exe
+.qa-data/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
