@@ -94,6 +94,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/templates", s.tableList("SELECT id,kind,name,description,body_json AS body,builtin,archived,created_at,updated_at FROM templates WHERE archived=0 ORDER BY builtin DESC,name"))
 	mux.HandleFunc("GET /api/v1/audit", s.tableList("SELECT id,project_id AS projectId,task_id AS taskId,run_id AS runId,action,actor,detail_json AS detail,created_at AS createdAt FROM audit_events ORDER BY created_at DESC LIMIT 200"))
 	mux.HandleFunc("GET /api/v1/notifications", s.tableList("SELECT id,project_id AS projectId,type,title,body,entity_id AS entityId,read_at AS readAt,created_at AS createdAt FROM notifications ORDER BY created_at DESC LIMIT 200"))
+	mux.HandleFunc("POST /api/v1/notifications/read-all", s.markAllNotificationsRead)
 	mux.HandleFunc("GET /api/v1/settings", s.tableList("SELECT key,value_json AS value,updated_at AS updatedAt FROM settings"))
 	mux.HandleFunc("POST /api/v1/backups", s.createBackup)
 	mux.HandleFunc("POST /mcp", s.mcp)
@@ -480,7 +481,12 @@ func (s *Server) listDrives(w http.ResponseWriter, r *http.Request) {
 	respond(w, drives, nil)
 }
 func (s *Server) listDirectories(w http.ResponseWriter, r *http.Request) {
-	root := filepath.Clean(r.URL.Query().Get("path"))
+	rawPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if rawPath == "" || !filepath.IsAbs(rawPath) {
+		writeError(w, http.StatusBadRequest, "目录路径必须是绝对路径")
+		return
+	}
+	root := filepath.Clean(rawPath)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		respond(w, nil, err)
@@ -513,6 +519,10 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	path, err := s.store.Backup(r.Context(), body.Directory)
 	respondCreated(w, map[string]string{"path": path}, err)
+}
+func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	err := s.store.MarkAllNotificationsRead(r.Context())
+	respond(w, map[string]string{"status": "ok"}, err)
 }
 
 func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {

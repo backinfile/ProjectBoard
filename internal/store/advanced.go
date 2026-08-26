@@ -287,3 +287,8 @@ func (s *Store) RevokeCapabilities(ctx context.Context, runID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE capability_tokens SET revoked_at=? WHERE run_id=? AND revoked_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano), runID)
 	return err
 }
+
+func (s *Store) MarkAllNotificationsRead(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE notifications SET read_at=? WHERE read_at IS NULL`, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}

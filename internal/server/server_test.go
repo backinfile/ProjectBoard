@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,6 +43,43 @@ func TestUserCanCreateProjectAndTask(t *testing.T) {
 	}
 	if len(tasks) != 1 || tasks[0]["title"] != "实现任务对话" {
 		t.Fatalf("unexpected tasks: %#v", tasks)
+	}
+}
+
+func TestDirectoryBrowserListsOnlyDirectoriesAndRejectsEmptyPath(t *testing.T) {
+	st, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := httptest.NewServer(server.New(st, events.New()).Handler())
+	defer srv.Close()
+	root := t.TempDir()
+	if err = os.Mkdir(filepath.Join(root, "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "notes.txt"), []byte("ignore"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Get(srv.URL + "/api/v1/filesystem/directories?path=" + url.QueryEscape(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var entries []map[string]any
+	if err = json.NewDecoder(res.Body).Decode(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0]["name"] != "project" {
+		t.Fatalf("unexpected directory entries: %#v", entries)
+	}
+	res, err = http.Get(srv.URL + "/api/v1/filesystem/directories")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected empty path to be rejected, got %d", res.StatusCode)
 	}
 }
 
