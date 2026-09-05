@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-05T04:00:00Z",
+  "title": "Design System: ProjectBoard",
+  "extensions": {
+    "shadows": [
+      {"name":"overlay","value":"0 18px 60px #18181b20","purpose":"模态框和任务详情"},
+      {"name":"mobile-tree","value":"8px 0 18px #18181b10","purpose":"手机知识树覆盖层"}
+    ],
+    "motion": [{"name":"drawer","value":"180ms ease-out","purpose":"任务详情进入"}],
+    "breakpoints": [{"name":"compact","value":"1100px"},{"name":"mobile","value":"760px"}]
+  },
+  "components": [],
+  "narrative": {"northStar":"Kaneo 应用框架","overview":"窄侧栏，紧凑路径页签，铺满窗口的任务与知识工作区。"}
+}

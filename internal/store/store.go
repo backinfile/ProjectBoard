@@ -1,559 +1,624 @@
 package store
 
 import (
-	"context"
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strings"
-	"time"
-
-	"github.com/projectboard/projectboard/internal/domain"
-	"github.com/projectboard/projectboard/internal/ids"
+	"io"
 	_ "modernc.org/sqlite"
+	"os"
+	"path/filepath"
+	"projectboard/internal/domain"
+	"strings"
+	"sync"
+	"time"
 )
 
-var ErrNotFound = errors.New("not found")
-var ErrConflict = errors.New("conflict")
+var ErrConflict = errors.New("REVISION_CONFLICT：数据已更新，请保留草稿并刷新")
 
 type Store struct {
-	db   *sql.DB
-	path string
+	DB      *sql.DB
+	Dir     string
+	mu      sync.Mutex
+	release func()
 }
 
-func Open(ctx context.Context, path string) (*Store, error) {
-	if path != ":memory:" {
-		path = filepath.Clean(path)
-		if err := backupBeforeMigration(path); err != nil {
-			return nil, err
+func Open(dir string) (*Store, error) {
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return nil, e
+	}
+	for _, name := range []string{"attachments", "backups", "logs"} {
+		if e := os.MkdirAll(filepath.Join(dir, name), 0700); e != nil {
+			return nil, e
 		}
 	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, err
+	release, e := lockDirectory(filepath.Join(dir, "workspace.lock"))
+	if e != nil {
+		return nil, e
+	}
+	db, e := sql.Open("sqlite", filepath.Join(dir, "projectboard-v2.sqlite"))
+	if e != nil {
+		release()
+		return nil, e
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, path: path}
-	if err := s.migrate(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
+	s := &Store{DB: db, Dir: dir, release: release}
+	fail := func(e error) (*Store, error) { db.Close(); release(); return nil, e }
+	var version int
+	if e = db.QueryRow(`PRAGMA user_version`).Scan(&version); e != nil {
+		return fail(e)
+	}
+	if version > 1 {
+		return fail(fmt.Errorf("请使用更新版本的 ProjectBoard 打开此数据库"))
+	}
+	if _, e = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;`); e != nil {
+		return fail(e)
+	}
+	if _, e = db.Exec(`CREATE TABLE IF NOT EXISTS workspace(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, body BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS admin(id INTEGER PRIMARY KEY CHECK(id=1), password BLOB NOT NULL);
+ CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, project TEXT NOT NULL, name TEXT NOT NULL, hash TEXT UNIQUE NOT NULL, created TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY, project TEXT NOT NULL, body BLOB NOT NULL, created INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY, task TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL, seen INTEGER NOT NULL DEFAULT 0);
+ PRAGMA user_version=1;`); e != nil {
+		return fail(e)
+	}
+	b, _ := json.Marshal(domain.Empty())
+	_, e = db.Exec(`INSERT OR IGNORE INTO workspace VALUES(1,0,?)`, b)
+	if e != nil {
+		return fail(e)
 	}
 	return s, nil
 }
+func (s *Store) Close() error { e := s.DB.Close(); s.release(); return e }
 
-func (s *Store) Close() error { return s.db.Close() }
-
-func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS projects (
- id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
- normalized_path TEXT NOT NULL UNIQUE, color TEXT NOT NULL DEFAULT '#c9f24e', default_branch TEXT NOT NULL DEFAULT 'main',
- default_agent_id TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tasks (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), task_key TEXT NOT NULL,
- title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, run_status TEXT NOT NULL,
- priority TEXT NOT NULL DEFAULT 'medium', labels_json TEXT NOT NULL DEFAULT '[]', acceptance_json TEXT NOT NULL DEFAULT '[]',
- due_at TEXT, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(project_id, task_key)
-);
-CREATE TABLE IF NOT EXISTS agents (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, model TEXT NOT NULL DEFAULT '',
- reasoning TEXT NOT NULL DEFAULT 'medium', system_prompt TEXT NOT NULL DEFAULT '', sandbox TEXT NOT NULL DEFAULT 'workspace-write',
- network INTEGER NOT NULL DEFAULT 0, is_default INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS conversations (
- id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), agent_id TEXT NOT NULL REFERENCES agents(id),
- title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', codex_thread_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(task_id, agent_id)
-);
-CREATE TABLE IF NOT EXISTS messages (
- id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id), role TEXT NOT NULL,
- kind TEXT NOT NULL DEFAULT 'text', content TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS runs (
- id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), conversation_id TEXT NOT NULL REFERENCES conversations(id),
- agent_id TEXT NOT NULL REFERENCES agents(id), workspace_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
- prompt TEXT NOT NULL, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS task_workspaces (
- id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), path TEXT NOT NULL, branch TEXT NOT NULL,
- base_commit TEXT NOT NULL, kind TEXT NOT NULL, parent_id TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'ready',
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS parallel_plans (
- id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), main_agent_id TEXT NOT NULL, prompt TEXT NOT NULL,
- agents_json TEXT NOT NULL, authorized_children INTEGER NOT NULL, snapshot_commit TEXT NOT NULL DEFAULT '',
- status TEXT NOT NULL DEFAULT 'proposed', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS candidate_changes (
- id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), workspace_id TEXT NOT NULL REFERENCES task_workspaces(id),
- commit_hash TEXT NOT NULL, patch TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
- created_at TEXT NOT NULL, decided_at TEXT
-);
-CREATE TABLE IF NOT EXISTS approvals (
- id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), method TEXT NOT NULL, detail_json TEXT NOT NULL,
- status TEXT NOT NULL DEFAULT 'pending', decision TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, decided_at TEXT
-);
-CREATE TABLE IF NOT EXISTS run_events (
- id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id), event_type TEXT NOT NULL,
- payload_json TEXT NOT NULL, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS knowledge_versions (
- id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL REFERENCES knowledge(id), version INTEGER NOT NULL, content TEXT NOT NULL,
- summary TEXT NOT NULL, source_run_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'accepted', created_at TEXT NOT NULL,
- UNIQUE(knowledge_id, version)
-);
-CREATE TABLE IF NOT EXISTS capability_tokens (
- token_hash TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, run_id TEXT NOT NULL,
- permissions_json TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT
-);
-CREATE TABLE IF NOT EXISTS knowledge (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, content TEXT NOT NULL,
- summary TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'general', permission TEXT NOT NULL DEFAULT 'suggest',
- locked INTEGER NOT NULL DEFAULT 0, sensitive INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 1,
- deleted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(entity_type, entity_id UNINDEXED, project_id UNINDEXED, title, body);
-CREATE TABLE IF NOT EXISTS notifications (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '', type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
- entity_id TEXT NOT NULL DEFAULT '', read_at TEXT, snoozed_until TEXT, created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS automation_rules (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, trigger_type TEXT NOT NULL,
- conditions_json TEXT NOT NULL DEFAULT '{}', actions_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1,
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS templates (
- id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', body_json TEXT NOT NULL,
- builtin INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audit_events (
- id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '',
- action TEXT NOT NULL, actor TEXT NOT NULL, detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL);
-INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,datetime('now'));
-`)
-	if err != nil {
-		return err
+// Retain staged uploads for a day so interrupted edits can still be completed.
+func (s *Store) Cleanup() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, e := s.Read()
+	if e != nil {
+		return e
 	}
-	return s.seed(ctx)
-}
-
-func (s *Store) seed(ctx context.Context) error {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO agents
- (id, name, model, reasoning, system_prompt, sandbox, network, is_default, created_at)
- VALUES ('agent_codex_default','Codex · 自动实现','', 'high', '围绕任务验收标准工作，修改后运行验证并报告风险。','workspace-write',1,1,?)`, now)
-	if err != nil {
-		return err
+	refs := st.Attachments()
+	rows, e := s.DB.Query(`SELECT id,created FROM attachments`)
+	if e != nil {
+		return e
 	}
-	for _, tpl := range []struct{ id, kind, name, desc, body string }{
-		{"tpl_feature", "task", "实现功能", "从需求到验证的功能任务", `{"priority":"high","acceptance":["功能满足需求","测试通过","修改已审核"]}`},
-		{"tpl_bug", "task", "修复 Bug", "诊断、复现并修复问题", `{"priority":"high","acceptance":["问题可复现","回归测试通过"]}`},
-		{"tpl_research", "task", "调研方案", "比较方案并形成可执行结论", `{"priority":"medium","acceptance":["记录约束","给出推荐方案"]}`},
-		{"tpl_project", "project", "软件研发项目", "任务—Agent—验证—知识闭环", `{"defaultBranch":"main"}`},
-	} {
-		_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO templates(id,kind,name,description,body_json,builtin,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)`, tpl.id, tpl.kind, tpl.name, tpl.desc, tpl.body, now, now)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key,value_json,updated_at) VALUES('global','{"concurrency":10,"listenAddress":"127.0.0.1:5173","allowedOrigins":[],"notificationEnabled":false,"runRetentionDays":90,"trashRetentionDays":30}',?)`, now)
-	return err
-}
-
-func normalizePath(path string) string {
-	return strings.ToLower(filepath.Clean(strings.TrimSpace(path)))
-}
-
-func (s *Store) CreateProject(ctx context.Context, p domain.Project) (domain.Project, error) {
-	if strings.TrimSpace(p.Name) == "" || strings.TrimSpace(p.Path) == "" {
-		return p, fmt.Errorf("name and path are required")
-	}
-	if p.ID == "" {
-		p.ID = ids.New("prj")
-	}
-	if p.Color == "" {
-		p.Color = "#c9f24e"
-	}
-	if p.DefaultBranch == "" {
-		p.DefaultBranch = "main"
-	}
-	if p.DefaultAgentID == "" {
-		p.DefaultAgentID = "agent_codex_default"
-	}
-	p.CreatedAt = time.Now().UTC()
-	p.UpdatedAt = p.CreatedAt
-	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,description,path,normalized_path,color,default_branch,default_agent_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, p.ID, p.Name, p.Description, filepath.Clean(p.Path), normalizePath(p.Path), p.Color, p.DefaultBranch, p.DefaultAgentID, p.CreatedAt.Format(time.RFC3339Nano), p.UpdatedAt.Format(time.RFC3339Nano))
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return p, ErrConflict
-		}
-		return p, err
-	}
-	_ = s.index(ctx, "project", p.ID, p.ID, p.Name, p.Description)
-	return p, nil
-}
-
-func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,path,color,default_branch,default_agent_id,archived,created_at,updated_at FROM projects WHERE archived=0 ORDER BY updated_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.Project
+	staged := map[string]int64{}
 	for rows.Next() {
-		var p domain.Project
-		var created, updated string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Path, &p.Color, &p.DefaultBranch, &p.DefaultAgentID, &p.Archived, &created, &updated); err != nil {
-			return nil, err
+		var id string
+		var created int64
+		if e = rows.Scan(&id, &created); e != nil {
+			rows.Close()
+			return e
 		}
-		p.CreatedAt = parseTime(created)
-		p.UpdatedAt = parseTime(updated)
-		out = append(out, p)
+		staged[id] = created
 	}
-	return out, rows.Err()
-}
-
-func (s *Store) GetProject(ctx context.Context, id string) (domain.Project, error) {
-	var p domain.Project
-	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,path,color,default_branch,default_agent_id,archived,created_at,updated_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.Description, &p.Path, &p.Color, &p.DefaultBranch, &p.DefaultAgentID, &p.Archived, &created, &updated)
-	if errors.Is(err, sql.ErrNoRows) {
-		return p, ErrNotFound
+	if e = rows.Close(); e != nil {
+		return e
 	}
-	if err != nil {
-		return p, err
+	files, e := os.ReadDir(filepath.Join(s.Dir, "attachments"))
+	if e != nil {
+		return e
 	}
-	p.CreatedAt = parseTime(created)
-	p.UpdatedAt = parseTime(updated)
-	return p, nil
-}
-
-func (s *Store) CreateTask(ctx context.Context, t domain.Task) (domain.Task, error) {
-	if strings.TrimSpace(t.Title) == "" || t.ProjectID == "" {
-		return t, fmt.Errorf("projectId and title are required")
-	}
-	if t.ID == "" {
-		t.ID = ids.New("tsk")
-	}
-	if t.Status == "" {
-		t.Status = domain.TaskInbox
-	}
-	if !t.Status.Valid() {
-		return t, fmt.Errorf("invalid task status")
-	}
-	if t.RunStatus == "" {
-		t.RunStatus = domain.RunNotStarted
-	}
-	if t.Priority == "" {
-		t.Priority = "medium"
-	}
-	t.CreatedAt = time.Now().UTC()
-	t.UpdatedAt = t.CreatedAt
-	t.Version = 1
-	if t.Key == "" {
-		var n int
-		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*)+1 FROM tasks WHERE project_id=?`, t.ProjectID).Scan(&n)
-		t.Key = fmt.Sprintf("PB-%d", n)
-	}
-	labels, _ := json.Marshal(t.Labels)
-	acceptance, _ := json.Marshal(t.Acceptance)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO tasks(id,project_id,task_key,title,description,status,run_status,priority,labels_json,acceptance_json,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.ProjectID, t.Key, t.Title, t.Description, t.Status, t.RunStatus, t.Priority, string(labels), string(acceptance), t.Version, t.CreatedAt.Format(time.RFC3339Nano), t.UpdatedAt.Format(time.RFC3339Nano))
-	if err != nil {
-		return t, err
-	}
-	_ = s.index(ctx, "task", t.ID, t.ProjectID, t.Title, t.Description)
-	_ = s.audit(ctx, t.ProjectID, t.ID, "", "task.created", "user", map[string]any{"title": t.Title})
-	return t, nil
-}
-
-func (s *Store) ListTasks(ctx context.Context, projectID string) ([]domain.Task, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,task_key,title,description,status,run_status,priority,labels_json,acceptance_json,due_at,version,deleted_at,created_at,updated_at FROM tasks WHERE project_id=? AND deleted_at IS NULL ORDER BY created_at DESC`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.Task
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, err
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, file := range files {
+		id := file.Name()
+		if file.IsDir() || !domain.ValidID(id) {
+			continue
 		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) GetTask(ctx context.Context, id string) (domain.Task, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,project_id,task_key,title,description,status,run_status,priority,labels_json,acceptance_json,due_at,version,deleted_at,created_at,updated_at FROM tasks WHERE id=?`, id)
-	t, err := scanTask(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return t, ErrNotFound
-	}
-	return t, err
-}
-
-type scanner interface{ Scan(...any) error }
-
-func scanTask(row scanner) (domain.Task, error) {
-	var t domain.Task
-	var labels, acceptance string
-	var due, deleted sql.NullString
-	var created, updated string
-	err := row.Scan(&t.ID, &t.ProjectID, &t.Key, &t.Title, &t.Description, &t.Status, &t.RunStatus, &t.Priority, &labels, &acceptance, &due, &t.Version, &deleted, &created, &updated)
-	if err != nil {
-		return t, err
-	}
-	_ = json.Unmarshal([]byte(labels), &t.Labels)
-	_ = json.Unmarshal([]byte(acceptance), &t.Acceptance)
-	if due.Valid {
-		v := parseTime(due.String)
-		t.DueAt = &v
-	}
-	if deleted.Valid {
-		v := parseTime(deleted.String)
-		t.DeletedAt = &v
-	}
-	t.CreatedAt = parseTime(created)
-	t.UpdatedAt = parseTime(updated)
-	return t, nil
-}
-
-func (s *Store) UpdateTaskStatus(ctx context.Context, id string, status domain.TaskStatus, version int64) (domain.Task, error) {
-	if !status.Valid() {
-		return domain.Task{}, fmt.Errorf("invalid task status")
-	}
-	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?,version=version+1,updated_at=? WHERE id=? AND version=?`, status, now.Format(time.RFC3339Nano), id, version)
-	if err != nil {
-		return domain.Task{}, err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return domain.Task{}, ErrConflict
-	}
-	t, err := s.GetTask(ctx, id)
-	if err == nil {
-		_ = s.audit(ctx, t.ProjectID, t.ID, "", "task.status_changed", "user", map[string]any{"status": status})
-	}
-	return t, err
-}
-
-func (s *Store) ListAgents(ctx context.Context, projectID string) ([]domain.AgentProfile, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,name,model,reasoning,system_prompt,sandbox,network,is_default,created_at FROM agents WHERE project_id='' OR project_id=? ORDER BY is_default DESC,name`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.AgentProfile
-	for rows.Next() {
-		var a domain.AgentProfile
-		var created string
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.Name, &a.Model, &a.Reasoning, &a.SystemPrompt, &a.Sandbox, &a.Network, &a.IsDefault, &created); err != nil {
-			return nil, err
+		if _, ok := refs[id]; ok {
+			continue
 		}
-		a.CreatedAt = parseTime(created)
-		out = append(out, a)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) GetOrCreateConversation(ctx context.Context, taskID, agentID string) (domain.Conversation, error) {
-	var c domain.Conversation
-	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id,task_id,agent_id,title,summary,codex_thread_id,created_at,updated_at FROM conversations WHERE task_id=? AND agent_id=?`, taskID, agentID).Scan(&c.ID, &c.TaskID, &c.AgentID, &c.Title, &c.Summary, &c.CodexThreadID, &created, &updated)
-	if err == nil {
-		c.CreatedAt = parseTime(created)
-		c.UpdatedAt = parseTime(updated)
-		return c, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return c, err
-	}
-	c = domain.Conversation{ID: ids.New("cnv"), TaskID: taskID, AgentID: agentID, Title: "任务对话", CreatedAt: time.Now().UTC()}
-	c.UpdatedAt = c.CreatedAt
-	_, err = s.db.ExecContext(ctx, `INSERT INTO conversations(id,task_id,agent_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)`, c.ID, c.TaskID, c.AgentID, c.Title, c.CreatedAt.Format(time.RFC3339Nano), c.UpdatedAt.Format(time.RFC3339Nano))
-	return c, err
-}
-
-func (s *Store) ListConversations(ctx context.Context, taskID string) ([]domain.Conversation, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,agent_id,title,summary,codex_thread_id,created_at,updated_at FROM conversations WHERE task_id=? ORDER BY updated_at DESC`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.Conversation
-	for rows.Next() {
-		var c domain.Conversation
-		var created, updated string
-		if err := rows.Scan(&c.ID, &c.TaskID, &c.AgentID, &c.Title, &c.Summary, &c.CodexThreadID, &created, &updated); err != nil {
-			return nil, err
+		if created, ok := staged[id]; ok && created > cutoff.Unix() {
+			continue
 		}
-		c.CreatedAt = parseTime(created)
-		c.UpdatedAt = parseTime(updated)
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) AddMessage(ctx context.Context, m domain.Message) (domain.Message, error) {
-	if m.ID == "" {
-		m.ID = ids.New("msg")
-	}
-	if m.Kind == "" {
-		m.Kind = "text"
-	}
-	m.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO messages(id,conversation_id,role,kind,content,created_at) VALUES(?,?,?,?,?,?)`, m.ID, m.ConversationID, m.Role, m.Kind, m.Content, m.CreatedAt.Format(time.RFC3339Nano))
-	if err == nil {
-		_, _ = s.db.ExecContext(ctx, `UPDATE conversations SET updated_at=? WHERE id=?`, m.CreatedAt.Format(time.RFC3339Nano), m.ConversationID)
-	}
-	return m, err
-}
-
-func (s *Store) ListMessages(ctx context.Context, conversationID string) ([]domain.Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,conversation_id,role,kind,content,created_at FROM messages WHERE conversation_id=? ORDER BY created_at`, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.Message
-	for rows.Next() {
-		var m domain.Message
-		var created string
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Kind, &m.Content, &created); err != nil {
-			return nil, err
+		info, e := file.Info()
+		if e != nil {
+			return e
 		}
-		m.CreatedAt = parseTime(created)
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) CreateRun(ctx context.Context, r domain.Run) (domain.Run, error) {
-	if r.ID == "" {
-		r.ID = ids.New("run")
-	}
-	r.Status = domain.RunQueued
-	r.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO runs(id,task_id,conversation_id,agent_id,workspace_id,status,prompt,created_at) VALUES(?,?,?,?,?,?,?,?)`, r.ID, r.TaskID, r.ConversationID, r.AgentID, r.WorkspaceID, r.Status, r.Prompt, r.CreatedAt.Format(time.RFC3339Nano))
-	if err == nil {
-		_, _ = s.db.ExecContext(ctx, `UPDATE tasks SET run_status=?,updated_at=? WHERE id=?`, r.Status, r.CreatedAt.Format(time.RFC3339Nano), r.TaskID)
-	}
-	return r, err
-}
-
-func (s *Store) ListRuns(ctx context.Context, taskID string) ([]domain.Run, error) {
-	query := `SELECT id,task_id,conversation_id,agent_id,workspace_id,status,prompt,started_at,finished_at,created_at FROM runs`
-	args := []any{}
-	if taskID != "" {
-		query += " WHERE task_id=?"
-		args = append(args, taskID)
-	}
-	query += " ORDER BY created_at DESC"
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.Run
-	for rows.Next() {
-		var r domain.Run
-		var started, finished sql.NullString
-		var created string
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.ConversationID, &r.AgentID, &r.WorkspaceID, &r.Status, &r.Prompt, &started, &finished, &created); err != nil {
-			return nil, err
+		if info.ModTime().After(cutoff) {
+			continue
 		}
-		if started.Valid {
-			v := parseTime(started.String)
-			r.StartedAt = &v
+		if e = os.Remove(filepath.Join(s.Dir, "attachments", id)); e != nil {
+			return e
 		}
-		if finished.Valid {
-			v := parseTime(finished.String)
-			r.FinishedAt = &v
-		}
-		r.CreatedAt = parseTime(created)
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) Dashboard(ctx context.Context, projectID string) (map[string]any, error) {
-	tasks, err := s.ListTasks(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	counts := map[string]int{}
-	for _, t := range tasks {
-		counts[string(t.Status)]++
-	}
-	runs, err := s.ListRuns(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	active := 0
-	for _, r := range runs {
-		if r.Status == domain.RunRunning || r.Status == domain.RunQueued || r.Status == domain.RunWaitingApproval {
-			active++
+		if _, e = s.DB.Exec(`DELETE FROM attachments WHERE id=?`, id); e != nil {
+			return e
 		}
 	}
-	return map[string]any{"taskCount": len(tasks), "statusCounts": counts, "activeRuns": active, "unreviewedFiles": 0, "recentTasks": tasks}, nil
+	_, e = s.DB.Exec(`DELETE FROM sessions WHERE expires<?`, time.Now().Unix())
+	return e
 }
-
-func (s *Store) QueryRows(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
+func (s *Store) Read() (domain.State, error) {
+	var b []byte
+	e := s.DB.QueryRow(`SELECT body FROM workspace WHERE id=1`).Scan(&b)
+	var st domain.State
+	if e == nil {
+		e = json.Unmarshal(b, &st)
 	}
-	defer rows.Close()
-	cols, _ := rows.Columns()
-	var out []map[string]any
-	for rows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
+	return st, e
+}
+func (s *Store) Update(expected int64, fn func(*domain.State) error) (domain.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.update(expected, fn, false)
+}
+func (s *Store) update(expected int64, fn func(*domain.State) error, restoring bool) (domain.State, error) {
+	st, e := s.Read()
+	if e != nil {
+		return st, e
+	}
+	if st.Revision != expected {
+		return st, ErrConflict
+	}
+	old := domain.Clone(st)
+	if e = fn(&st); e != nil {
+		return old, e
+	}
+	if !restoring {
+		prior := map[string]string{}
+		for _, n := range old.Nodes {
+			prior[n.ID] = n.Project
 		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
-		}
-		m := map[string]any{}
-		for i, c := range cols {
-			if b, ok := vals[i].([]byte); ok {
-				m[c] = string(b)
-			} else {
-				m[c] = vals[i]
+		for _, n := range st.Nodes {
+			if project, ok := prior[n.ID]; ok && project != n.Project {
+				return old, fmt.Errorf("请在原项目编辑知识节点")
 			}
 		}
-		out = append(out, m)
 	}
-	return out, rows.Err()
+	if !restoring {
+		s.recurring(&st, &old)
+	}
+	oldTasks := map[string]domain.Task{}
+	for _, t := range old.Tasks {
+		oldTasks[t.ID] = t
+	}
+	for i := range st.Projects {
+		p := &st.Projects[i]
+		next := 1
+		if previous := old.Project(p.ID); previous != nil {
+			next = max(next, previous.NextTaskNum)
+		}
+		for _, t := range old.Tasks {
+			if t.Project == p.ID {
+				next = max(next, t.Num+1)
+			}
+		}
+		for j := range st.Tasks {
+			t := &st.Tasks[j]
+			if t.Project != p.ID {
+				continue
+			}
+			if previous, exists := oldTasks[t.ID]; exists && !restoring {
+				if previous.Project != t.Project {
+					return old, fmt.Errorf("请在原项目编辑任务")
+				}
+				t.Num = previous.Num
+			} else if !restoring {
+				t.Num = next
+				next++
+			}
+			next = max(next, t.Num+1)
+		}
+		p.NextTaskNum = next
+	}
+	if e = st.Validate(); e != nil {
+		return old, e
+	}
+	if e = s.ingest(&st); e != nil {
+		return old, e
+	}
+	st.Revision = old.Revision + 1
+	b, e := json.Marshal(st)
+	if e != nil {
+		return old, e
+	}
+	res, e := s.DB.Exec(`UPDATE workspace SET body=?,revision=? WHERE id=1 AND revision=?`, b, st.Revision, old.Revision)
+	if e != nil {
+		return old, e
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return old, ErrConflict
+	}
+	return st, nil
+}
+func (s *Store) Save(st domain.State) (domain.State, error) {
+	return s.Update(st.Revision, func(x *domain.State) error { *x = st; return nil })
+}
+func (s *Store) recurring(st, old *domain.State) {
+	for i := 0; i < len(st.Tasks); i++ {
+		t := &st.Tasks[i]
+		if t.Repeat == "" || t.Deleted != "" {
+			continue
+		}
+		prev := old.Task(t.ID)
+		p := st.Project(t.Project)
+		if prev == nil || p == nil || t.Deleted != "" || t.Repeat == "" {
+			continue
+		}
+		if prev.RepeatedTo != "" {
+			t.RepeatedTo = prev.RepeatedTo
+			continue
+		}
+		done := false
+		wasDone := false
+		for _, x := range p.Statuses {
+			done = done || x.ID == t.Status && x.Kind == "done"
+			wasDone = wasDone || x.ID == prev.Status && x.Kind == "done"
+		}
+		if !done || wasDone {
+			continue
+		}
+		exists := false
+		for _, x := range st.Tasks {
+			exists = exists || x.RepeatedFrom == t.ID
+		}
+		if exists {
+			continue
+		}
+		next := domain.Clone(*t)
+		next.ID = domain.ID()
+		t.RepeatedTo = next.ID
+		next.RepeatedTo = ""
+		next.RepeatedFrom = t.ID
+		next.Created = domain.Now()
+		next.Updated = next.Created
+		next.Status = p.InitialStatusID
+		next.Progress = nil
+		next.Notes = []domain.Comment{}
+		next.Relations = []domain.Relation{}
+		next.ReminderFired = ""
+		next.Num = 1
+		for _, x := range st.Tasks {
+			if x.Project == t.Project && x.Num >= next.Num {
+				next.Num = x.Num + 1
+			}
+		}
+		advance := func(v, layout string) string {
+			if v == "" {
+				return ""
+			}
+			dt, e := time.ParseInLocation(layout, v, time.Local)
+			if e != nil {
+				return ""
+			}
+			switch t.Repeat {
+			case "daily":
+				dt = dt.AddDate(0, 0, 1)
+			case "weekly":
+				dt = dt.AddDate(0, 0, 7)
+			case "monthly":
+				day := dt.Day()
+				first := time.Date(dt.Year(), dt.Month()+1, 1, dt.Hour(), dt.Minute(), 0, 0, dt.Location())
+				maxDay := first.AddDate(0, 1, -1).Day()
+				if day > maxDay {
+					day = maxDay
+				}
+				dt = first.AddDate(0, 0, day-1)
+			}
+			return dt.Format(layout)
+		}
+		next.Start = advance(t.Start, "2006-01-02")
+		next.Due = advance(t.Due, "2006-01-02")
+		next.End = advance(t.End, "2006-01-02")
+		next.Reminder = advance(t.Reminder, "2006-01-02T15:04")
+		for j := range next.Checks {
+			next.Checks[j].Done = false
+			next.Checks[j].ID = domain.ID()
+		}
+		st.Tasks = append(st.Tasks, next)
+	}
+}
+func (s *Store) Tick() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, e := s.Read()
+	if e != nil {
+		return e
+	}
+	now := time.Now().Format("2006-01-02T15:04")
+	for _, t := range st.Tasks {
+		if t.Deleted != "" || t.Reminder == "" || t.Reminder > now {
+			continue
+		}
+		p := st.Project(t.Project)
+		if p == nil || p.Archived {
+			continue
+		}
+		done := false
+		for _, v := range p.Statuses {
+			done = done || v.ID == t.Status && domain.In(v.Kind, "done", "cancelled")
+		}
+		if done {
+			continue
+		}
+		_, e = s.DB.Exec(`INSERT OR IGNORE INTO notifications(id,task,body,created) VALUES(?,?,?,?)`, t.ID+"/"+t.Reminder, t.ID, t.Title, domain.Now())
+		if e != nil {
+			return e
+		}
+	}
+	return nil
+}
+func Hash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+func (s *Store) PutAttachment(project, name, mime string, r io.Reader) (domain.Attachment, error) {
+	b, e := io.ReadAll(io.LimitReader(r, (20<<20)+1))
+	if e != nil {
+		return domain.Attachment{}, e
+	}
+	if len(b) > 20<<20 {
+		return domain.Attachment{}, fmt.Errorf("请选择 20 MB 以内的附件")
+	}
+	a := domain.Attachment{ID: domain.ID(), Name: filepath.Base(name), Type: mime, Size: int64(len(b)), SHA256: Hash(b)}
+	if a.Name == "." || len(a.Name) > 255 || strings.ContainsAny(a.Name, "\r\n\x00") {
+		return a, fmt.Errorf("请检查附件名称")
+	}
+	if e = s.writeAttachment(project, a, b); e != nil {
+		return a, e
+	}
+	return a, nil
+}
+func (s *Store) writeAttachment(project string, a domain.Attachment, b []byte) error {
+	if !domain.ValidID(a.ID) || a.Size != int64(len(b)) || Hash(b) != a.SHA256 {
+		return fmt.Errorf("请检查附件数据")
+	}
+	path := filepath.Join(s.Dir, "attachments", a.ID)
+	if old, e := os.ReadFile(path); e == nil {
+		if Hash(old) != a.SHA256 {
+			return fmt.Errorf("附件 ID 已使用，请重新上传")
+		}
+	} else {
+		if e = os.WriteFile(path, b, 0600); e != nil {
+			return e
+		}
+	}
+	raw, _ := json.Marshal(a)
+	_, e := s.DB.Exec(`INSERT OR IGNORE INTO attachments VALUES(?,?,?,?)`, a.ID, project, raw, time.Now().Unix())
+	return e
+}
+func (s *Store) Attachment(project, id string) (domain.Attachment, []byte, error) {
+	a, e := s.AttachmentMeta(project, id)
+	if e != nil {
+		return a, nil, e
+	}
+	b, e := os.ReadFile(filepath.Join(s.Dir, "attachments", id))
+	if e == nil && Hash(b) != a.SHA256 {
+		return a, nil, fmt.Errorf("请从备份恢复完整附件")
+	}
+	return a, b, e
+}
+func (s *Store) AttachmentMeta(project, id string) (domain.Attachment, error) {
+	var raw []byte
+	var a domain.Attachment
+	if e := s.DB.QueryRow(`SELECT body FROM attachments WHERE id=? AND project=?`, id, project).Scan(&raw); e != nil {
+		return a, fmt.Errorf("请选择当前项目附件")
+	}
+	if e := json.Unmarshal(raw, &a); e != nil {
+		return a, e
+	}
+	return a, nil
+}
+func (s *Store) ingest(st *domain.State) error {
+	var total int64
+	for _, a := range st.Attachments() {
+		total += a.Size
+	}
+	if total > 256<<20 {
+		return fmt.Errorf("请将工作空间附件总量控制在 256 MB 内")
+	}
+	for i := range st.Tasks {
+		t := &st.Tasks[i]
+		groups := [][]domain.Attachment{t.DetailAttachments}
+		for _, c := range t.Notes {
+			groups = append(groups, c.Attachments)
+		}
+		for _, group := range groups {
+			for j := range group {
+				a := &group[j]
+				if a.Data != "" || a.SHA256 == "" && a.Size == 0 {
+					b, e := base64.StdEncoding.DecodeString(a.Data)
+					if e != nil || int64(len(b)) != a.Size {
+						return fmt.Errorf("请检查附件编码与大小")
+					}
+					a.SHA256 = Hash(b)
+					a.Data = ""
+					if e = s.writeAttachment(t.Project, *a, b); e != nil {
+						return e
+					}
+				}
+				stored, e := s.AttachmentMeta(t.Project, a.ID)
+				if e != nil {
+					return e
+				}
+				if a.Name != stored.Name || a.Type != stored.Type || a.Size != stored.Size {
+					return fmt.Errorf("请重新上传附件")
+				}
+				*a = stored
+			}
+		}
+	}
+	return nil
 }
 
-func (s *Store) Search(ctx context.Context, query, projectID string) ([]map[string]any, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return []map[string]any{}, nil
+// Backups are logical SQLite snapshots: one read of the committed workspace plus immutable attachment bytes.
+// Credentials and sessions are deliberately excluded; restoring retains the current administrator.
+func (s *Store) Backup() ([]byte, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.backup() }
+func (s *Store) backup() ([]byte, error) {
+	st, e := s.Read()
+	if e != nil {
+		return nil, e
 	}
-	return s.QueryRows(ctx, `SELECT entity_type AS type,entity_id AS id,title,snippet(search_fts,4,'<mark>','</mark>','…',16) AS snippet FROM search_fts WHERE search_fts MATCH ? AND (?='' OR project_id=?) LIMIT 50`, query, projectID, projectID)
+	body, _ := json.Marshal(st)
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	manifest := map[string]string{"workspace.json": Hash(body)}
+	add := func(name string, b []byte) error {
+		f, e := w.Create(name)
+		if e == nil {
+			_, e = f.Write(b)
+		}
+		return e
+	}
+	if e = add("workspace.json", body); e != nil {
+		return nil, e
+	}
+	for id, a := range st.Attachments() {
+		b, e := os.ReadFile(filepath.Join(s.Dir, "attachments", id))
+		if e != nil {
+			return nil, e
+		}
+		if Hash(b) != a.SHA256 {
+			return nil, fmt.Errorf("附件校验失败：%s", a.Name)
+		}
+		name := "attachments/" + id
+		manifest[name] = Hash(b)
+		if e = add(name, b); e != nil {
+			return nil, e
+		}
+	}
+	m, _ := json.Marshal(map[string]any{"format": 1, "files": manifest, "created": domain.Now()})
+	if e = add("manifest.json", m); e != nil {
+		return nil, e
+	}
+	if e = w.Close(); e != nil {
+		return nil, e
+	}
+	return buf.Bytes(), nil
 }
-
-func (s *Store) index(ctx context.Context, kind, id, projectID, title, body string) error {
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM search_fts WHERE entity_type=? AND entity_id=?`, kind, id)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO search_fts(entity_type,entity_id,project_id,title,body) VALUES(?,?,?,?,?)`, kind, id, projectID, title, body)
-	return err
+func (s *Store) Restore(b []byte, expected int64) (domain.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, e := s.Read()
+	if e != nil {
+		return current, e
+	}
+	if current.Revision != expected {
+		return current, ErrConflict
+	}
+	var incoming domain.State
+	files := map[string][]byte{}
+	if bytes.HasPrefix(bytes.TrimSpace(b), []byte("{")) {
+		e = json.Unmarshal(b, &incoming)
+	} else {
+		var z *zip.Reader
+		z, e = zip.NewReader(bytes.NewReader(b), int64(len(b)))
+		if e == nil {
+			var total uint64
+			for _, f := range z.File {
+				if f.Name != "manifest.json" && f.Name != "workspace.json" && !(strings.HasPrefix(f.Name, "attachments/") && domain.ValidID(strings.TrimPrefix(f.Name, "attachments/"))) {
+					e = fmt.Errorf("请使用 ProjectBoard 备份文件")
+					break
+				}
+				total += f.UncompressedSize64
+				if total > 512<<20 || f.UncompressedSize64 > 64<<20 || files[f.Name] != nil {
+					e = fmt.Errorf("请检查备份大小与文件名")
+					break
+				}
+				r, err := f.Open()
+				if err != nil {
+					e = err
+					break
+				}
+				files[f.Name], e = io.ReadAll(io.LimitReader(r, 64<<20+1))
+				r.Close()
+				if e != nil {
+					break
+				}
+			}
+		}
+		if e == nil {
+			var m struct {
+				Format int               `json:"format"`
+				Files  map[string]string `json:"files"`
+			}
+			e = json.Unmarshal(files["manifest.json"], &m)
+			if e == nil && (m.Format != 1 || len(m.Files) != len(files)-1) {
+				e = fmt.Errorf("请检查备份清单")
+			}
+			if e == nil {
+				for name, hash := range m.Files {
+					if Hash(files[name]) != hash {
+						e = fmt.Errorf("请重新选择完整备份")
+						break
+					}
+				}
+			}
+			if e == nil {
+				e = json.Unmarshal(files["workspace.json"], &incoming)
+			}
+		}
+	}
+	if e != nil {
+		return current, e
+	}
+	if e = incoming.Validate(); e != nil {
+		return current, e
+	}
+	for _, t := range incoming.Tasks {
+		groups := [][]domain.Attachment{t.DetailAttachments}
+		for _, c := range t.Notes {
+			groups = append(groups, c.Attachments)
+		}
+		for _, g := range groups {
+			for _, a := range g {
+				if a.Data != "" || a.SHA256 == "" && a.Size == 0 {
+					continue
+				}
+				raw, ok := files["attachments/"+a.ID]
+				if !ok || Hash(raw) != a.SHA256 || int64(len(raw)) != a.Size {
+					return current, fmt.Errorf("请检查备份附件 %s", a.Name)
+				}
+			}
+		}
+	}
+	backup, e := s.backup()
+	if e != nil {
+		return current, e
+	}
+	if e = os.WriteFile(filepath.Join(s.Dir, "backups", "before-restore-"+time.Now().Format("20060102-150405")+"-"+domain.ID()+".zip"), backup, 0600); e != nil {
+		return current, e
+	}
+	// Remap attachment IDs to avoid overwriting any bytes referenced by the current workspace.
+	mapping := map[string]domain.Attachment{}
+	for i := range incoming.Tasks {
+		t := &incoming.Tasks[i]
+		groups := [][]domain.Attachment{t.DetailAttachments}
+		for _, c := range t.Notes {
+			groups = append(groups, c.Attachments)
+		}
+		for _, g := range groups {
+			for j := range g {
+				a := &g[j]
+				key := t.Project + "/" + a.ID
+				if prev, ok := mapping[key]; ok {
+					*a = prev
+					continue
+				}
+				raw := files["attachments/"+a.ID]
+				if a.Data != "" || a.SHA256 == "" && a.Size == 0 {
+					raw, e = base64.StdEncoding.DecodeString(a.Data)
+					if e != nil || int64(len(raw)) != a.Size {
+						return current, fmt.Errorf("请检查附件数据")
+					}
+				}
+				a.ID = domain.ID()
+				a.Data = ""
+				a.SHA256 = Hash(raw)
+				if e = s.writeAttachment(t.Project, *a, raw); e != nil {
+					return current, e
+				}
+				mapping[key] = *a
+			}
+		}
+	}
+	incoming.Revision = current.Revision
+	return s.update(current.Revision, func(st *domain.State) error { *st = incoming; return nil }, true)
 }
-func (s *Store) audit(ctx context.Context, projectID, taskID, runID, action, actor string, detail any) error {
-	raw, _ := json.Marshal(detail)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_events(id,project_id,task_id,run_id,action,actor,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, ids.New("aud"), projectID, taskID, runID, action, actor, string(raw), time.Now().UTC().Format(time.RFC3339Nano))
-	return err
-}
-func parseTime(v string) time.Time { t, _ := time.Parse(time.RFC3339Nano, v); return t }

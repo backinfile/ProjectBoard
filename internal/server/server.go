@@ -1,599 +1,560 @@
 package server
 
 import (
-	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/crypto/bcrypt"
+	"io"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
-	"runtime"
+	"net/url"
+	"projectboard/internal/domain"
+	"projectboard/internal/store"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/projectboard/projectboard/internal/agent"
-	"github.com/projectboard/projectboard/internal/domain"
-	"github.com/projectboard/projectboard/internal/events"
-	"github.com/projectboard/projectboard/internal/store"
-	"github.com/projectboard/projectboard/internal/workspace"
-	"github.com/projectboard/projectboard/web"
 )
 
+const Version = "1.0.0"
+
 type Server struct {
-	store          *store.Store
-	events         *events.Bus
-	workspaces     *workspace.Manager
-	runs           RunController
-	externalListen bool
-	handler        http.Handler
+	Store       *store.Store
+	Assets      fs.FS
+	SetupToken  string
+	Instance    string
+	AllowedHost string
+	mu          sync.Mutex
+	attempts    map[string][]time.Time
+	plans       map[string]DeletePlan
+	mcp         http.Handler
+	Shutdown    func()
 }
 
-type RunController interface {
-	Enqueue(domain.Run) error
-	Decide(context.Context, string, agent.ApprovalDecision) error
-}
-
-func New(st *store.Store, bus *events.Bus) *Server {
-	return NewWithWorkspaceRoot(st, bus, filepath.Join(os.TempDir(), "ProjectBoard-worktrees"))
-}
-func NewWithWorkspaceRoot(st *store.Store, bus *events.Bus, root string) *Server {
-	return NewWithRuntime(st, bus, workspace.NewManager(root), nil)
-}
-func NewWithRuntime(st *store.Store, bus *events.Bus, wm *workspace.Manager, runs RunController, listen ...string) *Server {
-	s := &Server{store: st, events: bus, workspaces: wm, runs: runs}
-	if len(listen) > 0 {
-		host, _, err := net.SplitHostPort(listen[0])
-		if err == nil {
-			s.externalListen = host != "127.0.0.1" && host != "localhost" && host != "::1"
-		}
+func Secret() string {
+	b := make([]byte, 32)
+	if _, e := rand.Read(b); e != nil {
+		panic(e)
 	}
-	mux := http.NewServeMux()
-	s.routes(mux)
-	s.handler = s.withHeaders(mux)
+	return hex.EncodeToString(b)
+}
+func New(st *store.Store, assets fs.FS) *Server {
+	s := &Server{Store: st, Assets: assets, SetupToken: Secret(), Instance: Secret(), attempts: map[string][]time.Time{}, plans: map[string]DeletePlan{}}
+	s.mcp = s.mcpHandler()
 	return s
 }
-func (s *Server) Handler() http.Handler { return s.handler }
-
-func (s *Server) routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "product": "ProjectBoard", "time": time.Now().UTC(), "externalListen": s.externalListen})
-	})
-	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
-	mux.HandleFunc("POST /api/v1/projects", s.createProject)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}", s.getProject)
-	mux.HandleFunc("POST /api/v1/projects/{projectID}/initialize-git", s.initializeGit)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}/tasks", s.listTasks)
-	mux.HandleFunc("POST /api/v1/projects/{projectID}/tasks", s.createTask)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}/dashboard", s.dashboard)
-	mux.HandleFunc("GET /api/v1/tasks/{taskID}", s.getTask)
-	mux.HandleFunc("PATCH /api/v1/tasks/{taskID}/status", s.updateTaskStatus)
-	mux.HandleFunc("GET /api/v1/tasks/{taskID}/conversations", s.listConversations)
-	mux.HandleFunc("POST /api/v1/tasks/{taskID}/conversations", s.createConversation)
-	mux.HandleFunc("GET /api/v1/conversations/{conversationID}/messages", s.listMessages)
-	mux.HandleFunc("POST /api/v1/conversations/{conversationID}/messages", s.createMessage)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}/agents", s.listAgents)
-	mux.HandleFunc("GET /api/v1/runs", s.listRuns)
-	mux.HandleFunc("POST /api/v1/tasks/{taskID}/parallel-plans", s.createParallelPlan)
-	mux.HandleFunc("POST /api/v1/parallel-plans/{planID}/approve", s.approveParallelPlan)
-	mux.HandleFunc("POST /api/v1/worktrees/{workspaceID}/complete", s.completeChildWorkspace)
-	mux.HandleFunc("POST /api/v1/candidates/{candidateID}/integrate", s.integrateCandidate)
-	mux.HandleFunc("POST /api/v1/candidates/{candidateID}/reject", s.rejectCandidate)
-	mux.HandleFunc("POST /api/v1/tasks/{taskID}/finalize", s.finalizeTask)
-	mux.HandleFunc("POST /api/v1/approvals/{approvalID}/decide", s.decideApproval)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}/knowledge", s.listKnowledge)
-	mux.HandleFunc("POST /api/v1/projects/{projectID}/knowledge", s.createKnowledge)
-	mux.HandleFunc("GET /api/v1/projects/{projectID}/automations", s.listAutomations)
-	mux.HandleFunc("GET /api/v1/filesystem/drives", s.listDrives)
-	mux.HandleFunc("GET /api/v1/filesystem/directories", s.listDirectories)
-	mux.HandleFunc("GET /api/v1/search", s.search)
-	mux.HandleFunc("GET /api/v1/events", s.streamEvents)
-	mux.HandleFunc("GET /api/v1/templates", s.tableList("SELECT id,kind,name,description,body_json AS body,builtin,archived,created_at,updated_at FROM templates WHERE archived=0 ORDER BY builtin DESC,name"))
-	mux.HandleFunc("GET /api/v1/audit", s.tableList("SELECT id,project_id AS projectId,task_id AS taskId,run_id AS runId,action,actor,detail_json AS detail,created_at AS createdAt FROM audit_events ORDER BY created_at DESC LIMIT 200"))
-	mux.HandleFunc("GET /api/v1/notifications", s.tableList("SELECT id,project_id AS projectId,type,title,body,entity_id AS entityId,read_at AS readAt,created_at AS createdAt FROM notifications ORDER BY created_at DESC LIMIT 200"))
-	mux.HandleFunc("POST /api/v1/notifications/read-all", s.markAllNotificationsRead)
-	mux.HandleFunc("GET /api/v1/settings", s.tableList("SELECT key,value_json AS value,updated_at AS updatedAt FROM settings"))
-	mux.HandleFunc("POST /api/v1/backups", s.createBackup)
-	mux.HandleFunc("POST /mcp", s.mcp)
-	dist, _ := fs.Sub(web.Dist, "dist")
-	files := http.FileServer(http.FS(dist))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+func (s *Server) Initialized() bool {
+	var n int
+	_ = s.Store.DB.QueryRow(`SELECT COUNT(*) FROM admin`).Scan(&n)
+	return n > 0
+}
+func jsonReply(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func fail(w http.ResponseWriter, code int, msg string) {
+	jsonReply(w, code, map[string]string{"error": msg})
+}
+func decode(w http.ResponseWriter, r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	d := json.NewDecoder(r.Body)
+	if e := d.Decode(v); e != nil {
+		return fmt.Errorf("请检查请求内容与大小")
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return fmt.Errorf("请提供一个 JSON 对象")
+	}
+	return nil
+}
+func (s *Server) session(r *http.Request) (string, string, bool) {
+	c, e := r.Cookie("pb_session")
+	if e != nil {
+		return "", "", false
+	}
+	h := store.Hash([]byte(c.Value))
+	var csrf string
+	e = s.Store.DB.QueryRow(`SELECT csrf FROM sessions WHERE hash=? AND expires>?`, h, time.Now().Unix()).Scan(&csrf)
+	return h, csrf, e == nil
+}
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+	host, _, e := net.SplitHostPort(r.Host)
+	if e != nil {
+		host = r.Host
+	}
+	allowed := host == "localhost" || net.ParseIP(host) != nil
+	if s.AllowedHost != "" {
+		allowed = strings.EqualFold(r.Host, s.AllowedHost)
+	}
+	if !allowed {
+		fail(w, 403, "请通过本地服务地址访问")
+		return
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, e := url.Parse(origin)
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if e != nil || u.Host != r.Host || u.Scheme != scheme {
+			fail(w, 403, "请在当前应用页面操作")
+			return
+		}
+	}
+	if r.URL.Path == "/api/health" && r.Method == "GET" {
+		jsonReply(w, 200, map[string]any{"app": "ProjectBoard", "version": Version, "instance": s.Instance})
+		return
+	}
+	if r.URL.Path == "/api/mcp" {
+		s.mcp.ServeHTTP(w, r)
+		return
+	}
+	if r.URL.Path == "/api/session" && r.Method == "GET" {
+		_, csrf, ok := s.session(r)
+		jsonReply(w, 200, map[string]any{"initialized": s.Initialized(), "authenticated": ok, "csrf": csrf, "version": Version})
+		return
+	}
+	if r.URL.Path == "/api/setup" || r.URL.Path == "/api/login" {
+		if r.Method != "POST" || r.Header.Get("X-Requested-With") != "ProjectBoard" {
+			fail(w, 403, "请通过登录页面继续")
+			return
+		}
+		s.login(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		hash, csrf, ok := s.session(r)
+		if !ok {
+			fail(w, 401, "请登录工作空间")
+			return
+		}
+		if r.Method != "GET" && r.Method != "HEAD" {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-CSRF-Token")), []byte(csrf)) != 1 {
+				fail(w, 403, "请刷新页面后继续")
+				return
+			}
+		}
+		switch r.URL.Path {
+		case "/api/shutdown":
+			if r.Method == "POST" {
+				jsonReply(w, 202, map[string]bool{"ok": true})
+				if s.Shutdown != nil {
+					time.AfterFunc(100*time.Millisecond, s.Shutdown)
+				}
+				return
+			}
+		case "/api/revision":
+			if r.Method == "GET" {
+				var rev int64
+				if e := s.Store.DB.QueryRow(`SELECT revision FROM workspace WHERE id=1`).Scan(&rev); e != nil {
+					fail(w, 500, "请重新连接工作空间")
+				} else {
+					jsonReply(w, 200, map[string]int64{"revision": rev})
+				}
+				return
+			}
+		case "/api/logout":
+			if r.Method == "POST" {
+				_, _ = s.Store.DB.Exec(`DELETE FROM sessions WHERE hash=?`, hash)
+				http.SetCookie(w, &http.Cookie{Name: "pb_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+				jsonReply(w, 200, map[string]bool{"ok": true})
+				return
+			}
+		case "/api/password":
+			if r.Method == "POST" {
+				var v struct {
+					Old      string `json:"old"`
+					Password string `json:"password"`
+				}
+				if e := decode(w, r, &v, 4096); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				if !s.checkPassword(v.Old) {
+					fail(w, 400, "请重新输入当前密码")
+					return
+				}
+				if e := s.ResetPassword(v.Password); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				s.issueSession(w, r)
+				return
+			}
+		case "/api/state":
+			if r.Method == "GET" {
+				st, e := s.Store.Read()
+				if e != nil {
+					fail(w, 500, "请重新打开工作空间")
+				} else {
+					jsonReply(w, 200, st)
+				}
+				return
+			}
+			if r.Method == "PUT" {
+				var st domain.State
+				if e := decode(w, r, &st, 64<<20); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				next, e := s.Store.Save(st)
+				s.stateResult(w, next, e)
+				return
+			}
+		case "/api/backup":
+			if r.Method == "GET" {
+				b, e := s.Store.Backup()
+				if e != nil {
+					fail(w, 500, e.Error())
+					return
+				}
+				w.Header().Set("Content-Type", "application/zip")
+				w.Header().Set("Content-Disposition", `attachment; filename="projectboard-backup.zip"`)
+				w.Write(b)
+				return
+			}
+		case "/api/restore":
+			if r.Method == "POST" {
+				rev, e := strconv.ParseInt(r.Header.Get("X-Revision"), 10, 64)
+				if e != nil {
+					fail(w, 400, "请刷新后重新导入")
+					return
+				}
+				b, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 512<<20))
+				if e != nil {
+					fail(w, 400, "请选择 512 MB 以内的备份")
+					return
+				}
+				st, e := s.Store.Restore(b, rev)
+				s.stateResult(w, st, e)
+				return
+			}
+		case "/api/attachments":
+			s.attachment(w, r)
+			return
+		case "/api/tokens":
+			s.tokens(w, r)
+			return
+		case "/api/tools":
+			if r.Method == "GET" {
+				jsonReply(w, 200, ToolDefinitions())
+				return
+			}
+		case "/api/call":
+			if r.Method == "POST" {
+				var v struct {
+					Tool string         `json:"tool"`
+					Args map[string]any `json:"args"`
+				}
+				if e := decode(w, r, &v, 32<<20); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				project, _ := v.Args["project_id"].(string)
+				result, e := s.Call(project, v.Tool, v.Args)
+				if e != nil {
+					fail(w, 400, e.Error())
+				} else {
+					jsonReply(w, 200, result)
+				}
+				return
+			}
+		case "/api/notifications":
+			if r.Method == "GET" {
+				_ = s.Store.Tick()
+				rows, e := s.Store.DB.Query(`SELECT id,task,body,created FROM notifications WHERE seen=0 ORDER BY created DESC LIMIT 100`)
+				if e != nil {
+					fail(w, 500, "请重试读取提醒")
+					return
+				}
+				defer rows.Close()
+				out := []map[string]string{}
+				for rows.Next() {
+					var id, task, body, at string
+					rows.Scan(&id, &task, &body, &at)
+					out = append(out, map[string]string{"id": id, "task": task, "text": body, "at": at})
+				}
+				jsonReply(w, 200, out)
+				return
+			}
+			if r.Method == "POST" {
+				var v struct {
+					ID string `json:"id"`
+				}
+				if e := decode(w, r, &v, 4096); e != nil {
+					fail(w, 400, e.Error())
+					return
+				}
+				_, e := s.Store.DB.Exec(`UPDATE notifications SET seen=1 WHERE id=?`, v.ID)
+				if e != nil {
+					fail(w, 500, "请重试")
+				} else {
+					jsonReply(w, 200, map[string]bool{"ok": true})
+				}
+				return
+			}
+		case "/api/info":
+			if r.Method == "GET" {
+				jsonReply(w, 200, map[string]any{"version": Version, "dataDir": s.Store.Dir, "attachmentLimit": 20 << 20})
+				return
+			}
+		}
+		fail(w, 404, "请选择有效操作")
+		return
+	}
+	if r.Method != "GET" && r.Method != "HEAD" {
+		fail(w, 405, "请使用 GET 访问页面")
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	if path == "" {
+		path = "index.html"
+	}
+	if !fs.ValidPath(path) {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "projects/") {
+		http.Redirect(w, r, "/#/"+path, http.StatusTemporaryRedirect)
+		return
+	}
+	b, e := fs.ReadFile(s.Assets, path)
+	if e != nil {
+		if strings.HasPrefix(path, "projects/") {
+			b, e = fs.ReadFile(s.Assets, "index.html")
+		}
+		if e != nil {
 			http.NotFound(w, r)
 			return
 		}
-		if r.URL.Path != "/" {
-			if _, err := fs.Stat(dist, strings.TrimPrefix(r.URL.Path, "/")); err == nil {
-				files.ServeHTTP(w, r)
-				return
-			}
+	}
+	typ := mime.TypeByExtension("." + strings.Split(path, ".")[len(strings.Split(path, "."))-1])
+	if strings.HasPrefix(path, "projects/") {
+		typ = "text/html; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", typ)
+	w.Write(b)
+}
+func (s *Server) stateResult(w http.ResponseWriter, st domain.State, e error) {
+	if e != nil {
+		code := 400
+		if errors.Is(e, store.ErrConflict) {
+			code = 409
 		}
-		r.URL.Path = "/"
-		files.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) withHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListProjects(r.Context())
-	respond(w, v, err)
-}
-func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
-	var p domain.Project
-	if !decode(w, r, &p) {
+		fail(w, code, e.Error())
 		return
 	}
-	v, err := s.store.CreateProject(r.Context(), p)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "project.created", EntityID: v.ID, Payload: v})
-	}
-	respondCreated(w, v, err)
+	jsonReply(w, 200, st)
 }
-func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.GetProject(r.Context(), r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) initializeGit(w http.ResponseWriter, r *http.Request) {
-	project, err := s.store.GetProject(r.Context(), r.PathValue("projectID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	commit, err := s.workspaces.InitializeRepository(r.Context(), project.Path, project.DefaultBranch)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "git.initialized", EntityID: project.ID, Payload: map[string]string{"commit": commit}})
-	}
-	respond(w, map[string]string{"baselineCommit": commit}, err)
-}
-func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListTasks(r.Context(), r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
-	var t domain.Task
-	if !decode(w, r, &t) {
-		return
-	}
-	t.ProjectID = r.PathValue("projectID")
-	v, err := s.store.CreateTask(r.Context(), t)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "task.created", EntityID: v.ID, Payload: v})
-	}
-	respondCreated(w, v, err)
-}
-func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.GetTask(r.Context(), r.PathValue("taskID"))
-	respond(w, v, err)
-}
-func (s *Server) updateTaskStatus(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Status  domain.TaskStatus `json:"status"`
-		Version int64             `json:"version"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	v, err := s.store.UpdateTaskStatus(r.Context(), r.PathValue("taskID"), body.Status, body.Version)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "task.updated", EntityID: v.ID, Payload: v})
-	}
-	respond(w, v, err)
-}
-func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Dashboard(r.Context(), r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListAgents(r.Context(), r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListConversations(r.Context(), r.PathValue("taskID"))
-	respond(w, v, err)
-}
-func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		AgentID string `json:"agentId"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	v, err := s.store.GetOrCreateConversation(r.Context(), r.PathValue("taskID"), body.AgentID)
-	respondCreated(w, v, err)
-}
-func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListMessages(r.Context(), r.PathValue("conversationID"))
-	respond(w, v, err)
-}
-func (s *Server) createMessage(w http.ResponseWriter, r *http.Request) {
-	var body struct{ TaskID, AgentID, Content string }
-	if !decode(w, r, &body) {
-		return
-	}
-	m, err := s.store.AddMessage(r.Context(), domain.Message{ConversationID: r.PathValue("conversationID"), Role: "user", Content: body.Content})
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	run, err := s.store.CreateRun(r.Context(), domain.Run{TaskID: body.TaskID, ConversationID: m.ConversationID, AgentID: body.AgentID, Prompt: body.Content})
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "run.queued", EntityID: run.ID, Payload: run})
-		if s.runs != nil {
-			err = s.runs.Enqueue(run)
-		}
-	}
-	respondCreated(w, map[string]any{"message": m, "run": run}, err)
-}
-func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
-	if s.runs == nil {
-		writeError(w, http.StatusServiceUnavailable, "执行服务未启用")
-		return
-	}
-	var body struct {
-		Decision agent.ApprovalDecision `json:"decision"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	switch body.Decision {
-	case agent.ApproveOnce, agent.ApproveSession, agent.Decline, agent.Cancel:
-	default:
-		writeError(w, http.StatusBadRequest, "invalid approval decision")
-		return
-	}
-	err := s.runs.Decide(r.Context(), r.PathValue("approvalID"), body.Decision)
-	respond(w, map[string]any{"status": "decided"}, err)
-}
-func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListRuns(r.Context(), r.URL.Query().Get("taskId"))
-	respond(w, v, err)
-}
-func (s *Server) createParallelPlan(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		MainAgentID, Prompt string
-		Agents              []domain.ParallelAgent
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	v, err := s.store.CreateParallelPlan(r.Context(), domain.ParallelPlan{TaskID: r.PathValue("taskID"), MainAgentID: body.MainAgentID, Prompt: body.Prompt, Agents: body.Agents})
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "parallel_plan.proposed", EntityID: v.ID, Payload: v})
-	}
-	respondCreated(w, v, err)
-}
-func (s *Server) approveParallelPlan(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	plan, err := s.store.GetParallelPlan(ctx, r.PathValue("planID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	task, err := s.store.GetTask(ctx, plan.TaskID)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	project, err := s.store.GetProject(ctx, task.ProjectID)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	main, err := s.store.GetMainWorkspace(ctx, task.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		created, e := s.workspaces.EnsureTask(ctx, project.Path, project.ID, task.ID, task.Key, project.DefaultBranch)
-		err = e
-		main = domain.TaskWorkspace{ID: created.ID, TaskID: created.TaskID, Path: created.Path, Branch: created.Branch, BaseCommit: created.BaseCommit, Kind: created.Kind, ParentID: created.ParentID, State: "ready"}
-		if err == nil {
-			err = s.store.SaveWorkspace(ctx, main)
-		}
-	}
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	names := make([]string, 0, len(plan.Agents)-1)
-	for _, a := range plan.Agents[1:] {
-		names = append(names, a.AgentID)
-	}
-	snapshot, children, err := s.workspaces.CreateChildren(ctx, toWorkspace(main), plan.ID, names)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	for _, child := range children {
-		_ = s.store.SaveWorkspace(ctx, domain.TaskWorkspace{ID: child.ID, TaskID: child.TaskID, Path: child.Path, Branch: child.Branch, BaseCommit: child.BaseCommit, Kind: child.Kind, ParentID: child.ParentID, State: "ready"})
-	}
-	err = s.store.ApproveParallelPlan(ctx, plan.ID, snapshot)
-	if err == nil {
-		started := []domain.Run{}
-		for i, assignment := range plan.Agents {
-			conversation, createErr := s.store.GetOrCreateConversation(ctx, task.ID, assignment.AgentID)
-			if createErr != nil {
-				err = createErr
-				break
-			}
-			prompt := assignment.Instruction
-			if strings.TrimSpace(prompt) == "" {
-				prompt = plan.Prompt
-			}
-			_, createErr = s.store.AddMessage(ctx, domain.Message{ConversationID: conversation.ID, Role: "user", Content: prompt})
-			if createErr != nil {
-				err = createErr
-				break
-			}
-			workspaceID := main.ID
-			if i > 0 {
-				workspaceID = children[i-1].ID
-			}
-			run, createErr := s.store.CreateRun(ctx, domain.Run{TaskID: task.ID, ConversationID: conversation.ID, AgentID: assignment.AgentID, WorkspaceID: workspaceID, Prompt: prompt})
-			if createErr != nil {
-				err = createErr
-				break
-			}
-			started = append(started, run)
-			if s.runs != nil {
-				createErr = s.runs.Enqueue(run)
-			}
-			if createErr != nil {
-				err = createErr
-				break
-			}
-		}
-		s.events.Publish(domain.Event{Type: "parallel_plan.approved", EntityID: plan.ID, Payload: map[string]any{"snapshotCommit": snapshot, "workspaces": children}})
-		if err == nil {
-			respond(w, map[string]any{"planId": plan.ID, "snapshotCommit": snapshot, "workspaces": children, "runs": started}, nil)
-			return
-		}
-	}
-	respond(w, map[string]any{"planId": plan.ID, "snapshotCommit": snapshot, "workspaces": children}, err)
-}
-func toWorkspace(w domain.TaskWorkspace) workspace.Workspace {
-	return workspace.Workspace{ID: w.ID, TaskID: w.TaskID, Path: w.Path, Branch: w.Branch, BaseCommit: w.BaseCommit, Kind: w.Kind, ParentID: w.ParentID}
-}
-func (s *Server) completeChildWorkspace(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Summary string `json:"summary"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	stored, err := s.store.GetWorkspace(r.Context(), r.PathValue("workspaceID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	candidate, err := s.workspaces.CompleteChild(r.Context(), toWorkspace(stored), body.Summary)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	id, err := s.store.SaveCandidate(r.Context(), candidate, body.Summary)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "candidate.ready", EntityID: id, Payload: candidate})
-	}
-	respondCreated(w, map[string]any{"id": id, "commit": candidate.Commit, "patch": candidate.Patch}, err)
-}
-func (s *Server) integrateCandidate(w http.ResponseWriter, r *http.Request) {
-	candidate, _, err := s.store.GetCandidate(r.Context(), r.PathValue("candidateID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	main, err := s.store.GetMainWorkspace(r.Context(), candidate.Workspace.TaskID)
-	if err == nil {
-		err = s.workspaces.IntegrateAndCleanup(r.Context(), toWorkspace(main), candidate)
-	}
-	if err == nil {
-		err = s.store.DecideCandidate(r.Context(), r.PathValue("candidateID"), "integrated")
-	}
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "candidate.integrated", EntityID: r.PathValue("candidateID")})
-	}
-	respond(w, map[string]string{"status": "integrated"}, err)
-}
-func (s *Server) rejectCandidate(w http.ResponseWriter, r *http.Request) {
-	candidate, _, err := s.store.GetCandidate(r.Context(), r.PathValue("candidateID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	main, err := s.store.GetMainWorkspace(r.Context(), candidate.Workspace.TaskID)
-	if err == nil {
-		err = s.workspaces.RejectAndCleanup(r.Context(), toWorkspace(main), candidate)
-	}
-	if err == nil {
-		err = s.store.DecideCandidate(r.Context(), r.PathValue("candidateID"), "rejected")
-	}
-	respond(w, map[string]string{"status": "rejected"}, err)
-}
-func (s *Server) finalizeTask(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Message string `json:"message"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	task, err := s.store.GetTask(r.Context(), r.PathValue("taskID"))
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	project, err := s.store.GetProject(r.Context(), task.ProjectID)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	main, err := s.store.GetMainWorkspace(r.Context(), task.ID)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	if strings.TrimSpace(body.Message) == "" {
-		body.Message = task.Key + ": " + task.Title
-	}
-	commit, err := s.workspaces.Finalize(r.Context(), project.Path, toWorkspace(main), project.DefaultBranch, body.Message)
-	if err == nil {
-		s.events.Publish(domain.Event{Type: "task.merged", EntityID: task.ID, Payload: map[string]string{"commit": commit}})
-	}
-	respond(w, map[string]string{"commit": commit}, err)
-}
-func (s *Server) listKnowledge(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.ListKnowledge(r.Context(), r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) createKnowledge(w http.ResponseWriter, r *http.Request) {
-	var k domain.Knowledge
-	if !decode(w, r, &k) {
-		return
-	}
-	k.ProjectID = r.PathValue("projectID")
-	v, err := s.store.CreateKnowledge(r.Context(), k)
-	respondCreated(w, v, err)
-}
-func (s *Server) listAutomations(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.QueryRows(r.Context(), `SELECT id,project_id AS projectId,name,trigger_type AS triggerType,conditions_json AS conditions,actions_json AS actions,enabled,created_at AS createdAt,updated_at AS updatedAt FROM automation_rules WHERE project_id=? ORDER BY updated_at DESC`, r.PathValue("projectID"))
-	respond(w, v, err)
-}
-func (s *Server) listDrives(w http.ResponseWriter, r *http.Request) {
-	drives := []string{}
-	if runtime.GOOS == "windows" {
-		for c := 'A'; c <= 'Z'; c++ {
-			p := string(c) + ":\\"
-			if _, err := os.Stat(p); err == nil {
-				drives = append(drives, p)
-			}
-		}
-	} else {
-		drives = append(drives, string(filepath.Separator))
-	}
-	respond(w, drives, nil)
-}
-func (s *Server) listDirectories(w http.ResponseWriter, r *http.Request) {
-	rawPath := strings.TrimSpace(r.URL.Query().Get("path"))
-	if rawPath == "" || !filepath.IsAbs(rawPath) {
-		writeError(w, http.StatusBadRequest, "目录路径必须是绝对路径")
-		return
-	}
-	root := filepath.Clean(rawPath)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		respond(w, nil, err)
-		return
-	}
-	out := []map[string]any{}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			out = append(out, map[string]any{"name": entry.Name(), "path": filepath.Join(root, entry.Name())})
-		}
-	}
-	respond(w, out, nil)
-}
-func (s *Server) search(w http.ResponseWriter, r *http.Request) {
-	v, err := s.store.Search(r.Context(), r.URL.Query().Get("q"), r.URL.Query().Get("projectId"))
-	respond(w, v, err)
-}
-func (s *Server) tableList(query string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		v, err := s.store.QueryRows(r.Context(), query)
-		respond(w, v, err)
-	}
-}
-func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Directory string `json:"directory"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	path, err := s.store.Backup(r.Context(), body.Directory)
-	respondCreated(w, map[string]string{"path": path}, err)
-}
-func (s *Server) markAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
-	err := s.store.MarkAllNotificationsRead(r.Context())
-	respond(w, map[string]string{"status": "ok"}, err)
-}
-
-func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming unavailable")
-		return
-	}
-	after, _ := strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64)
-	ch, cancel := s.events.Subscribe(after)
-	defer cancel()
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	fmt.Fprint(w, ": projectboard event stream\n\n")
-	flusher.Flush()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case event, ok := <-ch:
-			if !ok {
-				return
-			}
-			raw, _ := json.Marshal(event)
-			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, raw)
-			flusher.Flush()
-		case <-time.After(20 * time.Second):
-			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
-		}
-	}
-}
-
-func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	defer r.Body.Close()
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	d.DisallowUnknownFields()
-	if err := d.Decode(v); err != nil {
-		writeError(w, http.StatusBadRequest, "无效的请求内容")
+func (s *Server) checkPassword(pass string) bool {
+	var hash []byte
+	if e := s.Store.DB.QueryRow(`SELECT password FROM admin WHERE id=1`).Scan(&hash); e != nil {
 		return false
 	}
-	return true
+	return bcrypt.CompareHashAndPassword(hash, []byte(pass)) == nil
 }
-func respond(w http.ResponseWriter, v any, err error) {
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, store.ErrNotFound) {
-			status = http.StatusNotFound
-		} else if errors.Is(err, store.ErrConflict) {
-			status = http.StatusConflict
-		} else if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") {
-			status = http.StatusBadRequest
+func passwordHash(pass string) ([]byte, error) {
+	if len(pass) < 8 || len(pass) > 72 {
+		return nil, fmt.Errorf("请设置 8–72 字节的密码")
+	}
+	return bcrypt.GenerateFromPassword([]byte(pass), 12)
+}
+func (s *Server) ResetPassword(pass string) error {
+	hash, e := passwordHash(pass)
+	if e != nil {
+		return e
+	}
+	tx, e := s.Store.DB.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.Exec(`INSERT INTO admin VALUES(1,?) ON CONFLICT(id) DO UPDATE SET password=excluded.password`, hash); e != nil {
+		return e
+	}
+	if _, e = tx.Exec(`DELETE FROM sessions`); e != nil {
+		return e
+	}
+	return tx.Commit()
+}
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	s.mu.Lock()
+	recent := []time.Time{}
+	for _, t := range s.attempts[host] {
+		if time.Since(t) < time.Minute {
+			recent = append(recent, t)
 		}
-		writeError(w, status, err.Error())
+	}
+	if len(recent) >= 10 {
+		s.mu.Unlock()
+		fail(w, 429, "请稍后再试")
 		return
 	}
-	writeJSON(w, http.StatusOK, v)
-}
-func respondCreated(w http.ResponseWriter, v any, err error) {
-	if err != nil {
-		respond(w, v, err)
+	s.attempts[host] = append(recent, time.Now())
+	s.mu.Unlock()
+	var v struct {
+		Password string `json:"password"`
+		Token    string `json:"token"`
+	}
+	if e := decode(w, r, &v, 4096); e != nil {
+		fail(w, 400, e.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, v)
+	if r.URL.Path == "/api/setup" {
+		if subtle.ConstantTimeCompare([]byte(v.Token), []byte(s.SetupToken)) != 1 {
+			fail(w, 403, "请使用启动窗口中的初始化链接")
+			return
+		}
+		hash, e := passwordHash(v.Password)
+		if e != nil {
+			fail(w, 400, e.Error())
+			return
+		}
+		if _, e = s.Store.DB.Exec(`INSERT INTO admin VALUES(1,?)`, hash); e != nil {
+			fail(w, 409, "管理员已就绪，请登录")
+			return
+		}
+	} else if !s.checkPassword(v.Password) {
+		fail(w, 401, "请重新输入密码")
+		return
+	}
+	s.issueSession(w, r)
 }
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"code": http.StatusText(status), "message": message}})
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request) {
+	token, csrf := Secret(), Secret()
+	_, e := s.Store.DB.Exec(`INSERT INTO sessions VALUES(?,?,?)`, store.Hash([]byte(token)), csrf, time.Now().Add(30*24*time.Hour).Unix())
+	if e != nil {
+		fail(w, 500, "请重新登录")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "pb_session", Value: token, Path: "/", MaxAge: 30 * 86400, HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode})
+	jsonReply(w, 200, map[string]string{"csrf": csrf})
 }
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func (s *Server) attachment(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	st, e := s.Store.Read()
+	if e != nil || st.Project(project) == nil {
+		fail(w, 400, "请选择项目")
+		return
+	}
+	if r.Method == "POST" {
+		r.Body = http.MaxBytesReader(w, r.Body, (20<<20)+(1<<20))
+		if e = r.ParseMultipartForm(1 << 20); e != nil {
+			fail(w, 400, "请选择 20 MB 以内的文件")
+			return
+		}
+		defer r.MultipartForm.RemoveAll()
+		f, h, e := r.FormFile("file")
+		if e != nil {
+			fail(w, 400, "请选择文件")
+			return
+		}
+		defer f.Close()
+		a, e := s.Store.PutAttachment(project, h.Filename, h.Header.Get("Content-Type"), f)
+		if e != nil {
+			fail(w, 400, e.Error())
+		} else {
+			jsonReply(w, 200, a)
+		}
+		return
+	}
+	if r.Method == "GET" {
+		a, b, e := s.Store.Attachment(project, r.URL.Query().Get("id"))
+		if e != nil {
+			fail(w, 404, "请重新选择附件")
+			return
+		}
+		if r.URL.Query().Get("preview") == "1" {
+			v, e := PreviewAttachment(a, b)
+			if e != nil {
+				fail(w, 400, e.Error())
+			} else {
+				jsonReply(w, 200, v)
+			}
+			return
+		}
+		typ := "application/octet-stream"
+		disposition := "attachment"
+		if r.URL.Query().Get("inline") == "1" && domain.In(a.Type, "image/png", "image/jpeg", "image/gif", "image/webp") {
+			typ = a.Type
+			disposition = "inline"
+		}
+		w.Header().Set("Content-Type", typ)
+		w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": a.Name}))
+		w.Write(b)
+		return
+	}
+	fail(w, 405, "请选择附件操作")
+}
+func (s *Server) tokens(w http.ResponseWriter, r *http.Request) {
+	project := r.URL.Query().Get("project")
+	st, e := s.Store.Read()
+	if e != nil || st.Project(project) == nil {
+		fail(w, 400, "请选择项目")
+		return
+	}
+	switch r.Method {
+	case "GET":
+		rows, e := s.Store.DB.Query(`SELECT id,name,created FROM tokens WHERE project=?`, project)
+		if e != nil {
+			fail(w, 500, "请重试读取接入令牌")
+			return
+		}
+		defer rows.Close()
+		out := []map[string]string{}
+		for rows.Next() {
+			var id, name, at string
+			rows.Scan(&id, &name, &at)
+			out = append(out, map[string]string{"id": id, "name": name, "created": at})
+		}
+		jsonReply(w, 200, out)
+	case "POST":
+		var v struct {
+			Name string `json:"name"`
+		}
+		if e := decode(w, r, &v, 4096); e != nil {
+			fail(w, 400, e.Error())
+			return
+		}
+		if strings.TrimSpace(v.Name) == "" {
+			v.Name = "本地客户端"
+		}
+		id, token := domain.ID(), Secret()
+		_, e = s.Store.DB.Exec(`INSERT INTO tokens VALUES(?,?,?,?,?)`, id, project, v.Name, store.Hash([]byte(token)), domain.Now())
+		if e != nil {
+			fail(w, 500, "请重试创建令牌")
+		} else {
+			jsonReply(w, 201, map[string]string{"id": id, "token": token, "project": project})
+		}
+	case "DELETE":
+		_, e = s.Store.DB.Exec(`DELETE FROM tokens WHERE id=? AND project=?`, r.URL.Query().Get("id"), project)
+		if e != nil {
+			fail(w, 500, "请重试撤销令牌")
+		} else {
+			jsonReply(w, 200, map[string]bool{"ok": true})
+		}
+	default:
+		fail(w, 405, "请选择令牌操作")
+	}
+}
+func (s *Server) TokenProject(token string) (string, error) {
+	var project string
+	e := s.Store.DB.QueryRow(`SELECT project FROM tokens WHERE hash=?`, store.Hash([]byte(token))).Scan(&project)
+	if e == sql.ErrNoRows {
+		return "", fmt.Errorf("请使用有效的项目令牌")
+	}
+	return project, e
 }

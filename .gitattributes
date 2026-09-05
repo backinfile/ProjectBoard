@@ -1,0 +1,5 @@
+preview/frozen-20260905.html -text -whitespace
+preview/index.html -whitespace
+web/src/index.html -whitespace
+web/assets/index.html -whitespace
+preview/frozen-20260905.sha256 text eol=lf

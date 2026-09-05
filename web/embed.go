@@ -1,8 +1,11 @@
 package web
 
-import "embed"
+import (
+	"embed"
+	"io/fs"
+)
 
-// Dist contains the production React build.
-//
-//go:embed dist/*
-var Dist embed.FS
+//go:embed assets/*
+var files embed.FS
+
+func Assets() fs.FS { f, _ := fs.Sub(files, "assets"); return f }

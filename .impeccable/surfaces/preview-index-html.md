@@ -1,0 +1,14 @@
+---
+version: 1
+slug: "preview-index-html"
+primary_target: "preview/index.html"
+related_targets: []
+---
+
+# Preview surface
+
+Mode: Operate.
+
+面向本地单管理员项目管理。主要工作是更新任务、按地址读取/编辑知识、按标签管理节点。用户已明确将 Kaneo 指定为框架参考；本次采用其紧凑路径页签栏、窄侧栏和铺满窗口的工作区。
+
+保留已有数据与操作，优先完成 UI 框架替换。桌面知识视图为树、内容、属性三栏。窄屏保持主要工作可操作。AI 范围尚未确定。

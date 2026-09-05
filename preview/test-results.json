@@ -1,0 +1,170 @@
+{
+  "at": "2026-09-05T10:13:39.111Z",
+  "mode": "Node VM functional checks, separate from browser acceptance",
+  "cases": [
+    {
+      "name": "脚本语法、初始数据及所有页面渲染",
+      "status": "PASS"
+    },
+    {
+      "name": "知识地址与祖先路径",
+      "status": "PASS"
+    },
+    {
+      "name": "节点名称与同级唯一约束",
+      "status": "PASS"
+    },
+    {
+      "name": "创建带标签父节点",
+      "status": "PASS"
+    },
+    {
+      "name": "创建子节点且不继承标签",
+      "status": "PASS"
+    },
+    {
+      "name": "从知识节点创建任务并保留引用",
+      "status": "PASS"
+    },
+    {
+      "name": "父节点移动与重命名，后代地址更新且任务引用保持",
+      "status": "PASS"
+    },
+    {
+      "name": "移动目标排除本节点及其后代",
+      "status": "PASS"
+    },
+    {
+      "name": "标签 AND 与 OR 匹配",
+      "status": "PASS"
+    },
+    {
+      "name": "批量添加标签仅影响选择节点",
+      "status": "PASS"
+    },
+    {
+      "name": "批量移除标签保留内容与子节点",
+      "status": "PASS"
+    },
+    {
+      "name": "标签改名与合并去重",
+      "status": "PASS"
+    },
+    {
+      "name": "批量删除预告包含未匹配标签的后代并去重",
+      "status": "PASS"
+    },
+    {
+      "name": "子树恢复保留关系与内容",
+      "status": "PASS"
+    },
+    {
+      "name": "节点内容自动保存与历史恢复",
+      "status": "PASS"
+    },
+    {
+      "name": "节点双向关联与解绑",
+      "status": "PASS"
+    },
+    {
+      "name": "任务状态变更与排序",
+      "status": "PASS"
+    },
+    {
+      "name": "新增自定义状态与删除迁移",
+      "status": "PASS"
+    },
+    {
+      "name": "工作记录写入知识的第二个编辑对话框保持打开",
+      "status": "PASS"
+    },
+    {
+      "name": "任务删除与恢复",
+      "status": "PASS"
+    },
+    {
+      "name": "备份格式、循环层级与重复 ID 校验",
+      "status": "PASS"
+    },
+    {
+      "name": "知识内容与标签安全转义",
+      "status": "PASS"
+    },
+    {
+      "name": "项目标签汇总任务与知识，跨项目同名标签隔离",
+      "status": "PASS"
+    },
+    {
+      "name": "混合选择批量标签更新及越界目标拒绝",
+      "status": "PASS"
+    },
+    {
+      "name": "标签混合删除预告包含任务及未匹配的子节点",
+      "status": "PASS"
+    },
+    {
+      "name": "MCP 演示范围校验、点分定位和标签读写",
+      "status": "PASS"
+    },
+    {
+      "name": "新任务仅标题必填，默认创建状态、其他可选字段为空并进入独立页面",
+      "status": "PASS"
+    },
+    {
+      "name": "逐项字段设置、清空，零进度与空值不同",
+      "status": "PASS"
+    },
+    {
+      "name": "所有任务使用统一字段校验，备份拒绝无效可选字段",
+      "status": "PASS"
+    },
+    {
+      "name": "任务可选检查清单、工作记录和关联任务",
+      "status": "PASS"
+    },
+    {
+      "name": "打开任务、切换全局导航、返回项目不会保留遮罩",
+      "status": "PASS"
+    },
+    {
+      "name": "评论始终可见，旧工作记录显示为评论",
+      "status": "PASS"
+    },
+    {
+      "name": "文字与附件评论发布、回复、编辑和删除恢复",
+      "status": "PASS"
+    },
+    {
+      "name": "空评论不发布，文件内容校验与备份往返",
+      "status": "PASS"
+    },
+    {
+      "name": "时间线展示区间、截止标记和未安排，不写入缺失日期",
+      "status": "PASS"
+    },
+    {
+      "name": "旧状态迁移包含回收站且幂等，创建状态不可删除",
+      "status": "PASS"
+    },
+    {
+      "name": "任务详细固定在评论前，文字与附件独立保存",
+      "status": "PASS"
+    },
+    {
+      "name": "任务详细附件导入校验",
+      "status": "PASS"
+    },
+    {
+      "name": "任务详细默认阅读，编辑后可取消，保存返回阅读",
+      "status": "PASS"
+    },
+    {
+      "name": "多标签页并发修改不会覆盖较新数据",
+      "status": "PASS"
+    },
+    {
+      "name": "HTML 无 CDN、外部脚本与远程字体",
+      "status": "PASS"
+    }
+  ]
+}

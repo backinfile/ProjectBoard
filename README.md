@@ -1,76 +1,96 @@
 # ProjectBoard
 
-ProjectBoard 是一个 Windows 本地 AI 项目管理工具。你可以在浏览器中管理项目和任务，与 Codex Agent 对话，查看执行状态、代码修改和验证结果。
+本地安装、本地使用的项目任务与树状知识管理应用。一个管理员，一个 Go 进程，一个 SQLite 数据目录。
 
-数据默认保存在本机。ProjectBoard 不要求注册账户，也不会保存 API Key，而是使用已有的 Codex CLI 登录状态。
+## 开始使用
 
-## 主要功能
+1. 解压 Windows 发布包，双击 `projectboard.exe`。
+2. 浏览器自动打开初始化页面，设置管理员 `admin` 的密码。
+3. 创建项目，开始安排任务和整理知识。
 
-- 添加本地项目，使用看板或列表管理任务
-- 在任务中与 Codex Agent 对话，并通过 `@Agent名称` 指定 Agent
-- 使用独立 Git worktree 隔离任务和并行修改
-- 审核代码差异、运行结果和危险操作请求
-- 管理项目知识、通知、模板、自动化和审计记录
-- 搜索任务、对话、知识、文件及执行日志
+日常使用直接运行程序。已运行时会打开已有工作空间。关闭浏览器后服务继续运行；在“设置 → 运行信息 → 停止服务”或控制台按 Ctrl+C 停止。
 
-## 使用前准备
+用户机器无需安装 Go、Node.js、Docker、Git 或独立数据库。界面、图标和 Markdown 渲染随程序提供。
 
-- Windows 10 或 Windows 11
-- Git
-- Go 1.24 或更高版本
-- Node.js 20 或更高版本
-- 已安装并登录 Codex CLI，且 `codex app-server --help` 可以正常运行
+## 功能
 
-## 启动
+- 项目创建、设置、归档和恢复；我的工作与项目筛选。
+- 任务看板、列表、月度时间线；独立任务链接、排序、自定义状态。
+- 新任务默认“创建”；其他属性按需添加。任务详细默认阅读，位于评论上方。
+- 评论、回复、检查清单、任务与知识关联；删除与回收站恢复。
+- 任务详细和评论上传附件。图片可缩放；文本可直接阅读；Markdown 支持排版、表格、代码块与源码切换。
+- 内部知识树：每个节点均可有内容和子节点，使用 `技术.开发.启动命令` 这样的地址定位。
+- 知识移动、改名、置顶、关联与版本历史；稳定 ID 保持引用。
+- 项目内共享任务和知识标签；筛选、批量标记、改名、合并、删除。
+- 全局/项目搜索、浅色/深色主题、中文界面。
+- 提醒中心与可选浏览器桌面提醒；完成重复任务后创建后继任务。
+- ZIP 完整备份、恢复前自动备份、预览 JSON 导入、任务 CSV/JSON 与知识树 JSON 导出。
+- 项目独立 MCP 令牌；Streamable HTTP 与 stdio，37 个工具。
 
-在项目目录中运行：
+## 数据和运行参数
 
-```powershell
-npm install
-npm run build
-go run ./cmd/projectboard
-```
+默认地址：`http://127.0.0.1:7331`。
 
-ProjectBoard 默认打开 `http://127.0.0.1:5173`。如果浏览器没有自动打开，请手动访问该地址。
-
-也可以构建为单个可执行文件：
+默认数据目录：Windows `%LOCALAPPDATA%\ProjectBoard`。目录中包含 `projectboard-v2.sqlite`、附件、备份和日志。知识节点由应用管理，无需维护文档文件。
 
 ```powershell
-npm ci
-npm run build
-go build -trimpath -ldflags="-s -w" -o projectboard.exe ./cmd/projectboard
+projectboard.exe --data-dir "D:\ProjectBoard数据"
+projectboard.exe --listen 127.0.0.1:7332
+projectboard.exe --no-browser
+projectboard.exe --version
 ```
 
-然后运行：
+显式开启局域网或 HTTPS：
 
 ```powershell
-.\projectboard.exe
+projectboard.exe --listen 0.0.0.0:7331
+projectboard.exe --listen 0.0.0.0:7331 --host board.local:7331 --tls-cert server.crt --tls-key server.key
 ```
 
-## 基本使用
+管理员密码重设：先停止服务，再运行 `projectboard.exe --reset-password`；使用自定义目录时同时提供 `--data-dir`。密码在控制台隐藏输入。改密和重设都会使旧会话失效。
 
-1. 点击“添加本地项目”，浏览并选择项目目录。
-2. 创建任务，并在任务详情中输入要交给 Agent 的指令。
-3. 使用 `@Agent名称` 指定 Agent；同时指定多个 Agent 时，需要先确认并行计划。
-4. 在修改审核中检查代码差异和验证结果。
-5. 确认修改后再提交、合并，并由用户手动完成任务。
+更新：导出备份 → 停止服务 → 替换程序 → 重新运行。保留数据目录。不同版本数据库文件独立保存，新程序拒绝打开高于自身版本的数据库。
 
-危险命令、额外目录访问和并行 worktree 创建等操作需要用户确认。AI 不会自行完成任务或静默合并代码。
+## 附件与备份
 
-## 本地数据
+单文件 20 MB，每个任务详细或每条评论最多 8 个附件，工作空间附件总容量 256 MB。删除的任务和评论保留附件；永久删除后的闲置附件由后台清理。文本预览支持 UTF-8 / UTF-16，展示前 1 MB，完整文件可下载。PNG、JPEG、GIF、WebP 支持图片预览；SVG/HTML 作为源码或下载内容。
 
-默认数据目录：
+备份包含事务一致的工作空间快照、附件字节、格式版本和 SHA-256 校验清单。管理员密码、会话和 MCP 令牌保留在当前安装中。恢复验证完整性后替换数据，并把当前工作空间备份到 `backups`。ZIP 导入上限 512 MB。
 
-```text
-%LOCALAPPDATA%\ProjectBoard
+此前 HTML 预览的数据可在预览“设置”中导出 JSON，再在正式版“设置”中导入。验收数据和用户工作空间使用独立目录。
+
+## MCP
+
+项目 → MCP → 管理接入令牌 → 创建。令牌绑定该项目并仅显示一次。配置示例、工具字段和调用约定见 [MCP 文档](docs/mcp-design.md)。
+
+```json
+{
+  "mcpServers": {
+    "projectboard": {
+      "url": "http://127.0.0.1:7331/api/mcp",
+      "headers": {
+        "Authorization": "Bearer <项目令牌>",
+        "X-Project-ID": "<项目ID>"
+      }
+    }
+  }
+}
 ```
 
-其中包含数据库、备份、日志和任务 worktree。迁移或重装前，建议备份整个目录。
+stdio 客户端设置环境变量 `PROJECTBOARD_TOKEN`，启动 `projectboard.exe mcp --project <项目ID>`。stdio 连接正在运行的服务，共用工作空间数据。
 
-可通过启动参数修改设置：
+## 开发与验证
+
+开发环境：Go 1.26+、Node.js 22+。前端是已确认设计对应的原生 HTML/CSS/JavaScript，零运行时 JavaScript 依赖。
 
 ```powershell
-.\projectboard.exe --listen 127.0.0.1:5173 --data-dir D:\ProjectBoardData --open=false
+node scripts/build-web.cjs
+go test ./...
+node web/check.cjs
+node preview/check.cjs
+go build -trimpath -ldflags "-s -w" -o dist/projectboard.exe ./cmd/projectboard
 ```
 
-不要轻易将监听地址改为非本机地址。当前版本没有网络访问鉴权，暴露到局域网可能允许其他设备访问项目和执行接口。
+发布：`powershell -ExecutionPolicy Bypass -File scripts/release.ps1`。
+
+实现基准见 [实施记录](docs/implementation.md)，验收见 [正式版验收报告](docs/release-test-report.md)。冻结预览 `preview/frozen-20260905.html` 及 SHA-256 文件保留原方案。
