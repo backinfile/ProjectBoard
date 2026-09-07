@@ -1,7 +1,7 @@
 {
   "name": "projectboard",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "scripts": {
     "build:web": "node scripts/build-web.cjs",
     "check": "node --check web/src/app.js && node web/check.cjs && node preview/check.cjs",
