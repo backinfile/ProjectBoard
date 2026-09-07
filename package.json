@@ -1,1 +1,15 @@
-{"name":"projectboard","private":true,"version":"1.0.0","scripts":{"build:web":"node scripts/build-web.cjs","check":"node --check web/src/app.js && node web/check.cjs && node preview/check.cjs"}}
+{
+  "name": "projectboard",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build:web": "node scripts/build-web.cjs",
+    "check": "node --check web/src/app.js && node web/check.cjs && node preview/check.cjs",
+    "test:all": "node scripts/test-all.cjs",
+    "test:blackbox": "node scripts/blackbox.cjs",
+    "test:browser": "node scripts/browser-test.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

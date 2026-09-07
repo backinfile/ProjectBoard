@@ -6,9 +6,51 @@ import (
 	"path/filepath"
 	"projectboard/internal/domain"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestConcurrentCompareAndSwap(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	st, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, e := s.Update(st.Revision, func(x *domain.State) error { x.Theme = "dark"; return nil })
+			results <- e
+		}()
+	}
+	wg.Wait()
+	close(results)
+	success, conflicts := 0, 0
+	for e := range results {
+		if e == nil {
+			success++
+		} else if errors.Is(e, ErrConflict) {
+			conflicts++
+		} else {
+			t.Fatal(e)
+		}
+	}
+	if success != 1 || conflicts != 15 {
+		t.Fatalf("success=%d conflicts=%d", success, conflicts)
+	}
+	after, err := s.Read()
+	if err != nil || after.Revision != st.Revision+1 || after.Theme != "dark" {
+		t.Fatal("non-atomic commit", err)
+	}
+}
 
 func TestRestartExclusiveDirectoryAndMonotonicNumbers(t *testing.T) {
 	dir := t.TempDir()

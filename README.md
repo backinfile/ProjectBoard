@@ -94,3 +94,14 @@ go build -trimpath -ldflags "-s -w" -o dist/projectboard.exe ./cmd/projectboard
 发布：`powershell -ExecutionPolicy Bypass -File scripts/release.ps1`。
 
 实现基准见 [实施记录](docs/implementation.md)，验收见 [正式版验收报告](docs/release-test-report.md)。冻结预览 `preview/frozen-20260905.html` 及 SHA-256 文件保留原方案。
+
+## 完整本地测试
+
+[功能和逐项黑盒/白盒测试目录](docs/test-catalog.md) · [本地测试执行报告](docs/local-test-report.md)
+
+```powershell
+npm ci
+npm run test:all
+```
+
+需要开发环境及本机 Edge。流水线构建专用程序，在独立数据目录和随机端口执行 HTTP/MCP 与浏览器测试，生成 Go 语句覆盖率、逐条结果、截图和浏览器 trace。输出位于 `test-output/full`，测试结束自动停止专用实例。Playwright 仅用于开发测试，发布程序继续保持单文件运行。
